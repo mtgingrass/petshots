@@ -1,0 +1,31 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# Env
+.env
+.env.*
+!.env.example
+
+# CDK
+**/cdk.out/
+**/cdk.context.json
+
+# Claude Code local config + project context (private)
+CLAUDE.md
+.claude/
+
+# TypeScript build output from infra/
+infra/**/*.js
+infra/**/*.d.ts
+!infra/jest.config.js

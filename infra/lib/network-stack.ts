@@ -26,6 +26,12 @@ export class NetworkStack extends cdk.Stack {
         { name: 'app', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS, cidrMask: 24 },
         { name: 'data', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
       ],
+      // Gateway endpoints are free (no hourly charge). S3 traffic from private
+      // subnets skips the NAT - and AL2023 dnf repos live in S3, so instance
+      // bootstrapping goes private + cheaper.
+      gatewayEndpoints: {
+        S3: { service: ec2.GatewayVpcEndpointAwsService.S3 },
+      },
     });
 
     natProvider.connections.allowFrom(

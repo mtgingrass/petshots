@@ -3,6 +3,8 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Construct } from 'constructs';
 
 export class NetworkStack extends cdk.Stack {
+  public readonly vpc: ec2.Vpc;
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
@@ -14,7 +16,7 @@ export class NetworkStack extends cdk.Stack {
       defaultAllowedTraffic: ec2.NatTrafficDirection.OUTBOUND_ONLY,
     });
 
-    const vpc = new ec2.Vpc(this, 'Vpc', {
+    this.vpc = new ec2.Vpc(this, 'Vpc', {
       ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
       maxAzs: 2,
       natGateways: 1,
@@ -27,7 +29,7 @@ export class NetworkStack extends cdk.Stack {
     });
 
     natProvider.connections.allowFrom(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Peer.ipv4(this.vpc.vpcCidrBlock),
       ec2.Port.allTraffic(),
       'Allow all traffic from inside the VPC',
     );

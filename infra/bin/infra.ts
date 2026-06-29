@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib/core';
 import { NetworkStack } from '../lib/network-stack';
+import { AuthStack } from '../lib/auth-stack';
+import { DataStack } from '../lib/data-stack';
 
 const app = new cdk.App();
 
@@ -9,4 +11,6 @@ const env = {
   region: 'us-east-1',
 };
 
-new NetworkStack(app, 'PetshotsNetworkStack', { env });
+const network = new NetworkStack(app, 'PetshotsNetworkStack', { env });
+new AuthStack(app, 'PetshotsAuthStack', { env });
+new DataStack(app, 'PetshotsDataStack', { env, vpc: network.vpc });

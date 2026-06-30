@@ -73,3 +73,10 @@ export function getSession(): Promise<CognitoUserSession | null> {
     });
   });
 }
+
+// The access token (JWT) for the current session, or null. This is what the
+// API's Cognito authorizer validates; getSession refreshes it if needed.
+export async function getAccessToken(): Promise<string | null> {
+  const session = await getSession();
+  return session ? session.getAccessToken().getJwtToken() : null;
+}

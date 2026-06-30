@@ -103,9 +103,109 @@ h1 {
   padding: 0.3rem;
 }
 
+.btn--danger {
+  color: var(--error);
+  font-weight: 600;
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Transient success toast. */
+.notice {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid #3ddc84;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.error {
+  cursor: pointer;
+}
+
+/* Headline vaccine-status banner. */
+.summary {
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  margin-bottom: 1.25rem;
+  font-weight: 600;
+}
+
+.summary--overdue {
+  border-left-color: #ff5d5d;
+  background: rgba(255, 93, 93, 0.08);
+}
+
+.summary--due-soon {
+  border-left-color: #f4b740;
+  background: rgba(244, 183, 64, 0.08);
+}
+
+.summary--current {
+  border-left-color: #3ddc84;
+  background: rgba(61, 220, 132, 0.08);
+}
+
+.summary--none {
+  border-left-color: var(--subtle);
+  font-weight: 400;
+  color: var(--subtle);
+}
+
+/* Per-document status pill. */
+.status {
+  display: inline-block;
+  vertical-align: middle;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+}
+
+.status--overdue {
+  background: rgba(255, 93, 93, 0.18);
+  color: #ff7b7b;
+}
+
+.status--due-soon {
+  background: rgba(244, 183, 64, 0.18);
+  color: #f4b740;
+}
+
+.status--current {
+  background: rgba(61, 220, 132, 0.18);
+  color: #4fe39a;
+}
+
+.status--none {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--subtle);
+}
+
+/* Inline doc edit form (label + date). */
+.doc-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.doc-edit input {
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #11142a;
+  color: var(--text);
+  font-size: 0.95rem;
 }
 
 .form {
@@ -170,4 +270,139 @@ a {
   flex-direction: column;
   align-items: flex-start;
   gap: 1rem;
+}
+
+.card + .card {
+  margin-top: 1.25rem;
+}
+
+/* Match the text-input styling for the pet/upload form controls. */
+.form select,
+.form input[type='file'] {
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #11142a;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.doc-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.doc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-item:last-child {
+  border-bottom: none;
+}
+
+.doc-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.doc-label {
+  font-weight: 600;
+}
+
+.doc-meta .subtle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Thumbnail: image preview for pictures, an extension badge otherwise. */
+.doc-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #11142a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.doc-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.doc-thumb__ext {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--subtle);
+  letter-spacing: 0.03em;
+}
+
+.card--row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+/* Skeleton loading placeholders. */
+.skeleton {
+  display: block;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #1a1e38 25%, #232850 37%, #1a1e38 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+.skeleton--title {
+  width: 40%;
+  height: 1.4rem;
+}
+
+.skeleton--line {
+  width: 100%;
+  height: 1rem;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/* Mobile: tighten the at-the-door phone view; let doc rows reflow. */
+@media (max-width: 540px) {
+  .page {
+    padding: 1.5rem 1rem;
+  }
+
+  .doc-item {
+    flex-wrap: wrap;
+  }
+
+  .doc-item .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }

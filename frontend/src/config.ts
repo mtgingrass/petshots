@@ -15,4 +15,6 @@ export const config = {
   region: required('VITE_AWS_REGION', import.meta.env.VITE_AWS_REGION),
   userPoolId: required('VITE_COGNITO_USER_POOL_ID', import.meta.env.VITE_COGNITO_USER_POOL_ID),
   clientId: required('VITE_COGNITO_CLIENT_ID', import.meta.env.VITE_COGNITO_CLIENT_ID),
+  // Base URL of PetshotsApiStack's HTTP API (no trailing slash). Not a secret.
+  apiBaseUrl: required('VITE_API_BASE_URL', import.meta.env.VITE_API_BASE_URL),
 };

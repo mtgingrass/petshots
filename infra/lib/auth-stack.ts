@@ -3,6 +3,11 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import { Construct } from 'constructs';
 
 export class AuthStack extends cdk.Stack {
+  // Exposed so other stacks (e.g. ApiStack's JWT authorizer) can reference the
+  // pool/client directly via bin/infra.ts props instead of importing exports.
+  public readonly userPool: cognito.UserPool;
+  public readonly userPoolClient: cognito.UserPoolClient;
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
@@ -24,6 +29,7 @@ export class AuthStack extends cdk.Stack {
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    this.userPool = userPool;
 
     const userPoolClient = userPool.addClient('WebClient', {
       userPoolClientName: 'petshots-web',
@@ -32,6 +38,7 @@ export class AuthStack extends cdk.Stack {
       },
       preventUserExistenceErrors: true,
     });
+    this.userPoolClient = userPoolClient;
 
     new cdk.CfnOutput(this, 'UserPoolId', {
       value: userPool.userPoolId,

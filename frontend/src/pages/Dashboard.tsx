@@ -91,6 +91,11 @@ function quickShowDoc(docs: Doc[]): Doc | undefined {
   return docs.find((d) => /rabies/i.test(d.label)) ?? docs[0];
 }
 
+type EditView =
+  | { type: 'list' }
+  | { type: 'edit'; doc: Doc; petId: string }
+  | { type: 'update'; doc: Doc; petId: string };
+
 export function Dashboard() {
   const { email, logout } = useAuth();
   const navigate = useNavigate();
@@ -103,6 +108,7 @@ export function Dashboard() {
   const [docsLoading, setDocsLoading] = useState(false);
   const [addingPet, setAddingPet] = useState(false);
   const [editingPet, setEditingPet] = useState(false);
+  const [editView, setEditView] = useState<EditView>({ type: 'list' });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -160,6 +166,7 @@ export function Dashboard() {
     setSelectedId(id);
     localStorage.setItem(SELECTED_KEY, id);
     setEditingPet(false);
+    setEditView({ type: 'list' });
     setError(null);
   }
 
@@ -198,6 +205,26 @@ export function Dashboard() {
 
         {pets === null ? (
           <DashboardSkeleton />
+        ) : editView.type !== 'list' ? (
+          editView.type === 'edit' ? (
+            <EditDocScreen
+              petId={editView.petId}
+              doc={editView.doc}
+              onDone={async () => { setEditView({ type: 'list' }); await refreshDocs(); }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          ) : (
+            <UpdateDocScreen
+              petId={editView.petId}
+              doc={editView.doc}
+              onDone={async () => { setEditView({ type: 'list' }); await refreshDocs(); }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          )
         ) : pets.length === 0 ? (
           <section className="card">
             <div className="empty-state">
@@ -296,6 +323,8 @@ export function Dashboard() {
                       onChanged={refreshDocs}
                       onError={setError}
                       onNotice={showNotice}
+                      onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: selectedPet.id })}
+                      onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: selectedPet.id })}
                     />
                   </>
                 )}
@@ -572,20 +601,22 @@ function DocsSection({
   onChanged,
   onError,
   onNotice,
+  onEditDoc,
+  onUpdateDoc,
 }: {
   petId: string;
   docs: Doc[];
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
+  onEditDoc: (doc: Doc) => void;
+  onUpdateDoc: (doc: Doc) => void;
 }) {
   const [showUpload, setShowUpload] = useState(false);
   const [label, setLabel] = useState('');
   const [expiry, setExpiry] = useState('');
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [editingDoc, setEditingDoc] = useState<Doc | null>(null);
-  const [updatingDoc, setUpdatingDoc] = useState<Doc | null>(null);
   const atLimit = docs.length >= MAX_DOCS;
 
   async function handleUpload(e: FormEvent) {
@@ -640,18 +671,8 @@ function DocsSection({
               key={doc.id}
               petId={petId}
               doc={doc}
-              isEditing={editingDoc?.id === doc.id}
-              isUpdating={updatingDoc?.id === doc.id}
-              onEdit={() => {
-                setUpdatingDoc(null);
-                setEditingDoc(doc);
-                setShowUpload(false);
-              }}
-              onUpdate={() => {
-                setEditingDoc(null);
-                setUpdatingDoc(doc);
-                setShowUpload(false);
-              }}
+              onEdit={() => { setShowUpload(false); onEditDoc(doc); }}
+              onUpdate={() => { setShowUpload(false); onUpdateDoc(doc); }}
               onChanged={onChanged}
               onError={onError}
               onNotice={onNotice}
@@ -660,36 +681,7 @@ function DocsSection({
         </ul>
       )}
 
-      {editingDoc && (
-        <EditDocForm
-          petId={petId}
-          doc={editingDoc}
-          onDone={async () => {
-            setEditingDoc(null);
-            await onChanged();
-          }}
-          onCancel={() => setEditingDoc(null)}
-          onError={onError}
-          onNotice={onNotice}
-        />
-      )}
-
-      {updatingDoc && (
-        <UpdateDocForm
-          petId={petId}
-          doc={updatingDoc}
-          onDone={async () => {
-            setUpdatingDoc(null);
-            await onChanged();
-          }}
-          onCancel={() => setUpdatingDoc(null)}
-          onError={onError}
-          onNotice={onNotice}
-        />
-      )}
-
-      {!editingDoc && !updatingDoc && (
-        atLimit ? (
+      {atLimit ? (
           <p className="subtle">
             You've reached the {MAX_DOCS}-document limit. Delete one to add another.
           </p>
@@ -726,7 +718,7 @@ function DocsSection({
             + Add record
           </button>
         )
-      )}
+      }
     </section>
   );
 }
@@ -734,8 +726,6 @@ function DocsSection({
 function DocItem({
   petId,
   doc,
-  isEditing,
-  isUpdating,
   onEdit,
   onUpdate,
   onChanged,
@@ -744,8 +734,6 @@ function DocItem({
 }: {
   petId: string;
   doc: Doc;
-  isEditing: boolean;
-  isUpdating: boolean;
   onEdit: () => void;
   onUpdate: () => void;
   onChanged: () => Promise<void>;
@@ -800,7 +788,7 @@ function DocItem({
   }
 
   return (
-    <li className={`doc-item${isEditing || isUpdating ? ' doc-item--active' : ''}`}>
+    <li className="doc-item">
       {/* The whole row opens the document - the core at-the-door interaction. */}
       <a className="doc-main" href={doc.url} target="_blank" rel="noopener noreferrer">
         <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
@@ -869,7 +857,7 @@ function DocItem({
   );
 }
 
-function EditDocForm({
+function EditDocScreen({
   petId,
   doc,
   onDone,
@@ -906,34 +894,45 @@ function EditDocForm({
   }
 
   return (
-    <div className="doc-form-panel">
-      <p className="doc-form-panel__title">Editing: {doc.label}</p>
-      <form className="doc-edit" onSubmit={handleSave}>
-        <input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          autoFocus
-          aria-label="Document label"
-          placeholder="Label"
-        />
-        <input
-          type="date"
-          value={expiry}
-          onChange={(e) => setExpiry(e.target.value)}
-          aria-label="Expiration date"
-        />
-        <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
-          {busy ? 'Saving…' : 'Save'}
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
+          ← Records
         </button>
-        <button className="btn" type="button" onClick={onCancel} disabled={busy}>
-          Cancel
-        </button>
+        <span className="screen-nav__title">Edit Record</span>
+      </nav>
+      <form className="form" onSubmit={handleSave}>
+        <label>
+          Label
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            autoFocus
+            required
+          />
+        </label>
+        <label>
+          Expiration date (optional)
+          <input
+            type="date"
+            value={expiry}
+            onChange={(e) => setExpiry(e.target.value)}
+          />
+        </label>
+        <div className="actions">
+          <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        </div>
       </form>
     </div>
   );
 }
 
-function UpdateDocForm({
+function UpdateDocScreen({
   petId,
   doc,
   onDone,
@@ -979,32 +978,40 @@ function UpdateDocForm({
   }
 
   return (
-    <div className="doc-form-panel">
-      <p className="doc-form-panel__title">New version of: {doc.label}</p>
-      <form className="doc-edit doc-edit--col" onSubmit={handleUpdate}>
-        <div className="doc-edit__row">
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
+          ← Records
+        </button>
+        <span className="screen-nav__title">Update Record</span>
+      </nav>
+      <form className="form" onSubmit={handleUpdate}>
+        <label>
+          Label
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="Label"
-            aria-label="Document label"
             autoFocus
           />
+        </label>
+        <label>
+          Expiration date (optional)
           <input
             type="date"
             value={expiry}
             onChange={(e) => setExpiry(e.target.value)}
-            aria-label="New expiration date"
           />
-        </div>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".pdf,.jpg,.jpeg,.png"
-          required
-          aria-label="New document file"
-        />
-        <div className="doc-edit__row">
+        </label>
+        <label>
+          New file (PDF, JPG, PNG · max 10 MB)
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png"
+            required
+          />
+        </label>
+        <div className="actions">
           <button className="btn btn--primary" type="submit" disabled={busy}>
             {busy ? 'Uploading…' : 'Upload new version'}
           </button>

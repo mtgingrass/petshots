@@ -544,37 +544,41 @@ a {
   border-color: var(--primary);
 }
 
-/* Inline doc edit form (label + date). */
-.doc-edit {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  padding: 0.85rem 0.25rem;
-  width: 100%;
-}
-
-.doc-edit input {
-  padding: 0.5rem 0.6rem;
-  border-radius: 8px;
+/* iOS-style full-screen edit view. */
+.screen-view {
+  background: var(--panel);
+  border-radius: var(--radius);
   border: 1px solid var(--border);
-  background: #11142a;
-  color: var(--text);
-  font-size: 1rem;
-  min-height: 40px;
-  max-width: 100%;
+  overflow: hidden;
 }
 
-.doc-edit--col {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.doc-edit__row {
+.screen-nav {
   display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
   align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  min-height: 48px;
+}
+
+.screen-nav__back {
+  font-size: 0.95rem;
+  padding: 0.25rem 0;
+  z-index: 1;
+}
+
+.screen-nav__title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-weight: 600;
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+
+.screen-view .form {
+  padding: 1.25rem 1rem;
+  max-width: none;
 }
 
 /* ---------- Dashboard ---------- */
@@ -730,27 +734,6 @@ a {
   font-size: 0.85rem;
 }
 
-/* Dim a row while its edit/update form is open below the list. */
-.doc-item--active {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-/* Edit / Update form panel — appears below the list, not inside it. */
-.doc-form-panel {
-  width: 100%;
-  border-top: 1px solid var(--border);
-  padding-top: 0.85rem;
-}
-
-.doc-form-panel__title {
-  font-size: 0.8rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--subtle);
-  margin: 0 0 0.6rem;
-}
 
 /* ⋯ options button + its popover menu. */
 .doc-menu-wrap {

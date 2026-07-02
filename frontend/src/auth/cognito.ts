@@ -17,13 +17,26 @@ export const userPool = new CognitoUserPool({
 });
 
 // Register a new user. Cognito emails them a verification code (auto-verify is on).
-export function signUp(email: string, password: string): Promise<ISignUpResult> {
+// The Turnstile token is passed as clientMetadata, which the PreSignUp Lambda
+// trigger reads and verifies with Cloudflare before allowing the signup.
+export function signUp(
+  email: string,
+  password: string,
+  captchaToken: string,
+): Promise<ISignUpResult> {
   return new Promise((resolve, reject) => {
     const attributes = [new CognitoUserAttribute({ Name: 'email', Value: email })];
-    userPool.signUp(email, password, attributes, [], (err, result) => {
-      if (err || !result) return reject(err ?? new Error('signUp returned no result'));
-      resolve(result);
-    });
+    userPool.signUp(
+      email,
+      password,
+      attributes,
+      [],
+      (err, result) => {
+        if (err || !result) return reject(err ?? new Error('signUp returned no result'));
+        resolve(result);
+      },
+      { turnstileToken: captchaToken },
+    );
   });
 }
 

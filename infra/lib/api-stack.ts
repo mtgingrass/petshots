@@ -35,7 +35,13 @@ export class ApiStack extends cdk.Stack {
       autoDeleteObjects: true, // dev only - empties bucket on stack delete
       cors: [
         {
-          allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+          // POST: browser uploads now use a presigned POST policy (size-limited).
+          allowedMethods: [
+            s3.HttpMethods.POST,
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.GET,
+            s3.HttpMethods.HEAD,
+          ],
           allowedOrigins: ORIGINS,
           allowedHeaders: ['*'],
           exposedHeaders: ['ETag'],
@@ -56,6 +62,7 @@ export class ApiStack extends cdk.Stack {
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
         MAX_DOCS: '4',
+        MAX_FILE_BYTES: String(10 * 1024 * 1024), // 10 MB - enforced by the POST policy
       },
       bundling: {
         externalModules: [],

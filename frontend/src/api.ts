@@ -65,13 +65,14 @@ export function deleteDoc(id: string): Promise<void> {
   return request('DELETE', `/docs/${id}`);
 }
 
-// Two-step upload: ask the API for a presigned PUT URL, then send the bytes
-// straight to S3 with exactly the headers the API signed.
+// Two-step upload: ask the API for a presigned POST policy, then send the file
+// straight to S3 as multipart/form-data. S3 enforces the policy's size limit
+// (content-length-range), so an oversized file is rejected server-side.
 export async function uploadDoc(file: File, label: string, expiry?: string): Promise<void> {
-  const { uploadUrl, requiredHeaders } = await request<{
-    uploadUrl: string;
+  const { url, fields } = await request<{
+    url: string;
+    fields: Record<string, string>;
     key: string;
-    requiredHeaders: Record<string, string>;
   }>('POST', '/docs/upload-url', {
     filename: file.name,
     label,
@@ -79,10 +80,15 @@ export async function uploadDoc(file: File, label: string, expiry?: string): Pro
     contentType: file.type || 'application/octet-stream',
   });
 
-  const put = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: requiredHeaders,
-    body: file,
-  });
-  if (!put.ok) throw new Error(`Upload to storage failed (${put.status})`);
+  // Every signed field first, then the file LAST - S3 ignores form fields that
+  // appear after the file part. Don't set Content-Type; the browser adds the
+  // multipart boundary itself.
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) form.append(k, v);
+  form.append('file', file);
+
+  const res = await fetch(url, { method: 'POST', body: form });
+  // S3 returns 204 on success; a 403 here usually means the file exceeded the
+  // policy's size limit.
+  if (!res.ok) throw new Error(`Upload to storage failed (${res.status})`);
 }

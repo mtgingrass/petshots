@@ -7,6 +7,7 @@ import {
   CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { randomUUID } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -26,6 +27,7 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.UPLOADS_BUCKET!;
 const MAX_DOCS = Number(process.env.MAX_DOCS ?? '4');
+const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
 
 const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
   statusCode,
@@ -155,24 +157,26 @@ export const handler = async (
 
         const docId = randomUUID();
         // Label is encoded into the key (own path segment) rather than stored as
-        // x-amz-meta-* - that keeps the browser PUT free of x-amz-* headers, which
-        // the presigner won't reliably sign and S3 then rejects. Fall back to the
-        // filename if no label was given (avoids an empty key segment).
+        // x-amz-meta-*. Fall back to the filename if no label was given (avoids an
+        // empty key segment).
         const safeLabel = label || filename;
         const key = `${docsPrefix}${docId}/${encodeMeta({ label: safeLabel, expiry })}/${filename}`;
-        // Only content-type is signed; the browser must send it exactly, so we echo
-        // it back as requiredHeaders. content-type is a standard header, not x-amz-*,
-        // so this signs cleanly.
-        const uploadUrl = await getSignedUrl(
-          s3,
-          new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
-          { expiresIn: 300, signableHeaders: new Set(['content-type']) },
-        );
-        return json(200, {
-          uploadUrl,
-          key,
-          requiredHeaders: { 'content-type': contentType },
+
+        // Presigned POST (not PUT): the signed policy carries conditions that S3
+        // enforces itself. content-length-range rejects an oversized upload
+        // server-side, so the browser's size check is no longer the only guard.
+        // The client posts these `fields` (file LAST) as multipart/form-data.
+        const { url, fields } = await createPresignedPost(s3, {
+          Bucket: BUCKET,
+          Key: key,
+          Conditions: [
+            ['content-length-range', 1, MAX_FILE_BYTES],
+            ['eq', '$Content-Type', contentType],
+          ],
+          Fields: { 'Content-Type': contentType },
+          Expires: 300,
         });
+        return json(200, { url, fields, key });
       }
 
       case 'PATCH /docs/{id}': {

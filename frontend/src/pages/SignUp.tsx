@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signUp, confirmSignUp, resendConfirmationCode } from '../auth/cognito';
+import { Turnstile } from '../components/Turnstile';
 
 export function SignUp() {
   const navigate = useNavigate();
@@ -10,6 +11,8 @@ export function SignUp() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
+  const [captchaToken, setCaptchaToken] = useState('');
+  const [captchaKey, setCaptchaKey] = useState(0); // bump to remount the widget
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -18,10 +21,13 @@ export function SignUp() {
     setError(null);
     setBusy(true);
     try {
-      await signUp(email, password);
+      await signUp(email, password, captchaToken);
       setPhase('confirm');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign-up failed');
+      // Turnstile tokens are single-use - reset the widget for another attempt.
+      setCaptchaToken('');
+      setCaptchaKey((k) => k + 1);
     } finally {
       setBusy(false);
     }
@@ -72,7 +78,8 @@ export function SignUp() {
           <p className="subtle">
             8+ characters with upper, lower, number, and symbol.
           </p>
-          <button className="btn btn--primary" type="submit" disabled={busy}>
+          <Turnstile key={captchaKey} onToken={setCaptchaToken} />
+          <button className="btn btn--primary" type="submit" disabled={busy || !captchaToken}>
             {busy ? 'Creating…' : 'Sign up'}
           </button>
         </form>

@@ -70,28 +70,21 @@ async function api(token, method, path, body) {
 }
 
 // upload-url -> direct S3 PUT
-async function uploadDoc(token, label) {
+async function uploadDoc(token, label, bytes = PDF) {
   const presign = await api(token, 'POST', '/docs/upload-url', {
     filename: `${label.replace(/\s/g, '_')}.pdf`,
     label,
     contentType: 'application/pdf',
   });
   if (presign.status !== 200) return presign;
-  const put = await fetch(presign.body.uploadUrl, {
-    method: 'PUT',
-    headers: presign.body.requiredHeaders,
-    body: PDF,
-  });
+  // Presigned POST policy: append every signed field, then the file last.
+  const form = new FormData();
+  for (const [k, v] of Object.entries(presign.body.fields)) form.append(k, v);
+  form.append('file', new Blob([bytes], { type: 'application/pdf' }));
+  const res = await fetch(presign.body.url, { method: 'POST', body: form });
   let putBody = '';
-  if (put.status !== 200) putBody = await put.text();
-  return {
-    status: presign.status,
-    putStatus: put.status,
-    key: presign.body.key,
-    putBody,
-    signedHeaders: new URL(presign.body.uploadUrl).searchParams.get('X-Amz-SignedHeaders'),
-    sentHeaders: presign.body.requiredHeaders,
-  };
+  if (res.status !== 204) putBody = await res.text();
+  return { status: presign.status, putStatus: res.status, key: presign.body.key, putBody };
 }
 
 async function main() {
@@ -114,15 +107,17 @@ async function main() {
   r = await api(token, 'GET', '/pet');
   check(r.status === 200 && r.body.pet?.name === 'Rex', 'pet persisted');
 
-  console.log('\n[4] upload doc #1 (presign -> S3 PUT)');
+  console.log('\n[4] upload doc #1 (presigned POST policy -> S3)');
   let u = await uploadDoc(token, 'Rabies 2026');
-  check(u.status === 200 && u.putStatus === 200, `presign 200, S3 PUT ${u.putStatus}`);
-  if (u.putStatus !== 200) {
-    console.log('    --- S3 PUT diagnostics ---');
-    console.log('    SignedHeaders:', u.signedHeaders);
-    console.log('    sent headers :', JSON.stringify(u.sentHeaders));
-    console.log('    S3 response  :', u.putBody?.replace(/\s+/g, ' ').slice(0, 600));
+  check(u.status === 200 && u.putStatus === 204, `presign 200, S3 POST ${u.putStatus}`);
+  if (u.putStatus !== 204) {
+    console.log('    S3 response:', u.putBody?.replace(/\s+/g, ' ').slice(0, 600));
   }
+
+  console.log('\n[4b] oversized upload (11 MB) is rejected by the size policy');
+  const big = Buffer.alloc(11 * 1024 * 1024, 0x20);
+  let bigUp = await uploadDoc(token, 'Too Big', big);
+  check(bigUp.putStatus >= 400, `11 MB upload rejected server-side (got ${bigUp.putStatus})`);
 
   console.log('\n[5] GET /docs shows it with label + url');
   r = await api(token, 'GET', '/docs');

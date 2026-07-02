@@ -213,8 +213,10 @@ export const handler = async (
         const list = await s3.send(
           new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
         );
+        // Archived versions live under …/docs/{id}/_archived/… — exclude them
+        // from the listing so only the current version of each record shows.
         const docs = await Promise.all(
-          (list.Contents ?? []).map(async (it) => {
+          (list.Contents ?? []).filter((it) => !it.Key!.includes('/_archived/')).map(async (it) => {
             const key = it.Key!;
             // key shape: users/{sub}/pets/{petId}/docs/{docId}/{encodeMeta}/{filename}
             // Label lives in the key (not S3 metadata) so the browser upload carries
@@ -253,10 +255,15 @@ export const handler = async (
         if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
 
         // Enforce the per-pet limit before handing out an upload URL.
+        // Count only current (non-archived) docs so archived versions don't
+        // inflate the count and block uploads.
         const list = await s3.send(
           new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
         );
-        if ((list.KeyCount ?? 0) >= MAX_DOCS) {
+        const currentDocs = (list.Contents ?? []).filter(
+          (it) => !it.Key!.includes('/_archived/'),
+        );
+        if (currentDocs.length >= MAX_DOCS) {
           return json(409, { error: `limit of ${MAX_DOCS} documents reached` });
         }
 
@@ -297,7 +304,8 @@ export const handler = async (
 
         const prefix = `${docsPrefix}${id}/`;
         const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }));
-        const oldKey = list.Contents?.[0]?.Key;
+        // Skip archived versions — rename applies only to the current file.
+        const oldKey = list.Contents?.find((it) => !it.Key!.includes('/_archived/'))?.Key;
         if (!oldKey) return json(404, { error: 'not found' });
 
         const filename = oldKey.split('/').slice(7).join('/');
@@ -312,11 +320,62 @@ export const handler = async (
         return json(200, { ok: true });
       }
 
+      case 'POST /pets/{petId}/docs/{id}/update-url': {
+        // "Update" = renew the cert. Archives the current file under a versioned
+        // sub-key so the history is preserved, then returns a presigned POST for
+        // the new upload. The docId stays the same, preserving the record's slot
+        // in the list.
+        const id = event.pathParameters?.id;
+        if (!id) return json(400, { error: 'id required' });
+        const input = JSON.parse(event.body ?? '{}');
+        const filename = String(input.filename ?? '')
+          .replace(/[^\w.\- ]/g, '_')
+          .slice(0, 200);
+        const label = String(input.label ?? '').slice(0, 200);
+        const expiry = cleanExpiry(input.expiry);
+        const contentType = String(input.contentType ?? 'application/octet-stream');
+        if (!filename) return json(400, { error: 'filename required' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+
+        const prefix = `${docsPrefix}${id}/`;
+        const existing = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }),
+        );
+        const currentKey = existing.Contents?.find(
+          (it) => !it.Key!.includes('/_archived/'),
+        )?.Key;
+        if (!currentKey) return json(404, { error: 'document not found' });
+
+        // Copy current -> _archived/{timestamp}/… before presigning the new slot.
+        // The old file is preserved even if the upload never completes.
+        const archiveKey = `${prefix}_archived/${Date.now()}/${currentKey.slice(prefix.length)}`;
+        const copySource = `${BUCKET}/${encodeURIComponent(currentKey).replace(/%2F/g, '/')}`;
+        await s3.send(
+          new CopyObjectCommand({ Bucket: BUCKET, Key: archiveKey, CopySource: copySource }),
+        );
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: currentKey }));
+
+        const safeLabel = label || filename;
+        const newKey = `${prefix}${encodeMeta({ label: safeLabel, expiry })}/${filename}`;
+        const { url, fields } = await createPresignedPost(s3, {
+          Bucket: BUCKET,
+          Key: newKey,
+          Conditions: [
+            ['content-length-range', 1, MAX_FILE_BYTES],
+            ['eq', '$Content-Type', contentType],
+          ],
+          Fields: { 'Content-Type': contentType },
+          Expires: 300,
+        });
+        return json(200, { url, fields, key: newKey });
+      }
+
       case 'DELETE /pets/{petId}/docs/{id}': {
         const id = event.pathParameters?.id;
         if (!id) return json(400, { error: 'id required' });
         const prefix = `${docsPrefix}${id}/`;
         const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }));
+        // Deletes everything under the prefix: current file + all archived versions.
         await Promise.all(
           (list.Contents ?? []).map((it) =>
             s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),

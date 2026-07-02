@@ -565,6 +565,18 @@ a {
   max-width: 100%;
 }
 
+.doc-edit--col {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.doc-edit__row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 /* ---------- Dashboard ---------- */
 
 .dashboard-header {

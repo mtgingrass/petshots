@@ -1,10 +1,14 @@
-import { Link } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { SiteHeader } from '../components/SiteHeader';
 import { SiteFooter } from '../components/SiteFooter';
 
 export function Landing() {
   const { email } = useAuth();
+
+  // Logged-in users have no reason to see the marketing page — drop them straight
+  // to their dashboard.
+  if (email) return <Navigate to="/dashboard" replace />;
 
   return (
     <>
@@ -25,20 +29,12 @@ export function Landing() {
             your vet. Petshots keeps it one tap away.
           </p>
           <div className="actions">
-            {email ? (
-              <Link className="btn btn--primary btn--lg" to="/dashboard">
-                Go to your dashboard
-              </Link>
-            ) : (
-              <>
-                <Link className="btn btn--primary btn--lg" to="/signup">
-                  Get started — it's free
-                </Link>
-                <Link className="btn btn--lg" to="/login">
-                  Log in
-                </Link>
-              </>
-            )}
+            <Link className="btn btn--primary btn--lg" to="/signup">
+              Get started — it's free
+            </Link>
+            <Link className="btn btn--lg" to="/login">
+              Log in
+            </Link>
           </div>
         </section>
 

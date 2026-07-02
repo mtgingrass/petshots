@@ -165,6 +165,22 @@ async function main() {
   let renGet = renamed ? (await fetch(renamed.url)).status : 0;
   check(renGet === 200, `renamed doc still downloads (${renGet})`);
 
+  console.log('\n[5c] POST /docs/{id}/update-url archives current + presigns new version');
+  let upd = await api(token, 'POST', `/pets/${petId}/docs/${renamed.id}/update-url`, {
+    filename: 'Rabies_2028.pdf',
+    label: 'Rabies 2028',
+    contentType: 'application/pdf',
+  });
+  check(upd.status === 200, `update-url returns 200 (got ${upd.status})`);
+  const updPut = await postPolicy(upd.body, PDF, 'application/pdf');
+  check(updPut === 204, `new version S3 POST 204 (got ${updPut})`);
+  r = await api(token, 'GET', `/pets/${petId}/docs`);
+  const updDoc = r.body.docs?.[0];
+  check(r.body.docs.length === 1, 'still one doc after update (archive not counted)');
+  check(updDoc?.label === 'Rabies 2028', 'label updated to new version');
+  let updGet = updDoc ? (await fetch(updDoc.url)).status : 0;
+  check(updGet === 200, `new version downloads (${updGet})`);
+
   console.log('\n[6] fill to doc limit (4) then expect 409 on the 5th');
   await uploadDoc(token, petId, 'Doc 2');
   await uploadDoc(token, petId, 'Doc 3');

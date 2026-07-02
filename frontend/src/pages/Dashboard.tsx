@@ -10,6 +10,7 @@ import {
   listDocs,
   uploadDoc,
   updateDoc,
+  updateDocVersion,
   deleteDoc,
   MAX_PETS,
   MAX_DOCS,
@@ -700,12 +701,16 @@ function DocItem({
   onNotice: (msg: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [label, setLabel] = useState(doc.label);
   const [expiry, setExpiry] = useState(doc.expiry ?? '');
+  const [updateLabel, setUpdateLabel] = useState(doc.label);
+  const [updateExpiry, setUpdateExpiry] = useState(doc.expiry ?? '');
   const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const updateFileRef = useRef<HTMLInputElement>(null);
   const status = statusOf(doc.expiry);
 
   // Close the ⋯ menu on outside click or Escape.
@@ -765,6 +770,76 @@ function DocItem({
       setConfirming(false);
     }
     // On success the row unmounts after onChanged(), so no state reset needed.
+  }
+
+  async function handleUpdate(e: FormEvent) {
+    e.preventDefault();
+    const file = updateFileRef.current?.files?.[0];
+    if (!file) return;
+    if (!ALLOWED_EXTS.includes(extOf(file.name))) {
+      onError('Please choose a PDF, JPG, or PNG file.');
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      onError(`That file is ${formatSize(file.size)} — the limit is 10 MB.`);
+      return;
+    }
+    setBusy(true);
+    onError(null);
+    try {
+      await updateDocVersion(petId, doc.id, file, updateLabel.trim() || file.name, updateExpiry || undefined);
+      await onChanged();
+      setUpdating(false);
+      onNotice('Record updated — previous version archived');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Update failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (updating) {
+    return (
+      <li className="doc-item">
+        <form className="doc-edit doc-edit--col" onSubmit={handleUpdate}>
+          <div className="doc-edit__row">
+            <input
+              value={updateLabel}
+              onChange={(e) => setUpdateLabel(e.target.value)}
+              placeholder="Label"
+              aria-label="Document label"
+              autoFocus
+            />
+            <input
+              type="date"
+              value={updateExpiry}
+              onChange={(e) => setUpdateExpiry(e.target.value)}
+              aria-label="New expiration date"
+            />
+          </div>
+          <input
+            ref={updateFileRef}
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png"
+            required
+            aria-label="New document file"
+          />
+          <div className="doc-edit__row">
+            <button className="btn btn--link" type="submit" disabled={busy}>
+              {busy ? 'Uploading…' : 'Upload new version'}
+            </button>
+            <button
+              className="btn btn--link"
+              type="button"
+              onClick={() => setUpdating(false)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </li>
+    );
   }
 
   if (editing) {
@@ -839,10 +914,23 @@ function DocItem({
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
+                setUpdating(false);
                 setEditing(true);
               }}
             >
-              Edit
+              Edit label / date
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                setEditing(false);
+                setUpdateLabel(doc.label);
+                setUpdateExpiry(doc.expiry ?? '');
+                setUpdating(true);
+              }}
+            >
+              Update record
             </button>
             {confirming ? (
               <button role="menuitem" className="doc-menu__danger" onClick={handleDelete}>

@@ -111,6 +111,7 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.GET, '/pets/{petId}/docs'],
       [HttpMethod.POST, '/pets/{petId}/docs/upload-url'],
       [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
+      [HttpMethod.POST, '/pets/{petId}/docs/{id}/update-url'],
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
     ];
     for (const [method, routePath] of routes) {

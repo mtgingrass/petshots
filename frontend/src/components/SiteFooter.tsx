@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { AffiliateLinks } from './AffiliateLinks';
 
 // Set to your Ko-fi URL (e.g. 'https://ko-fi.com/yourname') to show the donation line.
-const DONATION_URL = '';
+const DONATION_URL = 'https://ko-fi.com/markgingrass';
 
 export function SiteFooter() {
   return (

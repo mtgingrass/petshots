@@ -152,6 +152,14 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [pendingDelete, setPendingDelete] = useState<{
+    pet: Pet;
+    docs: Doc[];
+    timerId: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  // Keep a ref so the unmount cleanup can read current value without a stale closure.
+  const pendingDeleteRef = useRef(pendingDelete);
+  pendingDeleteRef.current = pendingDelete;
 
   const showNotice = useCallback((msg: string) => {
     setNotice(msg);
@@ -159,6 +167,17 @@ export function Dashboard() {
     noticeTimer.current = setTimeout(() => setNotice(null), 3000);
   }, []);
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
+
+  // On unmount, commit any pending delete immediately so nothing leaks.
+  useEffect(() => {
+    return () => {
+      const pd = pendingDeleteRef.current;
+      if (pd) {
+        clearTimeout(pd.timerId);
+        void deletePet(pd.pet.id);
+      }
+    };
+  }, []);
 
   // Pet currently being viewed in detail/edit-pet screens.
   const detailPet =
@@ -233,13 +252,58 @@ export function Dashboard() {
     setEditView({ type: 'list' });
   }
 
+  function handleDeletePetWithUndo(petId: string) {
+    if (!pets) return;
+    const pet = pets.find((p) => p.id === petId);
+    if (!pet) return;
+    const docs = allDocs[petId] ?? [];
+
+    // Commit any previously pending delete before starting a new one.
+    if (pendingDelete) {
+      clearTimeout(pendingDelete.timerId);
+      void deletePet(pendingDelete.pet.id).catch(() => {});
+    }
+
+    // Optimistically remove pet from local state and navigate away.
+    setPets((prev) => (prev ?? []).filter((p) => p.id !== petId));
+    setAllDocs((prev) => { const n = { ...prev }; delete n[petId]; return n; });
+    backToOverview();
+
+    const timerId = setTimeout(async () => {
+      setPendingDelete(null);
+      try {
+        await deletePet(petId);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Delete failed — restoring your pet');
+        void loadPets();
+      }
+    }, 10000);
+
+    setPendingDelete({ pet, docs, timerId });
+  }
+
+  function handleUndoDelete() {
+    if (!pendingDelete) return;
+    clearTimeout(pendingDelete.timerId);
+    setPets((prev) =>
+      [...(prev ?? []), pendingDelete.pet].sort((a, b) => a.name.localeCompare(b.name)),
+    );
+    setAllDocs((prev) => ({ ...prev, [pendingDelete.pet.id]: pendingDelete.docs }));
+    showNotice(`${pendingDelete.pet.name} restored`);
+    setPendingDelete(null);
+  }
+
   return (
     <>
       <main className="page">
         <header className="dashboard-header">
-          <Link className="wordmark" to="/">
-            🐾 Petshots
-          </Link>
+          {dashView.type === 'overview' ? (
+            <Link className="wordmark" to="/">🐾 Petshots</Link>
+          ) : (
+            <button className="btn btn--link dashboard-header__back" onClick={backToOverview}>
+              ← Dashboard
+            </button>
+          )}
           <div className="dashboard-user">
             <span className="subtle">{email}</span>
             <button className="btn" onClick={handleLogout}>
@@ -248,6 +312,12 @@ export function Dashboard() {
           </div>
         </header>
 
+        {pendingDelete && (
+          <div className="undo-notice" role="status">
+            <span>{pendingDelete.pet.name} deleted.</span>
+            <button className="btn btn--link" onClick={handleUndoDelete}>Undo</button>
+          </div>
+        )}
         {notice && <p className="notice" role="status">{notice}</p>}
         {error && (
           <p className="error" role="alert" onClick={() => setError(null)} title="Dismiss">
@@ -303,10 +373,7 @@ export function Dashboard() {
                   setDashView({ type: 'detail', petId: detailPet.id });
                 }}
                 onCancel={() => setDashView({ type: 'detail', petId: detailPet.id })}
-                onDeleted={async () => {
-                  await loadPets();
-                  backToOverview();
-                }}
+                onDeletePet={handleDeletePetWithUndo}
                 onError={setError}
                 onNotice={showNotice}
               />
@@ -494,7 +561,7 @@ function PetForm({
   submitLabel,
   onDone,
   onCancel,
-  onDeleted,
+  onDeletePet,
   onError,
   onNotice,
 }: {
@@ -502,14 +569,13 @@ function PetForm({
   submitLabel: string;
   onDone: (pet?: Pet) => Promise<void>;
   onCancel?: () => void;
-  onDeleted?: () => Promise<void>;
+  onDeletePet?: (petId: string) => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
   const [name, setName] = useState(pet?.name ?? '');
   const [species, setSpecies] = useState(pet?.species ?? 'dog');
   const [busy, setBusy] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const photoRef = useRef<HTMLInputElement>(null);
 
   async function handleSubmit(e: FormEvent) {
@@ -541,20 +607,6 @@ function PetForm({
     }
   }
 
-  async function handleDelete() {
-    setBusy(true);
-    onError(null);
-    try {
-      await deletePet(pet!.id);
-      onNotice(`${pet!.name} deleted`);
-      await onDeleted?.();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Delete failed');
-      setBusy(false);
-      setConfirmingDelete(false);
-    }
-  }
-
   return (
     <form className="form" onSubmit={handleSubmit}>
       <label>
@@ -583,37 +635,16 @@ function PetForm({
           </button>
         )}
       </div>
-      {pet && onDeleted && (
+      {pet && onDeletePet && (
         <div className="actions">
-          {confirmingDelete ? (
-            <>
-              <button
-                type="button"
-                className="btn btn--link btn--danger"
-                onClick={handleDelete}
-                disabled={busy}
-              >
-                {busy ? 'Deleting…' : `Yes, delete ${pet.name} and all records`}
-              </button>
-              <button
-                type="button"
-                className="btn btn--link"
-                onClick={() => setConfirmingDelete(false)}
-                disabled={busy}
-              >
-                Keep
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="btn btn--link btn--danger"
-              onClick={() => setConfirmingDelete(true)}
-              disabled={busy}
-            >
-              Delete pet…
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn--link btn--danger"
+            onClick={() => onDeletePet(pet.id)}
+            disabled={busy}
+          >
+            Delete {pet.name}…
+          </button>
         </div>
       )}
     </form>
@@ -720,6 +751,13 @@ function PetDetailScreen({
         </button>
       </nav>
       <div className="screen-view__body">
+        <div className="pet-detail__hero">
+          <PetAvatar pet={pet} size={72} />
+          <div className="pet-detail__hero-info">
+            <span className="pet-detail__hero-name">{pet.name}</span>
+            <span className="subtle">{speciesEmoji(pet.species)} {pet.species.charAt(0).toUpperCase() + pet.species.slice(1)}</span>
+          </div>
+        </div>
         {docs.length > 0 && <StatusSummary docs={docs} />}
         <DocsSection
           petId={pet.id}

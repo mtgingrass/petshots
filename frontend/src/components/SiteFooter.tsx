@@ -17,6 +17,12 @@ export function SiteFooter() {
             if Petshots saved you from scrambling at the door.
           </p>
         )}
+        <p className="site-footer__feedback">
+          Found a bug or have a feature request?{' '}
+          <a href="mailto:mark.gingrass@gmail.com?subject=Petshots%20Feedback">
+            Send us a note
+          </a>
+        </p>
         <p className="site-footer__legal">
           © {new Date().getFullYear()} Petshots ·{' '}
           <Link to="/privacy">Privacy Policy</Link> · Your records stay private

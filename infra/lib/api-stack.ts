@@ -64,7 +64,7 @@ export class ApiStack extends cdk.Stack {
         UPLOADS_BUCKET: uploads.bucketName,
         MAX_PETS: '3', // free-tier cap; bump per-user when a paid tier exists
         MAX_DOCS: '4',
-        MAX_FILE_BYTES: String(10 * 1024 * 1024), // 10 MB - enforced by the POST policy
+        MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
       },
       bundling: {
         externalModules: [],

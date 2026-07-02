@@ -275,11 +275,59 @@ a {
 }
 
 .affiliate__disclosure,
-.site-footer__legal {
+.site-footer__legal,
+.site-footer__feedback {
   font-size: 0.75rem;
   color: var(--subtle);
   opacity: 0.8;
   margin: 0;
+}
+
+.site-footer__feedback a {
+  color: var(--subtle);
+  text-decoration: underline;
+}
+
+/* ---------- Support cards (logged-in landing) ---------- */
+
+.support-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+@media (min-width: 540px) {
+  .support-cards {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.support-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.support-card__title {
+  font-weight: 700;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.support-card .subtle {
+  margin: 0;
+  font-size: 0.875rem;
+  flex: 1;
+}
+
+.support-card .btn {
+  margin-top: 0.5rem;
+  align-self: flex-start;
 }
 
 /* ---------- Buttons ---------- */
@@ -357,6 +405,24 @@ a {
   padding: 0.6rem 0.9rem;
   border-radius: 8px;
   margin-bottom: 1rem;
+}
+
+.undo-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.undo-notice .btn--link {
+  color: var(--warn);
+  white-space: nowrap;
 }
 
 /* ---------- Pet overview ---------- */
@@ -686,6 +752,31 @@ a {
   max-width: none;
 }
 
+/* ---------- Pet detail hero ---------- */
+
+.pet-detail__hero {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 0 1.25rem;
+}
+
+.pet-detail__hero .avatar {
+  flex-shrink: 0;
+}
+
+.pet-detail__hero-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.pet-detail__hero-name {
+  font-size: 1.3rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
 /* ---------- Record detail screen ---------- */
 
 .doc-detail {
@@ -769,6 +860,12 @@ a {
   border-bottom: 1px solid var(--border);
   padding: 0.75rem 0;
   margin-bottom: 1.25rem;
+}
+
+.dashboard-header__back {
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 0;
 }
 
 .dashboard-user {

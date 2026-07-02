@@ -4,6 +4,9 @@
 // never pass through this API.
 import { config } from './config';
 import { getAccessToken } from './auth/cognito';
+import { compressImage } from './utils/compressImage';
+
+const COMPRESSIBLE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 export interface Pet {
   id: string;
@@ -81,12 +84,13 @@ export function deletePet(id: string): Promise<void> {
 }
 
 export async function uploadAvatar(petId: string, file: File): Promise<void> {
+  const toUpload = COMPRESSIBLE_TYPES.has(file.type) ? await compressImage(file) : file;
   const presign = await request<{ url: string; fields: Record<string, string> }>(
     'POST',
     `/pets/${petId}/avatar/upload-url`,
-    { contentType: file.type },
+    { contentType: toUpload.type },
   );
-  await postToS3(presign, file);
+  await postToS3(presign, toUpload);
 }
 
 // ---- documents (per pet) ----

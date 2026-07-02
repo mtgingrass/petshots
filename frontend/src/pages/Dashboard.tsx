@@ -102,6 +102,28 @@ function petStatusLine(docs: Doc[]): string {
   return base;
 }
 
+// Match common vaccine labels to a plain-English blurb. Returns null for unknowns.
+function vaccineBlurb(label: string): string | null {
+  const l = label.toLowerCase();
+  if (/rabies/.test(l))
+    return 'Required at nearly every boarding facility, dog park, daycare, and groomer. A current rabies certificate is the most-requested document at check-in.';
+  if (/\bdhpp\b|da2pp|distemper|parvovirus|parvo/.test(l))
+    return 'Core vaccine protecting against distemper, adenovirus, parvovirus, and parainfluenza. Usually renewed every 1–3 years after the initial series.';
+  if (/bordetella|kennel.?cough/.test(l))
+    return 'Required at most boarding facilities and dog parks. Protects against kennel cough, a highly contagious respiratory infection.';
+  if (/lepto/.test(l))
+    return 'Protects against leptospirosis, a bacterial infection spread through contaminated water, soil, and wildlife.';
+  if (/lyme/.test(l))
+    return 'Tick-borne disease prevention, especially important in wooded or grassy areas.';
+  if (/influenza|canine.?flu/.test(l))
+    return 'Required at some boarding and daycare facilities. Protects against canine influenza strains H3N2 and H3N8.';
+  if (/felv|feline.?leukemia/.test(l))
+    return 'Recommended for cats with outdoor access or contact with other cats. Protects against feline leukemia virus.';
+  if (/fvrcp|rhinotracheitis|calici/.test(l))
+    return 'Core feline vaccine protecting against feline herpesvirus, calicivirus, and panleukopenia. Usually renewed every 1–3 years.';
+  return null;
+}
+
 // ---- navigation state ----
 
 type DashView =
@@ -112,6 +134,7 @@ type DashView =
 
 type EditView =
   | { type: 'list' }
+  | { type: 'doc'; doc: Doc; petId: string }
   | { type: 'edit'; doc: Doc; petId: string }
   | { type: 'update'; doc: Doc; petId: string };
 
@@ -290,38 +313,45 @@ export function Dashboard() {
             </div>
           </div>
         ) : dashView.type === 'detail' && detailPet ? (
-          editView.type !== 'list' ? (
-            editView.type === 'edit' ? (
-              <EditDocScreen
-                petId={editView.petId}
-                doc={editView.doc}
-                onDone={async () => {
-                  setEditView({ type: 'list' });
-                  await loadPetDocs(editView.petId);
-                }}
-                onCancel={() => setEditView({ type: 'list' })}
-                onError={setError}
-                onNotice={showNotice}
-              />
-            ) : (
-              <UpdateDocScreen
-                petId={editView.petId}
-                doc={editView.doc}
-                onDone={async () => {
-                  setEditView({ type: 'list' });
-                  await loadPetDocs(editView.petId);
-                }}
-                onCancel={() => setEditView({ type: 'list' })}
-                onError={setError}
-                onNotice={showNotice}
-              />
-            )
+          editView.type === 'edit' ? (
+            <EditDocScreen
+              petId={editView.petId}
+              doc={editView.doc}
+              onDone={async () => {
+                setEditView({ type: 'list' });
+                await loadPetDocs(editView.petId);
+              }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          ) : editView.type === 'update' ? (
+            <UpdateDocScreen
+              petId={editView.petId}
+              doc={editView.doc}
+              onDone={async () => {
+                setEditView({ type: 'list' });
+                await loadPetDocs(editView.petId);
+              }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          ) : editView.type === 'doc' ? (
+            <DocDetailScreen
+              petId={editView.petId}
+              doc={editView.doc}
+              onBack={() => setEditView({ type: 'list' })}
+              onEdit={() => setEditView({ type: 'edit', doc: editView.doc, petId: editView.petId })}
+              onUpdate={() => setEditView({ type: 'update', doc: editView.doc, petId: editView.petId })}
+            />
           ) : (
             <PetDetailScreen
               pet={detailPet}
               docs={detailDocs}
               onBack={backToOverview}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
+              onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
               onDocsChanged={() => loadPetDocs(detailPet.id)}
@@ -635,6 +665,7 @@ function PetDetailScreen({
   docs,
   onBack,
   onEditPet,
+  onViewDoc,
   onEditDoc,
   onUpdateDoc,
   onDocsChanged,
@@ -645,6 +676,7 @@ function PetDetailScreen({
   docs: Doc[];
   onBack: () => void;
   onEditPet: () => void;
+  onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onUpdateDoc: (doc: Doc) => void;
   onDocsChanged: () => Promise<void>;
@@ -670,6 +702,7 @@ function PetDetailScreen({
           onChanged={onDocsChanged}
           onError={onError}
           onNotice={onNotice}
+          onViewDoc={onViewDoc}
           onEditDoc={onEditDoc}
           onUpdateDoc={onUpdateDoc}
         />
@@ -686,6 +719,7 @@ function DocsSection({
   onChanged,
   onError,
   onNotice,
+  onViewDoc,
   onEditDoc,
   onUpdateDoc,
 }: {
@@ -694,6 +728,7 @@ function DocsSection({
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
+  onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onUpdateDoc: (doc: Doc) => void;
 }) {
@@ -756,6 +791,7 @@ function DocsSection({
               key={doc.id}
               petId={petId}
               doc={doc}
+              onView={() => onViewDoc(doc)}
               onEdit={() => { setShowUpload(false); onEditDoc(doc); }}
               onUpdate={() => { setShowUpload(false); onUpdateDoc(doc); }}
               onChanged={onChanged}
@@ -810,6 +846,7 @@ function DocsSection({
 function DocItem({
   petId,
   doc,
+  onView,
   onEdit,
   onUpdate,
   onChanged,
@@ -818,6 +855,7 @@ function DocItem({
 }: {
   petId: string;
   doc: Doc;
+  onView: () => void;
   onEdit: () => void;
   onUpdate: () => void;
   onChanged: () => Promise<void>;
@@ -873,8 +911,7 @@ function DocItem({
 
   return (
     <li className="doc-item">
-      {/* The whole row opens the document - the core at-the-door interaction. */}
-      <a className="doc-main" href={doc.url} target="_blank" rel="noopener noreferrer">
+      <button className="doc-main" onClick={onView} aria-label={`View details for ${doc.label}`}>
         <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
         <span className="doc-meta">
           <span className="doc-label">
@@ -886,7 +923,7 @@ function DocItem({
               : 'No expiry date'}
           </span>
         </span>
-      </a>
+      </button>
 
       <div className="doc-menu-wrap" ref={menuRef}>
         <button
@@ -938,6 +975,72 @@ function DocItem({
         )}
       </div>
     </li>
+  );
+}
+
+function DocDetailScreen({
+  petId: _petId,
+  doc,
+  onBack,
+  onEdit,
+  onUpdate,
+}: {
+  petId: string;
+  doc: Doc;
+  onBack: () => void;
+  onEdit: () => void;
+  onUpdate: () => void;
+}) {
+  const status = statusOf(doc.expiry);
+  const blurb = vaccineBlurb(doc.label);
+  const isImage = IMAGE_EXTS.includes(extOf(doc.filename));
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ← Records
+        </button>
+        <span className="screen-nav__title">Record Details</span>
+      </nav>
+      <div className="screen-view__body doc-detail">
+        <h2 className="doc-detail__label">{doc.label}</h2>
+        <div className="doc-detail__status">
+          <StatusBadge expiry={doc.expiry} />
+          <span className="subtle doc-detail__expiry">
+            {doc.expiry
+              ? `${status === 'overdue' ? 'Expired' : 'Expires'} ${formatDate(doc.expiry)}`
+              : 'No expiry date set'}
+          </span>
+        </div>
+
+        {blurb && <p className="doc-detail__blurb">{blurb}</p>}
+
+        {isImage && (
+          <div className="doc-detail__preview">
+            <img src={doc.url} alt={doc.label} loading="lazy" />
+          </div>
+        )}
+
+        <a
+          className="btn btn--primary btn--lg doc-detail__open"
+          href={doc.url}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open certificate ↗
+        </a>
+
+        <div className="doc-detail__secondary">
+          <button className="btn btn--link" type="button" onClick={onEdit}>
+            Edit label / date
+          </button>
+          <button className="btn btn--link" type="button" onClick={onUpdate}>
+            Update record
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -730,6 +730,28 @@ a {
   font-size: 0.85rem;
 }
 
+/* Dim a row while its edit/update form is open below the list. */
+.doc-item--active {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Edit / Update form panel — appears below the list, not inside it. */
+.doc-form-panel {
+  width: 100%;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+
+.doc-form-panel__title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--subtle);
+  margin: 0 0 0.6rem;
+}
+
 /* ⋯ options button + its popover menu. */
 .doc-menu-wrap {
   position: relative;

@@ -584,6 +584,8 @@ function DocsSection({
   const [expiry, setExpiry] = useState('');
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [editingDoc, setEditingDoc] = useState<Doc | null>(null);
+  const [updatingDoc, setUpdatingDoc] = useState<Doc | null>(null);
   const atLimit = docs.length >= MAX_DOCS;
 
   async function handleUpload(e: FormEvent) {
@@ -638,6 +640,18 @@ function DocsSection({
               key={doc.id}
               petId={petId}
               doc={doc}
+              isEditing={editingDoc?.id === doc.id}
+              isUpdating={updatingDoc?.id === doc.id}
+              onEdit={() => {
+                setUpdatingDoc(null);
+                setEditingDoc(doc);
+                setShowUpload(false);
+              }}
+              onUpdate={() => {
+                setEditingDoc(null);
+                setUpdatingDoc(doc);
+                setShowUpload(false);
+              }}
               onChanged={onChanged}
               onError={onError}
               onNotice={onNotice}
@@ -646,42 +660,72 @@ function DocsSection({
         </ul>
       )}
 
-      {atLimit ? (
-        <p className="subtle">
-          You've reached the {MAX_DOCS}-document limit. Delete one to add another.
-        </p>
-      ) : showUpload ? (
-        <form className="form" onSubmit={handleUpload}>
-          <label>
-            Label
-            <input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="e.g. Rabies 2026"
-              autoFocus
-            />
-          </label>
-          <label>
-            Expiration date (optional)
-            <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
-          </label>
-          <label>
-            File (PDF, JPG, PNG · max 10 MB)
-            <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" required />
-          </label>
-          <div className="actions">
-            <button className="btn btn--primary" type="submit" disabled={busy}>
-              {busy ? 'Uploading…' : 'Upload'}
-            </button>
-            <button type="button" className="btn" onClick={() => setShowUpload(false)} disabled={busy}>
-              Cancel
-            </button>
-          </div>
-        </form>
-      ) : (
-        <button className="btn btn--add" onClick={() => setShowUpload(true)}>
-          + Add record
-        </button>
+      {editingDoc && (
+        <EditDocForm
+          petId={petId}
+          doc={editingDoc}
+          onDone={async () => {
+            setEditingDoc(null);
+            await onChanged();
+          }}
+          onCancel={() => setEditingDoc(null)}
+          onError={onError}
+          onNotice={onNotice}
+        />
+      )}
+
+      {updatingDoc && (
+        <UpdateDocForm
+          petId={petId}
+          doc={updatingDoc}
+          onDone={async () => {
+            setUpdatingDoc(null);
+            await onChanged();
+          }}
+          onCancel={() => setUpdatingDoc(null)}
+          onError={onError}
+          onNotice={onNotice}
+        />
+      )}
+
+      {!editingDoc && !updatingDoc && (
+        atLimit ? (
+          <p className="subtle">
+            You've reached the {MAX_DOCS}-document limit. Delete one to add another.
+          </p>
+        ) : showUpload ? (
+          <form className="form" onSubmit={handleUpload}>
+            <label>
+              Label
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="e.g. Rabies 2026"
+                autoFocus
+              />
+            </label>
+            <label>
+              Expiration date (optional)
+              <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
+            </label>
+            <label>
+              File (PDF, JPG, PNG · max 10 MB)
+              <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" required />
+            </label>
+            <div className="actions">
+              <button className="btn btn--primary" type="submit" disabled={busy}>
+                {busy ? 'Uploading…' : 'Upload'}
+              </button>
+              <button type="button" className="btn" onClick={() => setShowUpload(false)} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button className="btn btn--add" onClick={() => setShowUpload(true)}>
+            + Add record
+          </button>
+        )
       )}
     </section>
   );
@@ -690,27 +734,28 @@ function DocsSection({
 function DocItem({
   petId,
   doc,
+  isEditing,
+  isUpdating,
+  onEdit,
+  onUpdate,
   onChanged,
   onError,
   onNotice,
 }: {
   petId: string;
   doc: Doc;
+  isEditing: boolean;
+  isUpdating: boolean;
+  onEdit: () => void;
+  onUpdate: () => void;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [updating, setUpdating] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [label, setLabel] = useState(doc.label);
-  const [expiry, setExpiry] = useState(doc.expiry ?? '');
-  const [updateLabel, setUpdateLabel] = useState(doc.label);
-  const [updateExpiry, setUpdateExpiry] = useState(doc.expiry ?? '');
   const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const updateFileRef = useRef<HTMLInputElement>(null);
   const status = statusOf(doc.expiry);
 
   // Close the ⋯ menu on outside click or Escape.
@@ -738,24 +783,6 @@ function DocItem({
     };
   }, [menuOpen]);
 
-  async function handleSave(e: FormEvent) {
-    e.preventDefault();
-    const next = label.trim();
-    if (!next) return;
-    setBusy(true);
-    onError(null);
-    try {
-      await updateDoc(petId, doc.id, next, expiry || undefined);
-      await onChanged();
-      setEditing(false);
-      onNotice('Document updated');
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Update failed');
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleDelete() {
     setBusy(true);
     onError(null);
@@ -772,114 +799,8 @@ function DocItem({
     // On success the row unmounts after onChanged(), so no state reset needed.
   }
 
-  async function handleUpdate(e: FormEvent) {
-    e.preventDefault();
-    const file = updateFileRef.current?.files?.[0];
-    if (!file) return;
-    if (!ALLOWED_EXTS.includes(extOf(file.name))) {
-      onError('Please choose a PDF, JPG, or PNG file.');
-      return;
-    }
-    if (file.size > MAX_FILE_BYTES) {
-      onError(`That file is ${formatSize(file.size)} — the limit is 10 MB.`);
-      return;
-    }
-    setBusy(true);
-    onError(null);
-    try {
-      await updateDocVersion(petId, doc.id, file, updateLabel.trim() || file.name, updateExpiry || undefined);
-      await onChanged();
-      setUpdating(false);
-      onNotice('Record updated — previous version archived');
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Update failed');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (updating) {
-    return (
-      <li className="doc-item">
-        <form className="doc-edit doc-edit--col" onSubmit={handleUpdate}>
-          <div className="doc-edit__row">
-            <input
-              value={updateLabel}
-              onChange={(e) => setUpdateLabel(e.target.value)}
-              placeholder="Label"
-              aria-label="Document label"
-              autoFocus
-            />
-            <input
-              type="date"
-              value={updateExpiry}
-              onChange={(e) => setUpdateExpiry(e.target.value)}
-              aria-label="New expiration date"
-            />
-          </div>
-          <input
-            ref={updateFileRef}
-            type="file"
-            accept=".pdf,.jpg,.jpeg,.png"
-            required
-            aria-label="New document file"
-          />
-          <div className="doc-edit__row">
-            <button className="btn btn--link" type="submit" disabled={busy}>
-              {busy ? 'Uploading…' : 'Upload new version'}
-            </button>
-            <button
-              className="btn btn--link"
-              type="button"
-              onClick={() => setUpdating(false)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      </li>
-    );
-  }
-
-  if (editing) {
-    return (
-      <li className="doc-item">
-        <form className="doc-edit" onSubmit={handleSave}>
-          <input
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            autoFocus
-            aria-label="Document label"
-            placeholder="Label"
-          />
-          <input
-            type="date"
-            value={expiry}
-            onChange={(e) => setExpiry(e.target.value)}
-            aria-label="Expiration date"
-          />
-          <button className="btn btn--link" type="submit" disabled={busy}>
-            Save
-          </button>
-          <button
-            className="btn btn--link"
-            type="button"
-            onClick={() => {
-              setLabel(doc.label);
-              setExpiry(doc.expiry ?? '');
-              setEditing(false);
-            }}
-          >
-            Cancel
-          </button>
-        </form>
-      </li>
-    );
-  }
-
   return (
-    <li className="doc-item">
+    <li className={`doc-item${isEditing || isUpdating ? ' doc-item--active' : ''}`}>
       {/* The whole row opens the document - the core at-the-door interaction. */}
       <a className="doc-main" href={doc.url} target="_blank" rel="noopener noreferrer">
         <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
@@ -914,8 +835,7 @@ function DocItem({
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
-                setUpdating(false);
-                setEditing(true);
+                onEdit();
               }}
             >
               Edit label / date
@@ -924,10 +844,7 @@ function DocItem({
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
-                setEditing(false);
-                setUpdateLabel(doc.label);
-                setUpdateExpiry(doc.expiry ?? '');
-                setUpdating(true);
+                onUpdate();
               }}
             >
               Update record
@@ -949,5 +866,153 @@ function DocItem({
         )}
       </div>
     </li>
+  );
+}
+
+function EditDocForm({
+  petId,
+  doc,
+  onDone,
+  onCancel,
+  onError,
+  onNotice,
+}: {
+  petId: string;
+  doc: Doc;
+  onDone: () => Promise<void>;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [label, setLabel] = useState(doc.label);
+  const [expiry, setExpiry] = useState(doc.expiry ?? '');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    const next = label.trim();
+    if (!next) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await updateDoc(petId, doc.id, next, expiry || undefined);
+      await onDone();
+      onNotice('Document updated');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Update failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="doc-form-panel">
+      <p className="doc-form-panel__title">Editing: {doc.label}</p>
+      <form className="doc-edit" onSubmit={handleSave}>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          autoFocus
+          aria-label="Document label"
+          placeholder="Label"
+        />
+        <input
+          type="date"
+          value={expiry}
+          onChange={(e) => setExpiry(e.target.value)}
+          aria-label="Expiration date"
+        />
+        <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function UpdateDocForm({
+  petId,
+  doc,
+  onDone,
+  onCancel,
+  onError,
+  onNotice,
+}: {
+  petId: string;
+  doc: Doc;
+  onDone: () => Promise<void>;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [label, setLabel] = useState(doc.label);
+  const [expiry, setExpiry] = useState(doc.expiry ?? '');
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function handleUpdate(e: FormEvent) {
+    e.preventDefault();
+    const file = fileRef.current?.files?.[0];
+    if (!file) return;
+    if (!ALLOWED_EXTS.includes(extOf(file.name))) {
+      onError('Please choose a PDF, JPG, or PNG file.');
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      onError(`That file is ${formatSize(file.size)} — the limit is 10 MB.`);
+      return;
+    }
+    setBusy(true);
+    onError(null);
+    try {
+      await updateDocVersion(petId, doc.id, file, label.trim() || file.name, expiry || undefined);
+      await onDone();
+      onNotice('Record updated — previous version archived');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Update failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="doc-form-panel">
+      <p className="doc-form-panel__title">New version of: {doc.label}</p>
+      <form className="doc-edit doc-edit--col" onSubmit={handleUpdate}>
+        <div className="doc-edit__row">
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Label"
+            aria-label="Document label"
+            autoFocus
+          />
+          <input
+            type="date"
+            value={expiry}
+            onChange={(e) => setExpiry(e.target.value)}
+            aria-label="New expiration date"
+          />
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pdf,.jpg,.jpeg,.png"
+          required
+          aria-label="New document file"
+        />
+        <div className="doc-edit__row">
+          <button className="btn btn--primary" type="submit" disabled={busy}>
+            {busy ? 'Uploading…' : 'Upload new version'}
+          </button>
+          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }

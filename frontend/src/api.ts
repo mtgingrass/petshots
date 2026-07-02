@@ -1,13 +1,15 @@
 // Client for PetshotsApiStack's HTTP API. Every call attaches the Cognito access
 // token as a Bearer header; the API Gateway authorizer verifies it before the
-// Lambda runs. File bytes go browser->S3 directly via a presigned URL - they
+// Lambda runs. File bytes go browser->S3 directly via presigned URLs - they
 // never pass through this API.
 import { config } from './config';
 import { getAccessToken } from './auth/cognito';
 
 export interface Pet {
+  id: string;
   name: string;
   species: string;
+  avatarUrl?: string; // short-lived presigned GET URL, present when a photo exists
 }
 
 export interface Doc {
@@ -20,6 +22,7 @@ export interface Doc {
   url: string; // short-lived presigned GET URL
 }
 
+export const MAX_PETS = 3;
 export const MAX_DOCS = 4;
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -45,50 +48,81 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
-export function getPet(): Promise<{ pet: Pet | null }> {
-  return request('GET', '/pet');
+// Presigned POST helper: every signed field first, then the file LAST - S3
+// ignores form fields that appear after the file part. Don't set Content-Type;
+// the browser adds the multipart boundary itself. S3 enforces the policy's
+// size limit (content-length-range) server-side.
+async function postToS3(presign: { url: string; fields: Record<string, string> }, file: File) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(presign.fields)) form.append(k, v);
+  form.append('file', file);
+  const res = await fetch(presign.url, { method: 'POST', body: form });
+  // S3 returns 204 on success; a 403 here usually means the file exceeded the
+  // policy's size limit.
+  if (!res.ok) throw new Error(`Upload to storage failed (${res.status})`);
 }
 
-export function savePet(pet: Pet): Promise<{ pet: Pet }> {
-  return request('PUT', '/pet', pet);
+// ---- pets ----
+
+export function listPets(): Promise<{ pets: Pet[] }> {
+  return request('GET', '/pets');
 }
 
-export function listDocs(): Promise<{ docs: Doc[] }> {
-  return request('GET', '/docs');
+export function createPet(name: string, species: string): Promise<{ pet: Pet }> {
+  return request('POST', '/pets', { name, species });
 }
 
-export function updateDoc(id: string, label: string, expiry?: string): Promise<{ ok: true }> {
-  return request('PATCH', `/docs/${id}`, { label, expiry: expiry || undefined });
+export function updatePet(id: string, name: string, species: string): Promise<{ pet: Pet }> {
+  return request('PUT', `/pets/${id}`, { name, species });
 }
 
-export function deleteDoc(id: string): Promise<void> {
-  return request('DELETE', `/docs/${id}`);
+export function deletePet(id: string): Promise<void> {
+  return request('DELETE', `/pets/${id}`);
 }
 
-// Two-step upload: ask the API for a presigned POST policy, then send the file
-// straight to S3 as multipart/form-data. S3 enforces the policy's size limit
-// (content-length-range), so an oversized file is rejected server-side.
-export async function uploadDoc(file: File, label: string, expiry?: string): Promise<void> {
-  const { url, fields } = await request<{
+export async function uploadAvatar(petId: string, file: File): Promise<void> {
+  const presign = await request<{ url: string; fields: Record<string, string> }>(
+    'POST',
+    `/pets/${petId}/avatar/upload-url`,
+    { contentType: file.type },
+  );
+  await postToS3(presign, file);
+}
+
+// ---- documents (per pet) ----
+
+export function listDocs(petId: string): Promise<{ docs: Doc[] }> {
+  return request('GET', `/pets/${petId}/docs`);
+}
+
+export function updateDoc(
+  petId: string,
+  id: string,
+  label: string,
+  expiry?: string,
+): Promise<{ ok: true }> {
+  return request('PATCH', `/pets/${petId}/docs/${id}`, { label, expiry: expiry || undefined });
+}
+
+export function deleteDoc(petId: string, id: string): Promise<void> {
+  return request('DELETE', `/pets/${petId}/docs/${id}`);
+}
+
+export async function uploadDoc(
+  petId: string,
+  file: File,
+  label: string,
+  expiry?: string,
+): Promise<void> {
+  const presign = await request<{
     url: string;
     fields: Record<string, string>;
     key: string;
-  }>('POST', '/docs/upload-url', {
+  }>('POST', `/pets/${petId}/docs/upload-url`, {
     filename: file.name,
     label,
     expiry: expiry || undefined,
     contentType: file.type || 'application/octet-stream',
   });
-
-  // Every signed field first, then the file LAST - S3 ignores form fields that
-  // appear after the file part. Don't set Content-Type; the browser adds the
-  // multipart boundary itself.
-  const form = new FormData();
-  for (const [k, v] of Object.entries(fields)) form.append(k, v);
-  form.append('file', file);
-
-  const res = await fetch(url, { method: 'POST', body: form });
-  // S3 returns 204 on success; a 403 here usually means the file exceeded the
-  // policy's size limit.
-  if (!res.ok) throw new Error(`Upload to storage failed (${res.status})`);
+  await postToS3(presign, file);
 }

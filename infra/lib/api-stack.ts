@@ -62,6 +62,7 @@ export class ApiStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
+        MAX_PETS: '3', // free-tier cap; bump per-user when a paid tier exists
         MAX_DOCS: '4',
         MAX_FILE_BYTES: String(10 * 1024 * 1024), // 10 MB - enforced by the POST policy
       },
@@ -102,12 +103,15 @@ export class ApiStack extends cdk.Stack {
     const integration = new HttpLambdaIntegration('ApiIntegration', apiFn);
 
     const routes: [HttpMethod, string][] = [
-      [HttpMethod.GET, '/pet'],
-      [HttpMethod.PUT, '/pet'],
-      [HttpMethod.GET, '/docs'],
-      [HttpMethod.POST, '/docs/upload-url'],
-      [HttpMethod.PATCH, '/docs/{id}'],
-      [HttpMethod.DELETE, '/docs/{id}'],
+      [HttpMethod.GET, '/pets'],
+      [HttpMethod.POST, '/pets'],
+      [HttpMethod.PUT, '/pets/{petId}'],
+      [HttpMethod.DELETE, '/pets/{petId}'],
+      [HttpMethod.POST, '/pets/{petId}/avatar/upload-url'],
+      [HttpMethod.GET, '/pets/{petId}/docs'],
+      [HttpMethod.POST, '/pets/{petId}/docs/upload-url'],
+      [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
+      [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
     ];
     for (const [method, routePath] of routes) {
       httpApi.addRoutes({ path: routePath, methods: [method], integration, authorizer });

@@ -26,8 +26,11 @@ const s3 = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const BUCKET = process.env.UPLOADS_BUCKET!;
+const MAX_PETS = Number(process.env.MAX_PETS ?? '3');
 const MAX_DOCS = Number(process.env.MAX_DOCS ?? '4');
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
   statusCode,
@@ -59,6 +62,24 @@ function decodeMeta(seg: string | undefined): DocMeta {
 const cleanExpiry = (v: unknown): string | undefined =>
   typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined;
 
+const isUuid = (v: string | undefined): v is string =>
+  !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+const cleanPet = (input: Record<string, unknown>) => ({
+  name: String(input.name ?? '').slice(0, 100),
+  species: String(input.species ?? '').slice(0, 50),
+});
+
+async function readJson<T>(key: string): Promise<T | null> {
+  try {
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    return JSON.parse(await obj.Body!.transformToString()) as T;
+  } catch (e) {
+    if ((e as { name?: string }).name === 'NoSuchKey') return null;
+    throw e;
+  }
+}
+
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
@@ -68,31 +89,79 @@ export const handler = async (
   const sub = event.requestContext.authorizer?.jwt?.claims?.sub as string | undefined;
   if (!sub) return json(401, { error: 'unauthorized' });
 
-  const userPrefix = `users/${sub}`;
-  const petKey = `${userPrefix}/pet.json`;
-  const docsPrefix = `${userPrefix}/docs/`;
+  const petsPrefix = `users/${sub}/pets/`;
+
+  // Pet-scoped routes carry {petId}; validate the shape before it touches a key.
+  const petId = event.pathParameters?.petId;
+  if (event.routeKey.includes('{petId}') && !isUuid(petId)) {
+    return json(400, { error: 'invalid pet id' });
+  }
+  const petPrefix = `${petsPrefix}${petId}/`;
+  const petKey = `${petPrefix}pet.json`;
+  const avatarKey = `${petPrefix}avatar`;
+  const docsPrefix = `${petPrefix}docs/`;
 
   try {
     switch (event.routeKey) {
-      // ---- pet metadata (stored as a small JSON object, no DB for v1) ----
-      case 'GET /pet': {
-        try {
-          const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: petKey }));
-          const body = await obj.Body!.transformToString();
-          return json(200, { pet: JSON.parse(body) });
-        } catch (e) {
-          if ((e as { name?: string }).name === 'NoSuchKey') return json(200, { pet: null });
-          throw e;
-        }
+      // ---- pets (each a small JSON object under its own prefix, no DB) ----
+      case 'GET /pets': {
+        // One LIST covers everything under pets/: pet.json keys identify the
+        // pets, an `avatar` key marks a photo. Doc keys in the result are ignored.
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }),
+        );
+        const keys = (list.Contents ?? []).map((it) => it.Key!);
+        const ids = keys
+          .filter((k) => k.endsWith('/pet.json'))
+          .map((k) => k.slice(petsPrefix.length).split('/')[0]);
+        const pets = await Promise.all(
+          ids.map(async (id) => {
+            const pet = await readJson<{ name: string; species: string }>(
+              `${petsPrefix}${id}/pet.json`,
+            );
+            const hasAvatar = keys.includes(`${petsPrefix}${id}/avatar`);
+            const avatarUrl = hasAvatar
+              ? await getSignedUrl(
+                  s3,
+                  new GetObjectCommand({ Bucket: BUCKET, Key: `${petsPrefix}${id}/avatar` }),
+                  { expiresIn: 3600 },
+                )
+              : undefined;
+            return { id, ...pet, avatarUrl };
+          }),
+        );
+        // Stable order so the switcher doesn't shuffle between loads.
+        pets.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+        return json(200, { pets });
       }
 
-      case 'PUT /pet': {
-        const input = JSON.parse(event.body ?? '{}');
-        const pet = {
-          name: String(input.name ?? '').slice(0, 100),
-          species: String(input.species ?? '').slice(0, 50),
-        };
+      case 'POST /pets': {
+        const pet = cleanPet(JSON.parse(event.body ?? '{}'));
         if (!pet.name) return json(400, { error: 'name required' });
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }),
+        );
+        const count = (list.Contents ?? []).filter((it) => it.Key!.endsWith('/pet.json')).length;
+        if (count >= MAX_PETS) {
+          return json(409, { error: `limit of ${MAX_PETS} pets reached` });
+        }
+        const id = randomUUID();
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: `${petsPrefix}${id}/pet.json`,
+            Body: JSON.stringify(pet),
+            ContentType: 'application/json',
+          }),
+        );
+        return json(200, { pet: { id, ...pet } });
+      }
+
+      case 'PUT /pets/{petId}': {
+        const pet = cleanPet(JSON.parse(event.body ?? '{}'));
+        if (!pet.name) return json(400, { error: 'name required' });
+        // Update only - creating here would sidestep the POST /pets limit.
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
         await s3.send(
           new PutObjectCommand({
             Bucket: BUCKET,
@@ -101,22 +170,57 @@ export const handler = async (
             ContentType: 'application/json',
           }),
         );
-        return json(200, { pet });
+        return json(200, { pet: { id: petId, ...pet } });
       }
 
-      // ---- documents ----
-      case 'GET /docs': {
+      case 'DELETE /pets/{petId}': {
+        // Removes the whole pet: pet.json, avatar, and every doc under it.
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petPrefix }),
+        );
+        await Promise.all(
+          (list.Contents ?? []).map((it) =>
+            s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),
+          ),
+        );
+        return { statusCode: 204 };
+      }
+
+      case 'POST /pets/{petId}/avatar/upload-url': {
+        const input = JSON.parse(event.body ?? '{}');
+        const contentType = String(input.contentType ?? '');
+        if (!AVATAR_TYPES.includes(contentType)) {
+          return json(400, { error: 'avatar must be a JPEG, PNG, or WebP image' });
+        }
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        // Fixed key: a new photo overwrites the old one, so there's nothing to
+        // clean up and it never counts against the doc limit.
+        const { url, fields } = await createPresignedPost(s3, {
+          Bucket: BUCKET,
+          Key: avatarKey,
+          Conditions: [
+            ['content-length-range', 1, MAX_AVATAR_BYTES],
+            ['eq', '$Content-Type', contentType],
+          ],
+          Fields: { 'Content-Type': contentType },
+          Expires: 300,
+        });
+        return json(200, { url, fields });
+      }
+
+      // ---- documents (per pet) ----
+      case 'GET /pets/{petId}/docs': {
         const list = await s3.send(
           new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
         );
         const docs = await Promise.all(
           (list.Contents ?? []).map(async (it) => {
             const key = it.Key!;
-            // key shape: users/{sub}/docs/{docId}/{encodeURIComponent(label)}/{filename}
-            // Label lives in the key (not S3 metadata) so the browser PUT carries
+            // key shape: users/{sub}/pets/{petId}/docs/{docId}/{encodeMeta}/{filename}
+            // Label lives in the key (not S3 metadata) so the browser upload carries
             // no x-amz-* headers and can't trip S3's "unsigned header" rejection.
             const parts = key.split('/');
-            const meta = decodeMeta(parts[4]);
+            const meta = decodeMeta(parts[6]);
             // Short-lived GET URL so the browser opens the PDF straight from S3.
             const url = await getSignedUrl(
               s3,
@@ -124,10 +228,10 @@ export const handler = async (
               { expiresIn: 3600 },
             );
             return {
-              id: parts[3],
+              id: parts[5],
               label: meta.label,
               expiry: meta.expiry,
-              filename: parts.slice(5).join('/'),
+              filename: parts.slice(7).join('/'),
               size: it.Size,
               uploadedAt: it.LastModified,
               url,
@@ -137,7 +241,7 @@ export const handler = async (
         return json(200, { docs });
       }
 
-      case 'POST /docs/upload-url': {
+      case 'POST /pets/{petId}/docs/upload-url': {
         const input = JSON.parse(event.body ?? '{}');
         const filename = String(input.filename ?? '')
           .replace(/[^\w.\- ]/g, '_')
@@ -146,8 +250,9 @@ export const handler = async (
         const expiry = cleanExpiry(input.expiry);
         const contentType = String(input.contentType ?? 'application/octet-stream');
         if (!filename) return json(400, { error: 'filename required' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
 
-        // Enforce the MVP limit before handing out an upload URL.
+        // Enforce the per-pet limit before handing out an upload URL.
         const list = await s3.send(
           new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
         );
@@ -179,7 +284,7 @@ export const handler = async (
         return json(200, { url, fields, key });
       }
 
-      case 'PATCH /docs/{id}': {
+      case 'PATCH /pets/{petId}/docs/{id}': {
         // Edit = change label and/or expiry, which live in the key -> S3 has no
         // rename, so copy the object to a new key and delete the old one. docId +
         // filename are preserved; only the metadata path segment changes.
@@ -195,7 +300,7 @@ export const handler = async (
         const oldKey = list.Contents?.[0]?.Key;
         if (!oldKey) return json(404, { error: 'not found' });
 
-        const filename = oldKey.split('/').slice(5).join('/');
+        const filename = oldKey.split('/').slice(7).join('/');
         const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry })}/${filename}`;
         if (newKey === oldKey) return json(200, { ok: true });
 
@@ -207,7 +312,7 @@ export const handler = async (
         return json(200, { ok: true });
       }
 
-      case 'DELETE /docs/{id}': {
+      case 'DELETE /pets/{petId}/docs/{id}': {
         const id = event.pathParameters?.id;
         if (!id) return json(400, { error: 'id required' });
         const prefix = `${docsPrefix}${id}/`;

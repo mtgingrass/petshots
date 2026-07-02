@@ -359,6 +359,78 @@ a {
   margin-bottom: 1rem;
 }
 
+/* ---------- Pet switcher ---------- */
+
+.pet-switcher {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+  margin-bottom: 1rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.85rem 0.4rem 0.45rem;
+  min-height: 48px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.pet-chip--selected {
+  border-color: var(--primary);
+  background: rgba(108, 92, 231, 0.14);
+}
+
+.pet-chip--add {
+  padding: 0.4rem 1rem;
+  color: var(--subtle);
+  font-weight: 500;
+  border-style: dashed;
+}
+
+.pet-chip--add:hover,
+.pet-chip:hover {
+  border-color: var(--primary);
+}
+
+.pet-chip__edit {
+  color: var(--subtle);
+  font-size: 0.85rem;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #11142a;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar__emoji {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
 /* ---------- Quick show (the at-the-door button) ---------- */
 
 .quickshow {
@@ -478,6 +550,8 @@ a {
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+  padding: 0.85rem 0.25rem;
+  width: 100%;
 }
 
 .doc-edit input {
@@ -509,19 +583,6 @@ a {
   margin-bottom: 1.25rem;
 }
 
-.dashboard-header h1 {
-  font-size: 1.4rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.pet-emoji {
-  font-size: 1.5rem;
-  line-height: 1;
-}
-
 .dashboard-user {
   display: flex;
   align-items: center;
@@ -549,13 +610,6 @@ a {
 
 .card + .card {
   margin-top: 1rem;
-}
-
-.card--row {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
 }
 
 .card__title {
@@ -596,9 +650,49 @@ a {
 .doc-item {
   display: flex;
   align-items: center;
-  gap: 0.85rem;
-  padding: 0.75rem 0;
+  gap: 0.25rem;
   border-bottom: 1px solid var(--border);
+}
+
+/* The tappable row body: dot + label + expiry, opens the document. */
+.doc-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 0.25rem;
+  color: var(--text);
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+.doc-main:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.doc-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.doc-dot--overdue {
+  background: #ff5d5d;
+}
+
+.doc-dot--due-soon {
+  background: var(--warn);
+}
+
+.doc-dot--current {
+  background: var(--ok);
+}
+
+.doc-dot--none {
+  background: var(--subtle);
+  opacity: 0.5;
 }
 
 .doc-item:last-child {
@@ -624,38 +718,73 @@ a {
   font-size: 0.85rem;
 }
 
-.doc-item .actions {
-  margin: 0;
-  gap: 0.25rem;
-  flex-wrap: nowrap;
-}
-
-/* Thumbnail: image preview for pictures, an extension badge otherwise. */
-.doc-thumb {
+/* ⋯ options button + its popover menu. */
+.doc-menu-wrap {
+  position: relative;
   flex: 0 0 auto;
-  width: 56px;
-  height: 56px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: #11142a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
 }
 
-.doc-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.doc-thumb__ext {
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
+.btn--icon {
+  min-width: 44px;
+  padding: 0.4rem;
+  font-size: 1.2rem;
+  line-height: 1;
+  border: none;
+  background: none;
   color: var(--subtle);
-  letter-spacing: 0.03em;
+}
+
+.btn--icon:hover {
+  color: var(--text);
+  border: none;
+}
+
+.doc-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  min-width: 10rem;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-menu button {
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.95rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 7px;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.doc-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.doc-menu__danger {
+  color: var(--error) !important;
+  font-weight: 600;
+}
+
+/* Collapsed-upload trigger. */
+.btn--add {
+  width: 100%;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--subtle);
+}
+
+.btn--add:hover {
+  color: var(--text);
 }
 
 /* ---------- Skeleton loading placeholders ---------- */
@@ -712,18 +841,9 @@ a {
   }
 }
 
-/* ---------- Small phones: let doc rows reflow ---------- */
+/* ---------- Small phones ---------- */
 
 @media (max-width: 540px) {
-  .doc-item {
-    flex-wrap: wrap;
-  }
-
-  .doc-item .actions {
-    width: 100%;
-    justify-content: flex-end;
-  }
-
   .dashboard-user .subtle {
     display: none;
   }

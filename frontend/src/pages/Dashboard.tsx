@@ -154,6 +154,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [presenting, setPresenting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{
     pet: Pet;
     docs: Doc[];
@@ -425,6 +426,7 @@ export function Dashboard() {
               docs={detailDocs}
               onBack={backToOverview}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
+              onPresent={() => setPresenting(true)}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
@@ -472,6 +474,13 @@ export function Dashboard() {
         )}
       </main>
       <SiteFooter />
+      {presenting && detailPet && detailDocs.length > 0 && (
+        <PresentScreen
+          pet={detailPet}
+          docs={detailDocs}
+          onExit={() => setPresenting(false)}
+        />
+      )}
     </>
   );
 }
@@ -793,6 +802,7 @@ function PetDetailScreen({
   docs,
   onBack,
   onEditPet,
+  onPresent,
   onViewDoc,
   onEditDoc,
   onUpdateDoc,
@@ -804,6 +814,7 @@ function PetDetailScreen({
   docs: Doc[];
   onBack: () => void;
   onEditPet: () => void;
+  onPresent: () => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onUpdateDoc: (doc: Doc) => void;
@@ -814,9 +825,13 @@ function PetDetailScreen({
   return (
     <div className="screen-view">
       <nav className="screen-nav">
-        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
-          ← Dashboard
-        </button>
+        {docs.length > 0 ? (
+          <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
+            ▶ Present
+          </button>
+        ) : (
+          <span />
+        )}
         <span className="screen-nav__title">{pet.name}</span>
         <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
           ✎ Edit
@@ -1250,6 +1265,106 @@ function EditDocScreen({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+// ---- present mode (full-screen swipeable carousel) ----
+
+function PresentScreen({
+  pet,
+  docs,
+  onExit,
+}: {
+  pet: Pet;
+  docs: Doc[];
+  onExit: () => void;
+}) {
+  const [current, setCurrent] = useState(0);
+  const slidesRef = useRef<HTMLDivElement>(null);
+
+  // Dismiss on Escape key.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onExit(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onExit]);
+
+  // Lock body scroll while presenting.
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = ''; };
+  }, []);
+
+  function handleScroll() {
+    const el = slidesRef.current;
+    if (!el) return;
+    setCurrent(Math.round(el.scrollLeft / el.clientWidth));
+  }
+
+  return (
+    <div className="present" role="dialog" aria-label={`${pet.name}'s records`}>
+      <button className="present__exit" onClick={onExit} aria-label="Exit presentation">✕</button>
+
+      <div className="present__slides" ref={slidesRef} onScroll={handleScroll}>
+        {docs.map((doc) => {
+          const isImage = IMAGE_EXTS.includes(extOf(doc.filename));
+          const status = statusOf(doc.expiry);
+          return (
+            <div key={doc.id} className="present__slide">
+              <div className="present__doc-header">
+                <span className="present__doc-label">{doc.label}</span>
+                <div className="present__doc-meta">
+                  <StatusBadge expiry={doc.expiry} />
+                  {doc.expiry && (
+                    <span className="present__doc-expiry">
+                      {status === 'overdue' ? 'Expired' : 'Expires'} {formatDate(doc.expiry)}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="present__doc-content">
+                {isImage ? (
+                  <img
+                    src={doc.url}
+                    alt={doc.label}
+                    className="present__doc-img"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="present__pdf-card">
+                    <span className="present__pdf-icon" aria-hidden="true">📄</span>
+                    <p className="present__pdf-name">{doc.label}</p>
+                    <a
+                      href={doc.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn btn--primary btn--lg"
+                    >
+                      Open PDF ↗
+                    </a>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="present__footer">
+        <span className="present__pet-name">{pet.name}</span>
+        {docs.length > 1 && (
+          <div className="present__dots" aria-hidden="true">
+            {docs.map((_, i) => (
+              <span key={i} className={`present__dot${i === current ? ' present__dot--active' : ''}`} />
+            ))}
+          </div>
+        )}
+        {docs.length > 1 && (
+          <span className="present__counter">{current + 1} / {docs.length}</span>
+        )}
+      </div>
     </div>
   );
 }

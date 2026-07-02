@@ -12,6 +12,7 @@ import {
   type Pet,
   type Doc,
 } from '../api';
+import { SiteFooter } from '../components/SiteFooter';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 const ALLOWED_EXTS = ['pdf', ...IMAGE_EXTS];
@@ -56,6 +57,18 @@ function statusOf(expiry?: string): Status {
   if (days < 0) return 'overdue';
   if (days <= DUE_SOON_DAYS) return 'due-soon';
   return 'current';
+}
+
+function speciesEmoji(species: string): string {
+  if (species === 'dog') return '🐶';
+  if (species === 'cat') return '🐱';
+  return '🐾';
+}
+
+// The at-the-door pick: the record front-desk staff actually asks for.
+// Prefer a doc labeled "rabies"; otherwise fall back to the newest upload.
+function quickShowDoc(docs: Doc[]): Doc | undefined {
+  return docs.find((d) => /rabies/i.test(d.label)) ?? docs[0];
 }
 
 export function Dashboard() {
@@ -107,42 +120,64 @@ export function Dashboard() {
     navigate('/', { replace: true });
   }
 
+  const quickDoc = quickShowDoc(docs);
+
   return (
-    <main className="page">
-      <header className="dashboard-header">
-        <h1>{pet ? pet.name : 'Your pet'}</h1>
-        <div className="dashboard-user">
-          <span className="subtle">{email}</span>
-          <button className="btn" onClick={handleLogout}>
-            Log out
-          </button>
-        </div>
-      </header>
+    <>
+      <main className="page">
+        <header className="dashboard-header">
+          <h1>
+            {pet && (
+              <span className="pet-emoji" aria-hidden="true">
+                {speciesEmoji(pet.species)}
+              </span>
+            )}
+            {pet ? pet.name : 'Your pet'}
+          </h1>
+          <div className="dashboard-user">
+            <span className="subtle">{email}</span>
+            <button className="btn" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        </header>
 
-      {notice && <p className="notice" role="status">{notice}</p>}
-      {error && (
-        <p className="error" role="alert" onClick={() => setError(null)} title="Dismiss">
-          {error}
-        </p>
-      )}
+        {notice && <p className="notice" role="status">{notice}</p>}
+        {error && (
+          <p className="error" role="alert" onClick={() => setError(null)} title="Dismiss">
+            {error}
+          </p>
+        )}
 
-      {loading ? (
-        <DashboardSkeleton />
-      ) : pet ? (
-        <>
-          <StatusSummary docs={docs} />
-          <PetCard pet={pet} onSaved={setPet} onError={setError} onNotice={showNotice} />
-          <DocsSection
-            docs={docs}
-            onChanged={load}
-            onError={setError}
-            onNotice={showNotice}
-          />
-        </>
-      ) : (
-        <AddPetForm onSaved={setPet} onError={setError} />
-      )}
-    </main>
+        {loading ? (
+          <DashboardSkeleton />
+        ) : pet ? (
+          <>
+            {quickDoc && (
+              <a
+                className="btn btn--primary btn--lg quickshow"
+                href={quickDoc.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                📄 Show {quickDoc.label} at the door
+              </a>
+            )}
+            <StatusSummary docs={docs} />
+            <PetCard pet={pet} onSaved={setPet} onError={setError} onNotice={showNotice} />
+            <DocsSection
+              docs={docs}
+              onChanged={load}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          </>
+        ) : (
+          <AddPetForm onSaved={setPet} onError={setError} />
+        )}
+      </main>
+      <SiteFooter />
+    </>
   );
 }
 
@@ -234,9 +269,13 @@ function AddPetForm({
 
   return (
     <section className="card">
-      <p className="subtle">
-        Add your pet to start storing vaccination records (up to {MAX_DOCS} documents).
-      </p>
+      <div className="empty-state">
+        <span className="empty-state__icon" aria-hidden="true">
+          🐾
+        </span>
+        Who are we keeping records for? Add your pet to get started (up to{' '}
+        {MAX_DOCS} documents, free).
+      </div>
       <form className="form" onSubmit={handleSubmit}>
         <label>
           Pet name
@@ -397,12 +436,18 @@ function DocsSection({
   return (
     <>
       <section className="card">
-        <h2 className="subtle">
-          {docs.length}/{MAX_DOCS} documents
+        <h2 className="card__title">
+          Records · {docs.length}/{MAX_DOCS}
         </h2>
 
         {docs.length === 0 ? (
-          <p className="subtle">No documents yet. Upload your first vaccination record below.</p>
+          <div className="empty-state">
+            <span className="empty-state__icon" aria-hidden="true">
+              📄
+            </span>
+            No records yet. Snap a photo of the vaccine cert from your vet and
+            upload it below — future-you at the daycare door says thanks.
+          </div>
         ) : (
           <ul className="doc-list">
             {docs.map((doc) => (
@@ -419,6 +464,7 @@ function DocsSection({
       </section>
 
       <section className="card">
+        <h2 className="card__title">Add a record</h2>
         {atLimit ? (
           <p className="subtle">
             You've reached the {MAX_DOCS}-document limit. Delete one to add another.
@@ -569,6 +615,14 @@ function DocItem({
           </div>
         ) : (
           <div className="actions">
+            <a
+              className="btn btn--link"
+              href={doc.url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View
+            </a>
             <button className="btn btn--link" onClick={() => setEditing(true)} disabled={busy}>
               Edit
             </button>

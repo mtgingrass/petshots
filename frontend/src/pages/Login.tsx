@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signIn } from '../auth/cognito';
 import { useAuth } from '../auth/AuthContext';
+import { SiteHeader } from '../components/SiteHeader';
 
 export function Login() {
   const navigate = useNavigate();
@@ -27,8 +28,10 @@ export function Login() {
   }
 
   return (
-    <main className="page page--centered">
-      <h1>Log in</h1>
+    <>
+      <SiteHeader />
+      <main className="page page--centered">
+        <h1>Welcome back</h1>
 
       {error && <p className="error">{error}</p>}
 
@@ -58,9 +61,10 @@ export function Login() {
         </button>
       </form>
 
-      <p className="subtle">
-        Need an account? <Link to="/signup">Sign up</Link>
-      </p>
-    </main>
+        <p className="subtle">
+          Need an account? <Link to="/signup">Sign up</Link>
+        </p>
+      </main>
+    </>
   );
 }

@@ -4,6 +4,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signUp, confirmSignUp, resendConfirmationCode } from '../auth/cognito';
 import { Turnstile } from '../components/Turnstile';
+import { SiteHeader } from '../components/SiteHeader';
 
 export function SignUp() {
   const navigate = useNavigate();
@@ -48,8 +49,10 @@ export function SignUp() {
   }
 
   return (
-    <main className="page page--centered">
-      <h1>Create your account</h1>
+    <>
+      <SiteHeader />
+      <main className="page page--centered">
+        <h1>Create your account</h1>
 
       {error && <p className="error">{error}</p>}
 
@@ -111,9 +114,10 @@ export function SignUp() {
         </form>
       )}
 
-      <p className="subtle">
-        Already have an account? <Link to="/login">Log in</Link>
-      </p>
-    </main>
+        <p className="subtle">
+          Already have an account? <Link to="/login">Log in</Link>
+        </p>
+      </main>
+    </>
   );
 }

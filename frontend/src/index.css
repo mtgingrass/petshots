@@ -468,6 +468,18 @@ a {
   color: var(--primary);
 }
 
+.share-app-btn {
+  display: block;
+  margin: 0.5rem auto 0;
+  font-size: 0.85rem;
+  color: var(--subtle);
+  text-align: center;
+}
+
+.share-app-btn:hover {
+  color: var(--text);
+}
+
 /* Empty overview (no pets yet). */
 .empty-overview {
   text-align: center;

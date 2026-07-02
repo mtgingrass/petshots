@@ -393,11 +393,36 @@ export function Dashboard() {
                 </button>
               )}
             </div>
+            <ShareAppButton onNotice={showNotice} />
           </>
         )}
       </main>
       <SiteFooter />
     </>
+  );
+}
+
+// ---- share button ----
+
+function ShareAppButton({ onNotice }: { onNotice: (msg: string) => void }) {
+  async function handleShare() {
+    const data = {
+      title: 'Petshots',
+      text: "Keep your pet's vaccine records in one place — ready at the door in one tap.",
+      url: 'https://petshots.app',
+    };
+    if (typeof navigator.share === 'function') {
+      try { await navigator.share(data); } catch { /* user cancelled */ }
+    } else {
+      await navigator.clipboard.writeText('https://petshots.app');
+      onNotice('Link copied to clipboard!');
+    }
+  }
+
+  return (
+    <button className="share-app-btn btn btn--link" onClick={handleShare}>
+      Share Petshots with a fellow pet owner ↗
+    </button>
   );
 }
 

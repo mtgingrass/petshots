@@ -32,8 +32,10 @@ export class DataStack extends cdk.Stack {
       serverlessV2MaxCapacity: 2,
       securityGroups: [dbSecurityGroup],
       defaultDatabaseName: 'petshots',
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      deletionProtection: false,
+      // Protect real user data: cdk destroy leaves the cluster behind, and
+      // deletionProtection blocks accidental deletion via console/API too.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
     });
 
     new cdk.CfnOutput(this, 'ClusterEndpoint', {

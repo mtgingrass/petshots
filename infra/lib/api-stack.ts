@@ -31,8 +31,9 @@ export class ApiStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // dev only
-      autoDeleteObjects: true, // dev only - empties bucket on stack delete
+      // Protect uploaded vaccine docs: retain the bucket + contents on destroy.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
       cors: [
         {
           // POST: browser uploads now use a presigned POST policy (size-limited).

@@ -84,7 +84,8 @@ export class AuthStack extends cdk.Stack {
         sesVerifiedDomain: DOMAIN,
         sesRegion: 'us-east-1',
       }),
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // Protect real accounts: cdk destroy must not wipe the user pool.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
     this.userPool = userPool;
 

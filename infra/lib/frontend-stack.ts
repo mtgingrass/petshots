@@ -31,8 +31,11 @@ export class FrontendStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // dev only
-      autoDeleteObjects: true, // dev only - empties bucket on stack delete
+      // Retained for parity with the data stacks. Note: contents are just the
+      // rebuildable SPA bundle, so the data-loss risk here is nil; the tradeoff
+      // is that a destroy+redeploy hits a bucket-name collision on 'petshots-frontend'.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
     });
 
     // CloudFront only reads certs from us-east-1; this stack is us-east-1, so a plain

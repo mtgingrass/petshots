@@ -84,12 +84,6 @@ function speciesEmoji(species: string): string {
   return '🐾';
 }
 
-// The at-the-door pick: the record front-desk staff actually asks for.
-// Prefer a doc labeled "rabies"; otherwise fall back to the most urgent one.
-function quickShowDoc(docs: Doc[]): Doc | undefined {
-  return docs.find((d) => /rabies/i.test(d.label)) ?? docs[0];
-}
-
 // Worst-case status across a pet's full doc list — for the overview summary card.
 function petOverallStatus(docs: Doc[]): Status {
   return docs.reduce<Status>((worst, doc) => {
@@ -657,8 +651,6 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const quickDoc = quickShowDoc(docs);
-
   return (
     <div className="screen-view">
       <nav className="screen-nav">
@@ -671,16 +663,6 @@ function PetDetailScreen({
         </button>
       </nav>
       <div className="screen-view__body">
-        {quickDoc && (
-          <a
-            className="btn btn--primary btn--lg quickshow"
-            href={quickDoc.url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            📄 Show {quickDoc.label} at the door
-          </a>
-        )}
         {docs.length > 0 && <StatusSummary docs={docs} />}
         <DocsSection
           petId={pet.id}

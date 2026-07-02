@@ -93,3 +93,20 @@ export async function getAccessToken(): Promise<string | null> {
   const session = await getSession();
   return session ? session.getAccessToken().getJwtToken() : null;
 }
+
+// Change the signed-in user's password. Requires the current password for
+// verification — Cognito rejects with NotAuthorizedException if it's wrong.
+export function changePassword(oldPassword: string, newPassword: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const user = userPool.getCurrentUser();
+    if (!user) { reject(new Error('Not signed in')); return; }
+    // getSession must be called first to refresh tokens and re-hydrate the user object.
+    user.getSession((err: Error | null, session: CognitoUserSession | null) => {
+      if (err || !session) { reject(err ?? new Error('Session expired')); return; }
+      user.changePassword(oldPassword, newPassword, (err2) => {
+        if (err2) reject(err2);
+        else resolve();
+      });
+    });
+  });
+}

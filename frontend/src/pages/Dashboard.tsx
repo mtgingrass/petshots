@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { changePassword } from '../auth/cognito';
 import {
   listPets,
   createPet,
@@ -130,7 +131,8 @@ type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string }
   | { type: 'add-pet' }
-  | { type: 'edit-pet'; petId: string };
+  | { type: 'edit-pet'; petId: string }
+  | { type: 'change-password' };
 
 type EditView =
   | { type: 'list' }
@@ -305,7 +307,14 @@ export function Dashboard() {
             </button>
           )}
           <div className="dashboard-user">
-            <span className="subtle">{email}</span>
+            <span className="subtle dashboard-user__email">{email}</span>
+            <button
+              className="btn btn--link dashboard-user__pw"
+              onClick={() => setDashView({ type: 'change-password' })}
+              title="Change password"
+            >
+              Password
+            </button>
             <button className="btn" onClick={handleLogout}>
               Log out
             </button>
@@ -379,6 +388,12 @@ export function Dashboard() {
               />
             </div>
           </div>
+        ) : dashView.type === 'change-password' ? (
+          <ChangePasswordScreen
+            onDone={() => { backToOverview(); showNotice('Password changed'); }}
+            onCancel={backToOverview}
+            onError={setError}
+          />
         ) : dashView.type === 'detail' && detailPet ? (
           editView.type === 'edit' ? (
             <EditDocScreen
@@ -1172,6 +1187,91 @@ function EditDocScreen({
         <div className="actions">
           <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
             {busy ? 'Saving…' : 'Save'}
+          </button>
+          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ChangePasswordScreen({
+  onDone,
+  onCancel,
+  onError,
+}: {
+  onDone: () => void;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (next !== confirm) { onError('New passwords do not match.'); return; }
+    if (next.length < 8) { onError('New password must be at least 8 characters.'); return; }
+    setBusy(true);
+    onError(null);
+    try {
+      await changePassword(current, next);
+      onDone();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not change password';
+      onError(msg.includes('NotAuthorizedException') || msg.includes('Incorrect') ? 'Current password is incorrect.' : msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
+          ← Dashboard
+        </button>
+        <span className="screen-nav__title">Change Password</span>
+      </nav>
+      <form className="form" onSubmit={handleSubmit}>
+        <label>
+          Current password
+          <input
+            type="password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            autoComplete="current-password"
+            autoFocus
+            required
+          />
+        </label>
+        <label>
+          New password
+          <input
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            autoComplete="new-password"
+            required
+            minLength={8}
+          />
+        </label>
+        <label>
+          Confirm new password
+          <input
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+            required
+          />
+        </label>
+        <div className="actions">
+          <button className="btn btn--primary" type="submit" disabled={busy || !current || !next || !confirm}>
+            {busy ? 'Saving…' : 'Change password'}
           </button>
           <button className="btn" type="button" onClick={onCancel} disabled={busy}>
             Cancel

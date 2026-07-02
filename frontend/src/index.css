@@ -868,6 +868,15 @@ a {
   padding: 0;
 }
 
+.dashboard-user__pw {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.dashboard-user__pw:hover {
+  opacity: 1;
+}
+
 .dashboard-user {
   display: flex;
   align-items: center;

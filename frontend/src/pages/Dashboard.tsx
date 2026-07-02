@@ -25,7 +25,6 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024; // 5 MB
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const DUE_SOON_DAYS = 30;
-const SELECTED_KEY = 'petshots.selectedPet';
 
 type Status = 'overdue' | 'due-soon' | 'current' | 'none';
 
@@ -91,23 +90,47 @@ function quickShowDoc(docs: Doc[]): Doc | undefined {
   return docs.find((d) => /rabies/i.test(d.label)) ?? docs[0];
 }
 
+// Worst-case status across a pet's full doc list — for the overview summary card.
+function petOverallStatus(docs: Doc[]): Status {
+  return docs.reduce<Status>((worst, doc) => {
+    const s = statusOf(doc.expiry);
+    return STATUS_RANK[s] < STATUS_RANK[worst] ? s : worst;
+  }, 'none');
+}
+
+function petStatusLine(docs: Doc[]): string {
+  if (docs.length === 0) return 'No records yet';
+  const overdue = docs.filter((d) => statusOf(d.expiry) === 'overdue').length;
+  const dueSoon = docs.filter((d) => statusOf(d.expiry) === 'due-soon').length;
+  const base = `${docs.length} record${docs.length !== 1 ? 's' : ''}`;
+  if (overdue > 0) return `${base} · ${overdue} overdue`;
+  if (dueSoon > 0) return `${base} · ${dueSoon} due soon`;
+  return base;
+}
+
+// ---- navigation state ----
+
+type DashView =
+  | { type: 'overview' }
+  | { type: 'detail'; petId: string }
+  | { type: 'add-pet' }
+  | { type: 'edit-pet'; petId: string };
+
 type EditView =
   | { type: 'list' }
   | { type: 'edit'; doc: Doc; petId: string }
   | { type: 'update'; doc: Doc; petId: string };
+
+// ---- main component ----
 
 export function Dashboard() {
   const { email, logout } = useAuth();
   const navigate = useNavigate();
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
-  const [selectedId, setSelectedId] = useState<string | null>(
-    () => localStorage.getItem(SELECTED_KEY),
-  );
-  const [docs, setDocs] = useState<Doc[]>([]);
-  const [docsLoading, setDocsLoading] = useState(false);
-  const [addingPet, setAddingPet] = useState(false);
-  const [editingPet, setEditingPet] = useState(false);
+  const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
+  const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
+  const [allDocsLoading, setAllDocsLoading] = useState(false);
   const [editView, setEditView] = useState<EditView>({ type: 'list' });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -120,7 +143,14 @@ export function Dashboard() {
   }, []);
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
 
-  const selectedPet = pets?.find((p) => p.id === selectedId) ?? pets?.[0] ?? null;
+  // Pet currently being viewed in detail/edit-pet screens.
+  const detailPet =
+    dashView.type === 'detail' || dashView.type === 'edit-pet'
+      ? (pets?.find((p) => p.id === dashView.petId) ?? null)
+      : null;
+
+  // Docs for the active detail pet, always sorted.
+  const detailDocs = detailPet ? (allDocs[detailPet.id] ?? []) : [];
 
   const loadPets = useCallback(async () => {
     setError(null);
@@ -135,15 +165,31 @@ export function Dashboard() {
     }
   }, []);
 
-  const loadDocs = useCallback(async (petId: string) => {
-    setDocsLoading(true);
+  const loadAllDocs = useCallback(async (petList: Pet[]) => {
+    if (petList.length === 0) {
+      setAllDocs({});
+      return;
+    }
+    setAllDocsLoading(true);
+    try {
+      const pairs = await Promise.all(
+        petList.map((p) => listDocs(p.id).then((r) => [p.id, sortDocs(r.docs)] as const)),
+      );
+      setAllDocs(Object.fromEntries(pairs));
+    } catch {
+      // non-fatal — overview cards show without status
+    } finally {
+      setAllDocsLoading(false);
+    }
+  }, []);
+
+  // Refresh just one pet's docs (after upload/delete/rename in detail view).
+  const loadPetDocs = useCallback(async (petId: string) => {
     try {
       const res = await listDocs(petId);
-      setDocs(sortDocs(res.docs));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load records');
-    } finally {
-      setDocsLoading(false);
+      setAllDocs((prev) => ({ ...prev, [petId]: sortDocs(res.docs) }));
+    } catch {
+      // non-fatal
     }
   }, []);
 
@@ -151,35 +197,24 @@ export function Dashboard() {
     void loadPets();
   }, [loadPets]);
 
+  // When the pets list changes (initial load, add, delete), reload all docs.
   useEffect(() => {
-    if (selectedPet) {
-      setDocs([]);
-      void loadDocs(selectedPet.id);
-    }
-  }, [selectedPet?.id, loadDocs]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (pets !== null) void loadAllDocs(pets);
+  }, [pets, loadAllDocs]);
 
   useEffect(() => {
-    document.title = selectedPet ? `${selectedPet.name} · Petshots` : 'Petshots';
-  }, [selectedPet]);
-
-  function selectPet(id: string) {
-    setSelectedId(id);
-    localStorage.setItem(SELECTED_KEY, id);
-    setEditingPet(false);
-    setEditView({ type: 'list' });
-    setError(null);
-  }
+    document.title = detailPet ? `${detailPet.name} · Petshots` : 'Petshots';
+  }, [detailPet]);
 
   function handleLogout() {
     logout();
     navigate('/', { replace: true });
   }
 
-  const refreshDocs = useCallback(async () => {
-    if (selectedPet) await loadDocs(selectedPet.id);
-  }, [selectedPet, loadDocs]);
-
-  const quickDoc = quickShowDoc(docs);
+  function backToOverview() {
+    setDashView({ type: 'overview' });
+    setEditView({ type: 'list' });
+  }
 
   return (
     <>
@@ -205,131 +240,135 @@ export function Dashboard() {
 
         {pets === null ? (
           <DashboardSkeleton />
-        ) : editView.type !== 'list' ? (
-          editView.type === 'edit' ? (
-            <EditDocScreen
-              petId={editView.petId}
-              doc={editView.doc}
-              onDone={async () => { setEditView({ type: 'list' }); await refreshDocs(); }}
-              onCancel={() => setEditView({ type: 'list' })}
-              onError={setError}
-              onNotice={showNotice}
-            />
+        ) : dashView.type === 'add-pet' ? (
+          <div className="screen-view">
+            <nav className="screen-nav">
+              <button
+                className="screen-nav__back btn btn--link"
+                type="button"
+                onClick={backToOverview}
+              >
+                ← Dashboard
+              </button>
+              <span className="screen-nav__title">New Pet</span>
+            </nav>
+            <div className="screen-view__body">
+              <PetForm
+                submitLabel="Add pet"
+                onDone={async (pet) => {
+                  await loadPets();
+                  setDashView(pet ? { type: 'detail', petId: pet.id } : { type: 'overview' });
+                }}
+                onCancel={backToOverview}
+                onError={setError}
+                onNotice={showNotice}
+              />
+            </div>
+          </div>
+        ) : dashView.type === 'edit-pet' && detailPet ? (
+          <div className="screen-view">
+            <nav className="screen-nav">
+              <button
+                className="screen-nav__back btn btn--link"
+                type="button"
+                onClick={() => setDashView({ type: 'detail', petId: detailPet.id })}
+              >
+                ← {detailPet.name}
+              </button>
+              <span className="screen-nav__title">Edit Pet</span>
+            </nav>
+            <div className="screen-view__body">
+              <PetForm
+                pet={detailPet}
+                submitLabel="Save"
+                onDone={async () => {
+                  await loadPets();
+                  setDashView({ type: 'detail', petId: detailPet.id });
+                }}
+                onCancel={() => setDashView({ type: 'detail', petId: detailPet.id })}
+                onDeleted={async () => {
+                  await loadPets();
+                  backToOverview();
+                }}
+                onError={setError}
+                onNotice={showNotice}
+              />
+            </div>
+          </div>
+        ) : dashView.type === 'detail' && detailPet ? (
+          editView.type !== 'list' ? (
+            editView.type === 'edit' ? (
+              <EditDocScreen
+                petId={editView.petId}
+                doc={editView.doc}
+                onDone={async () => {
+                  setEditView({ type: 'list' });
+                  await loadPetDocs(editView.petId);
+                }}
+                onCancel={() => setEditView({ type: 'list' })}
+                onError={setError}
+                onNotice={showNotice}
+              />
+            ) : (
+              <UpdateDocScreen
+                petId={editView.petId}
+                doc={editView.doc}
+                onDone={async () => {
+                  setEditView({ type: 'list' });
+                  await loadPetDocs(editView.petId);
+                }}
+                onCancel={() => setEditView({ type: 'list' })}
+                onError={setError}
+                onNotice={showNotice}
+              />
+            )
           ) : (
-            <UpdateDocScreen
-              petId={editView.petId}
-              doc={editView.doc}
-              onDone={async () => { setEditView({ type: 'list' }); await refreshDocs(); }}
-              onCancel={() => setEditView({ type: 'list' })}
+            <PetDetailScreen
+              pet={detailPet}
+              docs={detailDocs}
+              onBack={backToOverview}
+              onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
+              onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
+              onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
+              onDocsChanged={() => loadPetDocs(detailPet.id)}
               onError={setError}
               onNotice={showNotice}
             />
           )
         ) : pets.length === 0 ? (
-          <section className="card">
-            <div className="empty-state">
-              <span className="empty-state__icon" aria-hidden="true">
-                🐾
-              </span>
-              Who are we keeping records for? Add your pet to get started (up to{' '}
-              {MAX_DOCS} documents each, free).
-            </div>
-            <PetForm
-              submitLabel="Add pet"
-              onDone={async () => {
-                const next = await loadPets();
-                if (next[0]) selectPet(next[0].id);
-              }}
-              onError={setError}
-              onNotice={showNotice}
-            />
-          </section>
+          <div className="empty-overview">
+            <span className="empty-state__icon" aria-hidden="true">🐾</span>
+            <p>Who are we keeping records for? Add your first pet to get started.</p>
+            <button
+              className="btn btn--primary"
+              onClick={() => setDashView({ type: 'add-pet' })}
+            >
+              Add your first pet
+            </button>
+          </div>
         ) : (
           <>
-            <PetSwitcher
-              pets={pets}
-              selectedId={selectedPet?.id ?? null}
-              onSelect={selectPet}
-              onAdd={() => {
-                setAddingPet(true);
-                setEditingPet(false);
-              }}
-              onEdit={() => {
-                setEditingPet(true);
-                setAddingPet(false);
-              }}
-            />
-
-            {addingPet && (
-              <section className="card">
-                <h2 className="card__title">New pet</h2>
-                <PetForm
-                  submitLabel="Add pet"
-                  onDone={async (pet) => {
-                    setAddingPet(false);
-                    await loadPets();
-                    if (pet) selectPet(pet.id);
-                  }}
-                  onCancel={() => setAddingPet(false)}
-                  onError={setError}
-                  onNotice={showNotice}
+            <h2 className="section-title">Your Pets</h2>
+            <div className="pet-overview">
+              {pets.map((pet) => (
+                <PetSummaryCard
+                  key={pet.id}
+                  pet={pet}
+                  docs={allDocs[pet.id]}
+                  docsLoading={allDocsLoading}
+                  onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
+                  onEdit={() => setDashView({ type: 'edit-pet', petId: pet.id })}
                 />
-              </section>
-            )}
-
-            {editingPet && selectedPet && (
-              <section className="card">
-                <h2 className="card__title">Edit {selectedPet.name}</h2>
-                <PetForm
-                  pet={selectedPet}
-                  submitLabel="Save"
-                  onDone={async () => {
-                    setEditingPet(false);
-                    await loadPets();
-                  }}
-                  onCancel={() => setEditingPet(false)}
-                  onDeleted={async () => {
-                    setEditingPet(false);
-                    localStorage.removeItem(SELECTED_KEY);
-                    setSelectedId(null);
-                    await loadPets();
-                  }}
-                  onError={setError}
-                  onNotice={showNotice}
-                />
-              </section>
-            )}
-
-            {selectedPet && !addingPet && !editingPet && (
-              <>
-                {quickDoc && !docsLoading && (
-                  <a
-                    className="btn btn--primary btn--lg quickshow"
-                    href={quickDoc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    📄 Show {quickDoc.label} at the door
-                  </a>
-                )}
-                {docsLoading ? (
-                  <DashboardSkeleton />
-                ) : (
-                  <>
-                    <StatusSummary docs={docs} />
-                    <DocsSection
-                      petId={selectedPet.id}
-                      docs={docs}
-                      onChanged={refreshDocs}
-                      onError={setError}
-                      onNotice={showNotice}
-                      onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: selectedPet.id })}
-                      onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: selectedPet.id })}
-                    />
-                  </>
-                )}
-              </>
-            )}
+              ))}
+              {pets.length < MAX_PETS && (
+                <button
+                  className="pet-add-card"
+                  onClick={() => setDashView({ type: 'add-pet' })}
+                >
+                  <span aria-hidden="true">+</span> Add pet
+                </button>
+              )}
+            </div>
           </>
         )}
       </main>
@@ -338,7 +377,7 @@ export function Dashboard() {
   );
 }
 
-// ---- pet switcher ----
+// ---- pet avatar ----
 
 function PetAvatar({ pet, size = 36 }: { pet: Pet; size?: number }) {
   return (
@@ -352,47 +391,49 @@ function PetAvatar({ pet, size = 36 }: { pet: Pet; size?: number }) {
   );
 }
 
-function PetSwitcher({
-  pets,
-  selectedId,
+// ---- pet overview card ----
+
+function PetSummaryCard({
+  pet,
+  docs,
+  docsLoading,
   onSelect,
-  onAdd,
   onEdit,
 }: {
-  pets: Pet[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: () => void;
+  pet: Pet;
+  docs: Doc[] | undefined;
+  docsLoading: boolean;
+  onSelect: () => void;
   onEdit: () => void;
 }) {
+  const status = docs ? petOverallStatus(docs) : 'none';
+  const subLine = docsLoading && !docs ? 'Loading…' : petStatusLine(docs ?? []);
+
   return (
-    <div className="pet-switcher" role="tablist" aria-label="Your pets">
-      {pets.map((pet) => {
-        const selected = pet.id === selectedId;
-        return (
-          <button
-            key={pet.id}
-            role="tab"
-            aria-selected={selected}
-            className={`pet-chip${selected ? ' pet-chip--selected' : ''}`}
-            onClick={() => (selected ? onEdit() : onSelect(pet.id))}
-            title={selected ? `Edit ${pet.name}` : `Switch to ${pet.name}`}
-          >
-            <PetAvatar pet={pet} />
-            <span className="pet-chip__name">{pet.name}</span>
-            {selected && (
-              <span className="pet-chip__edit" aria-hidden="true">
-                ✎
+    <div className="pet-summary-card">
+      <button className="pet-summary-card__tap" onClick={onSelect} aria-label={`View ${pet.name}'s records`}>
+        <PetAvatar pet={pet} size={44} />
+        <div className="pet-summary-card__body">
+          <div className="pet-summary-card__name">{pet.name}</div>
+          <div className="pet-summary-card__sub">
+            {subLine}
+            {docs && docs.length > 0 && status !== 'none' && (
+              <span className={`status status--${status} pet-summary-card__pill`}>
+                {status === 'overdue' ? 'Overdue' : status === 'due-soon' ? 'Due soon' : 'Current'}
               </span>
             )}
-          </button>
-        );
-      })}
-      {pets.length < MAX_PETS && (
-        <button className="pet-chip pet-chip--add" onClick={onAdd}>
-          + Add pet
-        </button>
-      )}
+          </div>
+        </div>
+        <span className="pet-summary-card__chevron" aria-hidden="true">›</span>
+      </button>
+      <button
+        className="pet-summary-card__edit btn btn--icon"
+        aria-label={`Edit ${pet.name}`}
+        onClick={onEdit}
+        title={`Edit ${pet.name}`}
+      >
+        ✎
+      </button>
     </div>
   );
 }
@@ -593,6 +634,68 @@ function DashboardSkeleton() {
   );
 }
 
+// ---- pet detail screen ----
+
+function PetDetailScreen({
+  pet,
+  docs,
+  onBack,
+  onEditPet,
+  onEditDoc,
+  onUpdateDoc,
+  onDocsChanged,
+  onError,
+  onNotice,
+}: {
+  pet: Pet;
+  docs: Doc[];
+  onBack: () => void;
+  onEditPet: () => void;
+  onEditDoc: (doc: Doc) => void;
+  onUpdateDoc: (doc: Doc) => void;
+  onDocsChanged: () => Promise<void>;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const quickDoc = quickShowDoc(docs);
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ← Dashboard
+        </button>
+        <span className="screen-nav__title">{pet.name}</span>
+        <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
+          ✎ Edit
+        </button>
+      </nav>
+      <div className="screen-view__body">
+        {quickDoc && (
+          <a
+            className="btn btn--primary btn--lg quickshow"
+            href={quickDoc.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            📄 Show {quickDoc.label} at the door
+          </a>
+        )}
+        {docs.length > 0 && <StatusSummary docs={docs} />}
+        <DocsSection
+          petId={pet.id}
+          docs={docs}
+          onChanged={onDocsChanged}
+          onError={onError}
+          onNotice={onNotice}
+          onEditDoc={onEditDoc}
+          onUpdateDoc={onUpdateDoc}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ---- documents ----
 
 function DocsSection({
@@ -682,43 +785,42 @@ function DocsSection({
       )}
 
       {atLimit ? (
-          <p className="subtle">
-            You've reached the {MAX_DOCS}-document limit. Delete one to add another.
-          </p>
-        ) : showUpload ? (
-          <form className="form" onSubmit={handleUpload}>
-            <label>
-              Label
-              <input
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder="e.g. Rabies 2026"
-                autoFocus
-              />
-            </label>
-            <label>
-              Expiration date (optional)
-              <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
-            </label>
-            <label>
-              File (PDF, JPG, PNG · max 10 MB)
-              <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" required />
-            </label>
-            <div className="actions">
-              <button className="btn btn--primary" type="submit" disabled={busy}>
-                {busy ? 'Uploading…' : 'Upload'}
-              </button>
-              <button type="button" className="btn" onClick={() => setShowUpload(false)} disabled={busy}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : (
-          <button className="btn btn--add" onClick={() => setShowUpload(true)}>
-            + Add record
-          </button>
-        )
-      }
+        <p className="subtle">
+          You've reached the {MAX_DOCS}-document limit. Delete one to add another.
+        </p>
+      ) : showUpload ? (
+        <form className="form" onSubmit={handleUpload}>
+          <label>
+            Label
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="e.g. Rabies 2026"
+              autoFocus
+            />
+          </label>
+          <label>
+            Expiration date (optional)
+            <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
+          </label>
+          <label>
+            File (PDF, JPG, PNG · max 10 MB)
+            <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" required />
+          </label>
+          <div className="actions">
+            <button className="btn btn--primary" type="submit" disabled={busy}>
+              {busy ? 'Uploading…' : 'Upload'}
+            </button>
+            <button type="button" className="btn" onClick={() => setShowUpload(false)} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button className="btn btn--add" onClick={() => setShowUpload(true)}>
+          + Add record
+        </button>
+      )}
     </section>
   );
 }

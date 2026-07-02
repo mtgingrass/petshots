@@ -359,54 +359,130 @@ a {
   margin-bottom: 1rem;
 }
 
-/* ---------- Pet switcher ---------- */
+/* ---------- Pet overview ---------- */
 
-.pet-switcher {
+.pet-overview {
   display: flex;
-  gap: 0.5rem;
-  overflow-x: auto;
-  padding-bottom: 0.35rem;
+  flex-direction: column;
+  gap: 0.65rem;
   margin-bottom: 1rem;
-  -webkit-overflow-scrolling: touch;
 }
 
-.pet-chip {
-  display: inline-flex;
+.pet-summary-card {
+  display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.85rem 0.4rem 0.45rem;
-  min-height: 48px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
   background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.pet-summary-card:hover,
+.pet-summary-card:focus-within {
+  border-color: var(--primary);
+}
+
+.pet-summary-card__tap {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.9rem 0.75rem 0.9rem 1rem;
+  text-align: left;
   color: var(--text);
-  font-size: 0.95rem;
-  font-weight: 600;
+  background: none;
+  border: none;
   cursor: pointer;
-  white-space: nowrap;
+  min-height: 64px;
+}
+
+.pet-summary-card__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.pet-summary-card__name {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.pet-summary-card__sub {
+  font-size: 0.8rem;
+  color: var(--subtle);
+  margin-top: 0.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.pet-summary-card__pill {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+}
+
+.pet-summary-card__chevron {
+  color: var(--subtle);
+  font-size: 1.2rem;
+  line-height: 1;
+  padding-right: 0.25rem;
+}
+
+.pet-summary-card__edit {
   flex: 0 0 auto;
-}
-
-.pet-chip--selected {
-  border-color: var(--primary);
-  background: rgba(108, 92, 231, 0.14);
-}
-
-.pet-chip--add {
-  padding: 0.4rem 1rem;
+  padding: 0 0.85rem;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
   color: var(--subtle);
-  font-weight: 500;
-  border-style: dashed;
 }
 
-.pet-chip--add:hover,
-.pet-chip:hover {
-  border-color: var(--primary);
+.pet-summary-card__edit:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
 }
 
-.pet-chip__edit {
+.pet-add-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  min-height: 56px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  background: none;
   color: var(--subtle);
-  font-size: 0.85rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  width: 100%;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.pet-add-card:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* Empty overview (no pets yet). */
+.empty-overview {
+  text-align: center;
+  padding: 2.5rem 1rem;
+  color: var(--subtle);
+}
+
+.empty-overview .empty-state__icon {
+  font-size: 2.5rem;
+  display: block;
+  margin-bottom: 0.75rem;
+}
+
+.empty-overview p {
+  margin-bottom: 1.25rem;
 }
 
 .avatar {
@@ -574,6 +650,23 @@ a {
   font-weight: 600;
   font-size: 0.95rem;
   white-space: nowrap;
+}
+
+/* Right-side action button (e.g. ✎ Edit in pet detail) */
+.screen-nav__action {
+  margin-left: auto;
+  font-size: 0.9rem;
+  padding: 0.25rem 0;
+  z-index: 1;
+  color: var(--subtle);
+}
+
+.screen-nav__action:hover {
+  color: var(--text);
+}
+
+.screen-view__body {
+  padding: 1rem;
 }
 
 .screen-view .form {

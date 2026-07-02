@@ -306,19 +306,11 @@ export function Dashboard() {
               ← Dashboard
             </button>
           )}
-          <div className="dashboard-user">
-            <span className="subtle dashboard-user__email">{email}</span>
-            <button
-              className="btn btn--link dashboard-user__pw"
-              onClick={() => setDashView({ type: 'change-password' })}
-              title="Change password"
-            >
-              Password
-            </button>
-            <button className="btn" onClick={handleLogout}>
-              Log out
-            </button>
-          </div>
+          <ProfileMenu
+            email={email ?? ''}
+            onChangePassword={() => setDashView({ type: 'change-password' })}
+            onLogout={handleLogout}
+          />
         </header>
 
         {pendingDelete && (
@@ -481,6 +473,71 @@ export function Dashboard() {
       </main>
       <SiteFooter />
     </>
+  );
+}
+
+// ---- profile menu ----
+
+function ProfileMenu({
+  email,
+  onChangePassword,
+  onLogout,
+}: {
+  email: string;
+  onChangePassword: () => void;
+  onLogout: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent | TouchEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="profile-menu" ref={ref}>
+      <button
+        className="profile-menu__trigger"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <span className="profile-menu__email">{email}</span>
+        <span className="profile-menu__chevron" aria-hidden="true">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="profile-menu__dropdown" role="menu">
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onChangePassword(); }}
+          >
+            Change password
+          </button>
+          <div className="profile-menu__divider" />
+          <button
+            role="menuitem"
+            className="profile-menu__danger"
+            onClick={() => { setOpen(false); onLogout(); }}
+          >
+            Log out
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

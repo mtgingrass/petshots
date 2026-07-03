@@ -138,7 +138,8 @@ type EditView =
   | { type: 'list' }
   | { type: 'doc'; doc: Doc; petId: string }
   | { type: 'edit'; doc: Doc; petId: string }
-  | { type: 'update'; doc: Doc; petId: string };
+  | { type: 'update'; doc: Doc; petId: string }
+  | { type: 'edit-profile' };
 
 // ---- main component ----
 
@@ -412,6 +413,14 @@ export function Dashboard() {
               onError={setError}
               onNotice={showNotice}
             />
+          ) : editView.type === 'edit-profile' ? (
+            <ProfileEditScreen
+              pet={detailPet}
+              onDone={async () => { setEditView({ type: 'list' }); await loadPets(); }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
           ) : editView.type === 'doc' ? (
             <DocDetailScreen
               petId={editView.petId}
@@ -427,6 +436,7 @@ export function Dashboard() {
               onBack={backToOverview}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPresent={() => setPresenting(true)}
+              onEditProfile={() => setEditView({ type: 'edit-profile' })}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
@@ -676,7 +686,7 @@ function PetForm({
     onError(null);
     try {
       const saved = pet
-        ? await updatePet(pet.id, name.trim(), species)
+        ? await updatePet(pet.id, { name: name.trim(), species })
         : await createPet(name.trim(), species);
       if (photo) await uploadAvatar(saved.pet.id, photo);
       onNotice(pet ? 'Pet updated' : `${saved.pet.name} added`);
@@ -803,6 +813,7 @@ function PetDetailScreen({
   onBack,
   onEditPet,
   onPresent,
+  onEditProfile,
   onViewDoc,
   onEditDoc,
   onUpdateDoc,
@@ -815,6 +826,7 @@ function PetDetailScreen({
   onBack: () => void;
   onEditPet: () => void;
   onPresent: () => void;
+  onEditProfile: () => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onUpdateDoc: (doc: Doc) => void;
@@ -822,40 +834,77 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
+  const [tab, setTab] = useState<'records' | 'profile'>('records');
+
   return (
     <div className="screen-view">
       <nav className="screen-nav">
-        {docs.length > 0 ? (
+        {tab === 'records' && docs.length > 0 ? (
           <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
             ▶ Present
+          </button>
+        ) : tab === 'profile' ? (
+          <button className="screen-nav__back btn btn--link" type="button" onClick={onEditProfile}>
+            ✎ Edit
           </button>
         ) : (
           <span />
         )}
         <span className="screen-nav__title">{pet.name}</span>
-        <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
-          ✎ Edit
-        </button>
+        {tab === 'records' ? (
+          <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
+            ✎ Edit
+          </button>
+        ) : (
+          <span />
+        )}
       </nav>
+
       <div className="screen-view__body">
         <div className="pet-detail__hero">
           <PetAvatar pet={pet} size={72} />
           <div className="pet-detail__hero-info">
             <span className="pet-detail__hero-name">{pet.name}</span>
-            <span className="subtle">{speciesEmoji(pet.species)} {pet.species.charAt(0).toUpperCase() + pet.species.slice(1)}</span>
+            <span className="subtle">
+              {speciesEmoji(pet.species)}{' '}
+              {pet.species.charAt(0).toUpperCase() + pet.species.slice(1)}
+              {pet.breed ? ` · ${pet.breed}` : ''}
+            </span>
           </div>
         </div>
-        {docs.length > 0 && <StatusSummary docs={docs} />}
-        <DocsSection
-          petId={pet.id}
-          docs={docs}
-          onChanged={onDocsChanged}
-          onError={onError}
-          onNotice={onNotice}
-          onViewDoc={onViewDoc}
-          onEditDoc={onEditDoc}
-          onUpdateDoc={onUpdateDoc}
-        />
+
+        <div className="tab-bar">
+          <button
+            className={`tab-bar__tab${tab === 'records' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('records')}
+          >
+            Records
+          </button>
+          <button
+            className={`tab-bar__tab${tab === 'profile' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('profile')}
+          >
+            Profile
+          </button>
+        </div>
+
+        {tab === 'records' ? (
+          <>
+            {docs.length > 0 && <StatusSummary docs={docs} />}
+            <DocsSection
+              petId={pet.id}
+              docs={docs}
+              onChanged={onDocsChanged}
+              onError={onError}
+              onNotice={onNotice}
+              onViewDoc={onViewDoc}
+              onEditDoc={onEditDoc}
+              onUpdateDoc={onUpdateDoc}
+            />
+          </>
+        ) : (
+          <ProfileSection pet={pet} onEdit={onEditProfile} />
+        )}
       </div>
     </div>
   );
@@ -1259,6 +1308,209 @@ function EditDocScreen({
         <div className="actions">
           <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
             {busy ? 'Saving…' : 'Save'}
+          </button>
+          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ---- profile read view ----
+
+function profileAge(dob?: string): string | null {
+  if (!dob) return null;
+  const today = new Date();
+  const birth = new Date(`${dob}T00:00:00`);
+  const years = today.getFullYear() - birth.getFullYear();
+  const months = today.getMonth() - birth.getMonth();
+  const adjusted = months < 0 || (months === 0 && today.getDate() < birth.getDate()) ? years - 1 : years;
+  if (adjusted < 1) {
+    const m = ((today.getFullYear() - birth.getFullYear()) * 12 + today.getMonth() - birth.getMonth());
+    return `${m} month${m !== 1 ? 's' : ''} old`;
+  }
+  return `${adjusted} year${adjusted !== 1 ? 's' : ''} old`;
+}
+
+function ProfileField({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null;
+  return (
+    <div className="profile-field">
+      <span className="profile-field__label">{label}</span>
+      <span className="profile-field__value">{value}</span>
+    </div>
+  );
+}
+
+function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
+  const hasAny = pet.breed || pet.dob || pet.weight || pet.allergies || pet.behavior ||
+    pet.vetName || pet.emergencyContact || pet.microchip || pet.fixed !== undefined || pet.notes;
+
+  if (!hasAny) {
+    return (
+      <div className="profile-empty">
+        <p className="subtle">No health profile yet.</p>
+        <button className="btn btn--primary" onClick={onEdit}>Add profile details</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="profile-view">
+      {(pet.breed || pet.dob || pet.weight || pet.fixed !== undefined) && (
+        <section className="profile-section">
+          <h3 className="profile-section__title">About</h3>
+          <ProfileField label="Breed" value={pet.breed} />
+          <ProfileField label="Age" value={profileAge(pet.dob)} />
+          <ProfileField label="Weight" value={pet.weight} />
+          <ProfileField label="Status" value={pet.fixed !== undefined ? (pet.fixed ? 'Spayed / Neutered' : 'Intact') : undefined} />
+          <ProfileField label="Microchip" value={pet.microchip} />
+        </section>
+      )}
+      {(pet.allergies || pet.behavior || pet.notes) && (
+        <section className="profile-section">
+          <h3 className="profile-section__title">Health Notes</h3>
+          <ProfileField label="Allergies" value={pet.allergies} />
+          <ProfileField label="Behavior" value={pet.behavior} />
+          <ProfileField label="Special instructions" value={pet.notes} />
+        </section>
+      )}
+      {(pet.vetName || pet.vetPhone || pet.emergencyContact) && (
+        <section className="profile-section">
+          <h3 className="profile-section__title">Contacts</h3>
+          <ProfileField label="Vet" value={pet.vetName} />
+          <ProfileField label="Vet phone" value={pet.vetPhone} />
+          <ProfileField label="Emergency contact" value={pet.emergencyContact} />
+        </section>
+      )}
+    </div>
+  );
+}
+
+// ---- profile edit screen ----
+
+function ProfileEditScreen({
+  pet,
+  onDone,
+  onCancel,
+  onError,
+  onNotice,
+}: {
+  pet: Pet;
+  onDone: () => Promise<void>;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [breed, setBreed] = useState(pet.breed ?? '');
+  const [dob, setDob] = useState(pet.dob ?? '');
+  const [weight, setWeight] = useState(pet.weight ?? '');
+  const [fixed, setFixed] = useState<'' | 'true' | 'false'>(
+    pet.fixed === true ? 'true' : pet.fixed === false ? 'false' : ''
+  );
+  const [microchip, setMicrochip] = useState(pet.microchip ?? '');
+  const [allergies, setAllergies] = useState(pet.allergies ?? '');
+  const [behavior, setBehavior] = useState(pet.behavior ?? '');
+  const [notes, setNotes] = useState(pet.notes ?? '');
+  const [vetName, setVetName] = useState(pet.vetName ?? '');
+  const [vetPhone, setVetPhone] = useState(pet.vetPhone ?? '');
+  const [emergencyContact, setEmergencyContact] = useState(pet.emergencyContact ?? '');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    onError(null);
+    try {
+      await updatePet(pet.id, {
+        name: pet.name,
+        species: pet.species,
+        breed: breed || undefined,
+        dob: dob || undefined,
+        weight: weight || undefined,
+        fixed: fixed === 'true' ? true : fixed === 'false' ? false : undefined,
+        microchip: microchip || undefined,
+        allergies: allergies || undefined,
+        behavior: behavior || undefined,
+        notes: notes || undefined,
+        vetName: vetName || undefined,
+        vetPhone: vetPhone || undefined,
+        emergencyContact: emergencyContact || undefined,
+      });
+      onNotice('Profile saved');
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not save profile');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
+          ← {pet.name}
+        </button>
+        <span className="screen-nav__title">Edit Profile</span>
+      </nav>
+      <form className="form profile-form" onSubmit={handleSave}>
+        <p className="profile-form__hint subtle">All fields are optional.</p>
+
+        <fieldset className="profile-form__group">
+          <legend>About</legend>
+          <label>Breed
+            <input value={breed} onChange={(e) => setBreed(e.target.value)} placeholder="e.g. Labrador Retriever" />
+          </label>
+          <label>Date of birth
+            <input type="date" value={dob} onChange={(e) => setDob(e.target.value)} />
+          </label>
+          <label>Weight
+            <input value={weight} onChange={(e) => setWeight(e.target.value)} placeholder="e.g. 45 lbs" />
+          </label>
+          <label>Spayed / Neutered
+            <select value={fixed} onChange={(e) => setFixed(e.target.value as '' | 'true' | 'false')}>
+              <option value="">Unknown</option>
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+          <label>Microchip number
+            <input value={microchip} onChange={(e) => setMicrochip(e.target.value)} placeholder="15-digit ID" />
+          </label>
+        </fieldset>
+
+        <fieldset className="profile-form__group">
+          <legend>Health notes</legend>
+          <label>Known allergies
+            <textarea value={allergies} onChange={(e) => setAllergies(e.target.value)} placeholder="e.g. Chicken, pollen" rows={2} />
+          </label>
+          <label>Behavior notes
+            <textarea value={behavior} onChange={(e) => setBehavior(e.target.value)} placeholder="e.g. Reactive on leash, anxious around loud noises" rows={2} />
+          </label>
+          <label>Special instructions
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Needs medication twice daily, feed at 7am/6pm" rows={2} />
+          </label>
+        </fieldset>
+
+        <fieldset className="profile-form__group">
+          <legend>Contacts</legend>
+          <label>Vet name
+            <input value={vetName} onChange={(e) => setVetName(e.target.value)} placeholder="e.g. Dr. Smith at Riverside Vet" />
+          </label>
+          <label>Vet phone
+            <input type="tel" value={vetPhone} onChange={(e) => setVetPhone(e.target.value)} placeholder="(555) 000-0000" />
+          </label>
+          <label>Emergency contact
+            <input value={emergencyContact} onChange={(e) => setEmergencyContact(e.target.value)} placeholder="Name · phone number" />
+          </label>
+        </fieldset>
+
+        <div className="actions">
+          <button className="btn btn--primary" type="submit" disabled={busy}>
+            {busy ? 'Saving…' : 'Save profile'}
           </button>
           <button className="btn" type="button" onClick={onCancel} disabled={busy}>
             Cancel

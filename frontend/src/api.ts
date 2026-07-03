@@ -12,7 +12,19 @@ export interface Pet {
   id: string;
   name: string;
   species: string;
-  avatarUrl?: string; // short-lived presigned GET URL, present when a photo exists
+  avatarUrl?: string;
+  // optional health profile fields
+  breed?: string;
+  dob?: string;         // YYYY-MM-DD
+  weight?: string;
+  allergies?: string;
+  behavior?: string;
+  vetName?: string;
+  vetPhone?: string;
+  emergencyContact?: string;
+  microchip?: string;
+  fixed?: boolean;
+  notes?: string;
 }
 
 export interface Doc {
@@ -75,8 +87,8 @@ export function createPet(name: string, species: string): Promise<{ pet: Pet }> 
   return request('POST', '/pets', { name, species });
 }
 
-export function updatePet(id: string, name: string, species: string): Promise<{ pet: Pet }> {
-  return request('PUT', `/pets/${id}`, { name, species });
+export function updatePet(id: string, fields: Omit<Pet, 'id' | 'avatarUrl'>): Promise<{ pet: Pet }> {
+  return request('PUT', `/pets/${id}`, fields);
 }
 
 export function deletePet(id: string): Promise<void> {

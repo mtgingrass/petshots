@@ -65,9 +65,21 @@ const cleanExpiry = (v: unknown): string | undefined =>
 const isUuid = (v: string | undefined): v is string =>
   !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 
+const str = (v: unknown, max: number) => String(v ?? '').slice(0, max) || undefined;
 const cleanPet = (input: Record<string, unknown>) => ({
-  name: String(input.name ?? '').slice(0, 100),
-  species: String(input.species ?? '').slice(0, 50),
+  name:              String(input.name ?? '').slice(0, 100),
+  species:           String(input.species ?? '').slice(0, 50),
+  breed:             str(input.breed, 100),
+  dob:               str(input.dob, 10),      // YYYY-MM-DD
+  weight:            str(input.weight, 50),
+  allergies:         str(input.allergies, 500),
+  behavior:          str(input.behavior, 500),
+  vetName:           str(input.vetName, 150),
+  vetPhone:          str(input.vetPhone, 50),
+  emergencyContact:  str(input.emergencyContact, 200),
+  microchip:         str(input.microchip, 50),
+  fixed:             input.fixed === true ? true : undefined,
+  notes:             str(input.notes, 1000),
 });
 
 async function readJson<T>(key: string): Promise<T | null> {

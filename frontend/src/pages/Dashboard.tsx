@@ -495,6 +495,11 @@ export function Dashboard() {
                 </button>
               )}
             </div>
+            {pets.length >= MAX_PETS && (
+              <p className="pet-pins__limit">
+                You're at the {MAX_PETS}-pet limit. Remove a pet to add another.
+              </p>
+            )}
             <ShareAppButton onNotice={showNotice} />
           </>
         )}

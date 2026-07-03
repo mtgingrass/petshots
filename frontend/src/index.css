@@ -581,6 +581,14 @@ a {
   background: rgba(108, 92, 231, 0.18);
 }
 
+/* Shown instead of the add pin when the household is full. */
+.pet-pins__limit {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--subtle);
+  margin: -0.25rem 0 1rem;
+}
+
 .share-app-btn {
   display: block;
   margin: 0.5rem auto 0;

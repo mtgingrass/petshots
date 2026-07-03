@@ -101,14 +101,14 @@ function petOverallStatus(docs: Doc[]): Status {
   }, 'none');
 }
 
-function petStatusLine(docs: Doc[]): string {
+// Compact status that fits under a pet pin without truncating.
+function petPinStatus(docs: Doc[]): string {
   if (docs.length === 0) return 'No records yet';
   const overdue = docs.filter((d) => statusOf(d.expiry) === 'overdue').length;
+  if (overdue > 0) return `${overdue} overdue`;
   const dueSoon = docs.filter((d) => statusOf(d.expiry) === 'due-soon').length;
-  const base = `${docs.length} record${docs.length !== 1 ? 's' : ''}`;
-  if (overdue > 0) return `${base} · ${overdue} overdue`;
-  if (dueSoon > 0) return `${base} · ${dueSoon} due soon`;
-  return base;
+  if (dueSoon > 0) return `${dueSoon} due soon`;
+  return 'All current';
 }
 
 // Match common vaccine labels to a plain-English blurb. Returns null for unknowns.
@@ -492,23 +492,23 @@ export function Dashboard() {
         ) : (
           <>
             <h2 className="section-title">Your Pets</h2>
-            <div className="pet-overview">
+            <div className="pet-pins">
               {pets.map((pet) => (
-                <PetSummaryCard
+                <PetPin
                   key={pet.id}
                   pet={pet}
                   docs={allDocs[pet.id]}
                   docsLoading={allDocsLoading}
                   onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
-                  onEdit={() => setDashView({ type: 'edit-pet', petId: pet.id })}
                 />
               ))}
               {pets.length < MAX_PETS && (
                 <button
-                  className="pet-add-card"
+                  className="pet-pin pet-pin--add"
                   onClick={() => setDashView({ type: 'add-pet' })}
                 >
-                  <span aria-hidden="true">+</span> Add pet
+                  <span className="pet-pin__add-circle" aria-hidden="true">+</span>
+                  <span className="pet-pin__name">Add pet</span>
                 </button>
               )}
             </div>
@@ -639,50 +639,34 @@ function PetAvatar({ pet, size = 36 }: { pet: Pet; size?: number }) {
   );
 }
 
-// ---- pet overview card ----
+// ---- pet overview pin (big round portrait, like a pinned contact) ----
 
-function PetSummaryCard({
+function PetPin({
   pet,
   docs,
   docsLoading,
   onSelect,
-  onEdit,
 }: {
   pet: Pet;
   docs: Doc[] | undefined;
   docsLoading: boolean;
   onSelect: () => void;
-  onEdit: () => void;
 }) {
   const status = docs ? petOverallStatus(docs) : 'none';
-  const subLine = docsLoading && !docs ? 'Loading…' : petStatusLine(docs ?? []);
+  const subLine = docsLoading && !docs ? 'Loading…' : petPinStatus(docs ?? []);
 
   return (
-    <div className="pet-summary-card">
-      <button className="pet-summary-card__tap" onClick={onSelect} aria-label={`View ${pet.name}'s records`}>
-        <PetAvatar pet={pet} size={44} />
-        <div className="pet-summary-card__body">
-          <div className="pet-summary-card__name">{pet.name}</div>
-          <div className="pet-summary-card__sub">
-            {subLine}
-            {docs && docs.length > 0 && status !== 'none' && (
-              <span className={`status status--${status} pet-summary-card__pill`}>
-                {status === 'overdue' ? 'Overdue' : status === 'due-soon' ? 'Due soon' : 'Current'}
-              </span>
-            )}
-          </div>
-        </div>
-        <span className="pet-summary-card__chevron" aria-hidden="true">›</span>
-      </button>
-      <button
-        className="pet-summary-card__edit btn btn--icon"
-        aria-label={`Edit ${pet.name}`}
-        onClick={onEdit}
-        title={`Edit ${pet.name}`}
-      >
-        ✎
-      </button>
-    </div>
+    <button
+      className="pet-pin"
+      onClick={onSelect}
+      aria-label={`View ${pet.name}'s records — ${subLine}`}
+    >
+      <span className={`pet-pin__ring pet-pin__ring--${status}`}>
+        <PetAvatar pet={pet} size={88} />
+      </span>
+      <span className="pet-pin__name">{pet.name}</span>
+      <span className={`pet-pin__status pet-pin__status--${status}`}>{subLine}</span>
+    </button>
   );
 }
 
@@ -876,24 +860,26 @@ function PetDetailScreen({
   onNotice: (msg: string) => void;
 }) {
   const [tab, setTab] = useState<'records' | 'profile' | 'share'>('records');
+  const [showPhoto, setShowPhoto] = useState(false);
 
   return (
     <div className="screen-view">
+      {/* Left slot: Present (records only). Right slot: Edit — always top-right,
+          scoped to the active tab (records = pet, profile = health profile). */}
       <nav className="screen-nav">
         {tab === 'records' && docs.length > 0 ? (
           <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
             ▶ Present
           </button>
-        ) : tab === 'profile' ? (
-          <button className="screen-nav__back btn btn--link" type="button" onClick={onEditProfile}>
-            ✎ Edit
-          </button>
         ) : (
           <span />
         )}
-        <span className="screen-nav__title">{pet.name}</span>
         {tab === 'records' ? (
           <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
+            ✎ Edit
+          </button>
+        ) : tab === 'profile' ? (
+          <button className="screen-nav__action btn btn--link" type="button" onClick={onEditProfile}>
             ✎ Edit
           </button>
         ) : (
@@ -903,7 +889,18 @@ function PetDetailScreen({
 
       <div className="screen-view__body">
         <div className="pet-detail__hero">
-          <PetAvatar pet={pet} size={72} />
+          {pet.avatarUrl ? (
+            <button
+              className="pet-detail__hero-photo"
+              type="button"
+              onClick={() => setShowPhoto(true)}
+              aria-label={`View ${pet.name}'s photo full screen`}
+            >
+              <PetAvatar pet={pet} size={72} />
+            </button>
+          ) : (
+            <PetAvatar pet={pet} size={72} />
+          )}
           <div className="pet-detail__hero-info">
             <span className="pet-detail__hero-name">{pet.name}</span>
             <span className="subtle">
@@ -960,6 +957,30 @@ function PetDetailScreen({
           />
         )}
       </div>
+      {showPhoto && pet.avatarUrl && (
+        <PhotoLightbox src={pet.avatarUrl} alt={pet.name} onClose={() => setShowPhoto(false)} />
+      )}
+    </div>
+  );
+}
+
+// ---- fullscreen photo lightbox ----
+
+function PhotoLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label={`${alt}'s photo`} onClick={onClose}>
+      <button className="present__exit" type="button" aria-label="Close photo" onClick={onClose}>
+        ✕
+      </button>
+      <img className="lightbox__img" src={src} alt={alt} />
     </div>
   );
 }

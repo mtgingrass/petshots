@@ -101,8 +101,22 @@ export function PassportPage() {
 
   if (loading) {
     return (
-      <div className="page page--centered">
-        <p className="subtle">Loading…</p>
+      <div className="page">
+        <header className="passport-page__header">
+          <a className="wordmark" href="/">🐾 Petshots</a>
+        </header>
+        <div className="pet-detail__hero">
+          <span className="skeleton" style={{ width: 72, height: 72, borderRadius: '50%' }} />
+          <div className="pet-detail__hero-info" style={{ flex: 1 }}>
+            <span className="skeleton skeleton--title" />
+            <span className="skeleton skeleton--line" style={{ width: '55%' }} />
+          </div>
+        </div>
+        <section className="card">
+          <span className="skeleton skeleton--line" />
+          <span className="skeleton skeleton--line" style={{ width: '80%' }} />
+          <span className="skeleton skeleton--line" style={{ width: '65%' }} />
+        </section>
       </div>
     );
   }

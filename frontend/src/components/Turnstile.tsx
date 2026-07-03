@@ -3,6 +3,7 @@
 // parent remounts this (via `key`) to get a fresh one after a failed submit.
 import { useEffect, useRef } from 'react';
 import { config } from '../config';
+import { getSavedTheme } from '../utils/theme';
 
 interface TurnstileApi {
   render: (el: HTMLElement, opts: Record<string, unknown>) => string;
@@ -29,6 +30,7 @@ export function Turnstile({ onToken }: { onToken: (token: string) => void }) {
       if (!window.turnstile || !containerRef.current || widgetId) return;
       widgetId = window.turnstile.render(containerRef.current, {
         sitekey: config.turnstileSiteKey,
+        theme: getSavedTheme(),
         callback: (token: string) => onTokenRef.current(token),
         'error-callback': () => onTokenRef.current(''),
         'expired-callback': () => onTokenRef.current(''),

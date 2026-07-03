@@ -466,7 +466,6 @@ export function Dashboard() {
             <PetDetailScreen
               pet={detailPet}
               docs={detailDocs}
-              onBack={backToOverview}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPresent={() => setPresenting(true)}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
@@ -852,7 +851,6 @@ function DashboardSkeleton() {
 function PetDetailScreen({
   pet,
   docs,
-  onBack,
   onEditPet,
   onPresent,
   onEditProfile,
@@ -866,7 +864,6 @@ function PetDetailScreen({
 }: {
   pet: Pet;
   docs: Doc[];
-  onBack: () => void;
   onEditPet: () => void;
   onPresent: () => void;
   onEditProfile: () => void;
@@ -1470,7 +1467,8 @@ function ShareTabSection({
 
   useEffect(() => {
     if (!passportUrl) { setQrDataUrl(null); return; }
-    void QRCode.toDataURL(passportUrl, { width: 220, margin: 2, color: { dark: '#e7e9f3', light: '#1a1e33' } })
+    // Always dark-on-white: inverted QR codes fail on many scanners.
+    void QRCode.toDataURL(passportUrl, { width: 220, margin: 2, color: { dark: '#111827', light: '#ffffff' } })
       .then(setQrDataUrl)
       .catch(() => {});
   }, [passportUrl]);

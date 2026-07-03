@@ -142,10 +142,11 @@ async function main() {
   let u = await uploadDoc(token, petId, 'Rabies 2026');
   check(u.status === 200 && u.putStatus === 204, `presign 200, S3 POST ${u.putStatus}`);
 
-  console.log('\n[4b] oversized upload (11 MB) is rejected by the size policy');
-  const big = Buffer.alloc(11 * 1024 * 1024, 0x20);
+  console.log('\n[4b] oversized upload (21 MB) is rejected by the size policy');
+  // Limit is MAX_FILE_BYTES = 20 MB (raised from 10 MB in session 11).
+  const big = Buffer.alloc(21 * 1024 * 1024, 0x20);
   let bigUp = await uploadDoc(token, petId, 'Too Big', big);
-  check(bigUp.putStatus >= 400, `11 MB upload rejected server-side (got ${bigUp.putStatus})`);
+  check(bigUp.putStatus >= 400, `21 MB upload rejected server-side (got ${bigUp.putStatus})`);
 
   console.log('\n[5] GET docs shows it with label + url');
   r = await api(token, 'GET', `/pets/${petId}/docs`);

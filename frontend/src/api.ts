@@ -78,11 +78,21 @@ export interface Doc {
 export const MAX_PETS = 3;
 export const MAX_DOCS = 4;
 
+// fetch() rejects with a browser-internal message ("Failed to fetch") when the
+// network is down or CORS blocks the call — translate it for humans.
+async function friendlyFetch(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new Error("Can't reach the server. Check your connection and try again.");
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const token = await getAccessToken();
   if (!token) throw new Error('Your session has expired. Please log in again.');
 
-  const res = await fetch(config.apiBaseUrl + path, {
+  const res = await friendlyFetch(config.apiBaseUrl + path, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -109,7 +119,7 @@ async function postToS3(presign: { url: string; fields: Record<string, string> }
   const form = new FormData();
   for (const [k, v] of Object.entries(presign.fields)) form.append(k, v);
   form.append('file', file);
-  const res = await fetch(presign.url, { method: 'POST', body: form });
+  const res = await friendlyFetch(presign.url, { method: 'POST', body: form });
   // S3 returns 204 on success; a 403 here usually means the file exceeded the
   // policy's size limit.
   if (!res.ok) throw new Error(`Upload to storage failed (${res.status})`);
@@ -191,7 +201,7 @@ export function revokePassport(petId: string): Promise<void> {
 }
 
 export async function fetchPassport(token: string): Promise<PassportData> {
-  const res = await fetch(config.apiBaseUrl + `/passport/${token}`);
+  const res = await friendlyFetch(config.apiBaseUrl + `/passport/${token}`);
   if (!res.ok) {
     const data = await res.json().catch(() => null);
     throw new Error(data?.error ?? `Failed to load passport (${res.status})`);

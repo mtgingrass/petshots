@@ -29,3 +29,4 @@ CLAUDE.md
 infra/**/*.js
 infra/**/*.d.ts
 !infra/jest.config.js
+docs/

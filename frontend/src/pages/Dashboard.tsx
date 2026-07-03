@@ -1876,7 +1876,7 @@ function SettingsScreen({
     setBusy(true);
     onError(null);
     try {
-      await saveSettings(settings);
+      await saveSettings({ ...settings, email });
       onNotice('Settings saved');
       onDone();
     } catch (err) {
@@ -1969,7 +1969,7 @@ function SettingsScreen({
 
               {settings?.remindersEnabled && (
                 <>
-                  <p className="settings-hint subtle">Send reminders:</p>
+                  <p className="settings-hint subtle">Send reminders to <strong>{email}</strong>:</p>
                   <div className="settings-days">
                     {REMINDER_DAY_OPTIONS.map(({ value, label }) => (
                       <label key={value} className="settings-day-chip">
@@ -1982,16 +1982,6 @@ function SettingsScreen({
                       </label>
                     ))}
                   </div>
-                  <label className="settings-row__label" style={{ marginTop: '0.75rem' }}>
-                    Send to
-                    <input
-                      type="email"
-                      value={settings.email}
-                      onChange={(e) => setSettings({ ...settings, email: e.target.value })}
-                      placeholder="your@email.com"
-                      required={settings.remindersEnabled}
-                    />
-                  </label>
                 </>
               )}
             </fieldset>

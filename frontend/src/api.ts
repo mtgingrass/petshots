@@ -29,6 +29,26 @@ export interface Pet {
   notes?: string;
 }
 
+export interface UserSettings {
+  email: string;
+  remindersEnabled: boolean;
+  reminderDays: number[];
+}
+
+export const DEFAULT_SETTINGS: UserSettings = {
+  email: '',
+  remindersEnabled: false,
+  reminderDays: [7, 30],
+};
+
+export function getSettings(): Promise<UserSettings> {
+  return request('GET', '/settings');
+}
+
+export function saveSettings(settings: UserSettings): Promise<UserSettings> {
+  return request('PUT', '/settings', settings);
+}
+
 export interface PassportDoc {
   id: string;
   label: string;

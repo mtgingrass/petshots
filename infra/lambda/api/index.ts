@@ -482,6 +482,36 @@ export const handler = async (
         return { statusCode: 204 };
       }
 
+      // ---- user settings ----
+
+      case 'GET /settings': {
+        const settings = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
+        return json(200, settings ?? { remindersEnabled: false, reminderDays: [7, 30] });
+      }
+
+      case 'PUT /settings': {
+        const input = JSON.parse(event.body ?? '{}');
+        const validDays = [1, 3, 7, 14, 30, 60];
+        const settings = {
+          email: typeof input.email === 'string' ? input.email.slice(0, 254) : '',
+          remindersEnabled: input.remindersEnabled === true,
+          reminderDays: Array.isArray(input.reminderDays)
+            ? (input.reminderDays as unknown[]).filter(
+                (d): d is number => typeof d === 'number' && validDays.includes(d),
+              )
+            : [7, 30],
+        };
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: `users/${sub}/settings.json`,
+            Body: JSON.stringify(settings),
+            ContentType: 'application/json',
+          }),
+        );
+        return json(200, settings);
+      }
+
       // ---- passport management ----
 
       case 'POST /pets/{petId}/passport': {

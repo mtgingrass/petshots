@@ -16,11 +16,16 @@ import {
   deleteDoc,
   createPassport,
   revokePassport,
+  getSettings,
+  saveSettings,
   MAX_PETS,
   MAX_DOCS,
+  DEFAULT_SETTINGS,
   type Pet,
   type Doc,
+  type UserSettings,
 } from '../api';
+import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { SiteFooter } from '../components/SiteFooter';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
@@ -135,7 +140,8 @@ type DashView =
   | { type: 'detail'; petId: string }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
-  | { type: 'change-password' };
+  | { type: 'change-password' }
+  | { type: 'settings' };
 
 type EditView =
   | { type: 'list' }
@@ -149,6 +155,8 @@ type EditView =
 export function Dashboard() {
   const { email, logout } = useAuth();
   const navigate = useNavigate();
+
+  const [theme, setTheme] = useState<Theme>(getSavedTheme);
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
   const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
@@ -313,6 +321,7 @@ export function Dashboard() {
           )}
           <ProfileMenu
             email={email ?? ''}
+            onSettings={() => setDashView({ type: 'settings' })}
             onChangePassword={() => setDashView({ type: 'change-password' })}
             onLogout={handleLogout}
           />
@@ -385,6 +394,15 @@ export function Dashboard() {
               />
             </div>
           </div>
+        ) : dashView.type === 'settings' ? (
+          <SettingsScreen
+            email={email ?? ''}
+            theme={theme}
+            onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
+            onDone={backToOverview}
+            onError={setError}
+            onNotice={showNotice}
+          />
         ) : dashView.type === 'change-password' ? (
           <ChangePasswordScreen
             onDone={() => { backToOverview(); showNotice('Password changed'); }}
@@ -503,10 +521,12 @@ export function Dashboard() {
 
 function ProfileMenu({
   email,
+  onSettings,
   onChangePassword,
   onLogout,
 }: {
   email: string;
+  onSettings: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }) {
@@ -544,6 +564,12 @@ function ProfileMenu({
       </button>
       {open && (
         <div className="profile-menu__dropdown" role="menu">
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onSettings(); }}
+          >
+            Settings
+          </button>
           <button
             role="menuitem"
             onClick={() => { setOpen(false); onChangePassword(); }}
@@ -1789,6 +1815,166 @@ function PresentScreen({
         )}
         {docs.length > 1 && (
           <span className="present__counter">{current + 1} / {docs.length}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- settings screen ----
+
+const REMINDER_DAY_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: '1 day before' },
+  { value: 3, label: '3 days before' },
+  { value: 7, label: '1 week before' },
+  { value: 14, label: '2 weeks before' },
+  { value: 30, label: '1 month before' },
+  { value: 60, label: '2 months before' },
+];
+
+function SettingsScreen({
+  email,
+  theme,
+  onThemeChange,
+  onDone,
+  onError,
+  onNotice,
+}: {
+  email: string;
+  theme: Theme;
+  onThemeChange: (t: Theme) => void;
+  onDone: () => void;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [settings, setSettings] = useState<UserSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getSettings()
+      .then((s) => setSettings({ ...s, email: s.email || email }))
+      .catch(() => setSettings({ ...DEFAULT_SETTINGS, email }))
+      .finally(() => setLoading(false));
+  }, [email]);
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    if (!settings) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await saveSettings(settings);
+      onNotice('Settings saved');
+      onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not save settings');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleDay(day: number) {
+    if (!settings) return;
+    const days = settings.reminderDays.includes(day)
+      ? settings.reminderDays.filter((d) => d !== day)
+      : [...settings.reminderDays, day].sort((a, b) => a - b);
+    setSettings({ ...settings, reminderDays: days });
+  }
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onDone}>
+          ← Dashboard
+        </button>
+        <span className="screen-nav__title">Settings</span>
+      </nav>
+      <div className="screen-view__body">
+        {loading ? (
+          <p className="subtle">Loading…</p>
+        ) : (
+          <form className="form settings-form" onSubmit={handleSave}>
+
+            <fieldset className="settings-group">
+              <legend>Appearance</legend>
+              <div className="settings-row">
+                <span className="settings-row__label">Theme</span>
+                <div className="theme-toggle">
+                  <button
+                    type="button"
+                    className={`theme-toggle__btn${theme === 'dark' ? ' theme-toggle__btn--active' : ''}`}
+                    onClick={() => onThemeChange('dark')}
+                  >
+                    Dark
+                  </button>
+                  <button
+                    type="button"
+                    className={`theme-toggle__btn${theme === 'light' ? ' theme-toggle__btn--active' : ''}`}
+                    onClick={() => onThemeChange('light')}
+                  >
+                    Light
+                  </button>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset className="settings-group">
+              <legend>Email Reminders</legend>
+              <div className="settings-row">
+                <label className="settings-row__label" htmlFor="reminders-toggle">
+                  Vaccine reminders
+                  <span className="subtle settings-row__sub">Get emailed before records expire</span>
+                </label>
+                <label className="toggle" aria-label="Toggle vaccine reminders">
+                  <input
+                    id="reminders-toggle"
+                    type="checkbox"
+                    checked={settings?.remindersEnabled ?? false}
+                    onChange={(e) => settings && setSettings({ ...settings, remindersEnabled: e.target.checked })}
+                  />
+                  <span className="toggle__track" />
+                </label>
+              </div>
+
+              {settings?.remindersEnabled && (
+                <>
+                  <p className="settings-hint subtle">Send reminders:</p>
+                  <div className="settings-days">
+                    {REMINDER_DAY_OPTIONS.map(({ value, label }) => (
+                      <label key={value} className="settings-day-chip">
+                        <input
+                          type="checkbox"
+                          checked={settings.reminderDays.includes(value)}
+                          onChange={() => toggleDay(value)}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <label className="settings-row__label" style={{ marginTop: '0.75rem' }}>
+                    Send to
+                    <input
+                      type="email"
+                      value={settings.email}
+                      onChange={(e) => setSettings({ ...settings, email: e.target.value })}
+                      placeholder="your@email.com"
+                      required={settings.remindersEnabled}
+                    />
+                  </label>
+                </>
+              )}
+            </fieldset>
+
+            <div className="actions">
+              <button className="btn btn--primary" type="submit" disabled={busy}>
+                {busy ? 'Saving…' : 'Save settings'}
+              </button>
+              <button className="btn" type="button" onClick={onDone} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </form>
         )}
       </div>
     </div>

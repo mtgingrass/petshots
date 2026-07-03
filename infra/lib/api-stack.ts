@@ -3,6 +3,9 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { HttpApi, HttpMethod, CorsHttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -102,6 +105,36 @@ export class ApiStack extends cdk.Stack {
 
     const integration = new HttpLambdaIntegration('ApiIntegration', apiFn);
 
+    // Daily reminder Lambda — triggered by EventBridge, not API Gateway.
+    const reminderFn = new lambdaNode.NodejsFunction(this, 'ReminderFn', {
+      entry: path.join(__dirname, '../lambda/reminder/index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(5),
+      environment: {
+        UPLOADS_BUCKET: uploads.bucketName,
+        FROM_EMAIL: 'no-reply@petshots.app',
+        APP_URL: 'https://petshots.app',
+      },
+      bundling: { externalModules: [], minify: true, target: 'node20' },
+    });
+    uploads.grantRead(reminderFn);
+    reminderFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail', 'sesv2:SendEmail'],
+        resources: ['*'],
+      }),
+    );
+
+    // Runs at 9:00 AM UTC daily (5am Eastern in summer, 4am in winter).
+    const dailyRule = new events.Rule(this, 'DailyReminderRule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '9', day: '*', month: '*', year: '*' }),
+      description: 'Fires the Petshots vaccine reminder Lambda once per day',
+    });
+    dailyRule.addTarget(new eventsTargets.LambdaFunction(reminderFn));
+
     const authedRoutes: [HttpMethod, string][] = [
       [HttpMethod.GET, '/pets'],
       [HttpMethod.POST, '/pets'],
@@ -115,6 +148,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
       [HttpMethod.POST, '/pets/{petId}/passport'],
       [HttpMethod.DELETE, '/pets/{petId}/passport'],
+      [HttpMethod.GET, '/settings'],
+      [HttpMethod.PUT, '/settings'],
     ];
     for (const [method, routePath] of authedRoutes) {
       httpApi.addRoutes({ path: routePath, methods: [method], integration, authorizer });

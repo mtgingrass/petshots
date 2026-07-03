@@ -500,6 +500,7 @@ export const handler = async (
                 (d): d is number => typeof d === 'number' && validDays.includes(d),
               )
             : [7, 30],
+          marketingOptIn: input.marketingOptIn === true,
         };
         await s3.send(
           new PutObjectCommand({

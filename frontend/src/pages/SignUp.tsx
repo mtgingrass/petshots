@@ -14,6 +14,7 @@ export function SignUp() {
   const [code, setCode] = useState('');
   const [captchaToken, setCaptchaToken] = useState('');
   const [captchaKey, setCaptchaKey] = useState(0); // bump to remount the widget
+  const [marketingOptIn, setMarketingOptIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -23,6 +24,8 @@ export function SignUp() {
     setBusy(true);
     try {
       await signUp(email, password, captchaToken);
+      // Store opt-in for pickup on first dashboard load (can't call API until confirmed + logged in).
+      localStorage.setItem('petshots.pendingMarketingOptIn', marketingOptIn ? 'true' : 'false');
       setPhase('confirm');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign-up failed');
@@ -81,6 +84,14 @@ export function SignUp() {
           <p className="subtle">
             8+ characters with upper, lower, number, and symbol.
           </p>
+          <label className="marketing-opt-in">
+            <input
+              type="checkbox"
+              checked={marketingOptIn}
+              onChange={(e) => setMarketingOptIn(e.target.checked)}
+            />
+            <span>Send me product updates and tips from Petshots</span>
+          </label>
           <Turnstile key={captchaKey} onToken={setCaptchaToken} />
           <button className="btn btn--primary" type="submit" disabled={busy || !captchaToken}>
             {busy ? 'Creating…' : 'Sign up'}

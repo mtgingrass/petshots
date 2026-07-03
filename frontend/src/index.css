@@ -1649,6 +1649,27 @@ a {
   text-align: center;
 }
 
+/* ---------- Marketing opt-in checkbox (signup) ---------- */
+
+.marketing-opt-in {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  font-size: 0.875rem;
+  color: var(--subtle);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.marketing-opt-in input[type="checkbox"] {
+  margin-top: 0.15rem;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
 /* ---------- Settings screen ---------- */
 
 .settings-form {
@@ -1693,6 +1714,12 @@ a {
 .settings-row__sub {
   font-size: 0.8rem;
   font-weight: 400;
+}
+
+.settings-group__divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.75rem 0 0;
 }
 
 .settings-hint {

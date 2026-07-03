@@ -33,12 +33,14 @@ export interface UserSettings {
   email: string;
   remindersEnabled: boolean;
   reminderDays: number[];
+  marketingOptIn: boolean;
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
   email: '',
   remindersEnabled: false,
   reminderDays: [7, 30],
+  marketingOptIn: false,
 };
 
 export function getSettings(): Promise<UserSettings> {

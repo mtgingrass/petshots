@@ -248,6 +248,18 @@ export function Dashboard() {
     void loadPets();
   }, [loadPets]);
 
+  // Flush marketing opt-in captured at signup (stored before the user was logged in).
+  useEffect(() => {
+    const pending = localStorage.getItem('petshots.pendingMarketingOptIn');
+    if (pending === null || !email) return;
+    localStorage.removeItem('petshots.pendingMarketingOptIn');
+    const marketingOptIn = pending === 'true';
+    void getSettings()
+      .catch(() => ({ ...DEFAULT_SETTINGS, email: email ?? '' }))
+      .then((s) => saveSettings({ ...s, email: email ?? s.email, marketingOptIn }))
+      .catch(() => {}); // non-fatal
+  }, [email]);
+
   // When the pets list changes (initial load, add, delete), reload all docs.
   useEffect(() => {
     if (pets !== null) void loadAllDocs(pets);
@@ -1853,7 +1865,7 @@ function SettingsScreen({
 
   useEffect(() => {
     getSettings()
-      .then((s) => setSettings({ ...s, email: s.email || email }))
+      .then((s) => setSettings({ ...DEFAULT_SETTINGS, ...s, email: s.email || email }))
       .catch(() => setSettings({ ...DEFAULT_SETTINGS, email }))
       .finally(() => setLoading(false));
   }, [email]);
@@ -1920,7 +1932,25 @@ function SettingsScreen({
             </fieldset>
 
             <fieldset className="settings-group">
-              <legend>Email Reminders</legend>
+              <legend>Email</legend>
+              <div className="settings-row">
+                <label className="settings-row__label" htmlFor="marketing-toggle">
+                  Product updates
+                  <span className="subtle settings-row__sub">Tips, new features, and Petshots news</span>
+                </label>
+                <label className="toggle" aria-label="Toggle marketing emails">
+                  <input
+                    id="marketing-toggle"
+                    type="checkbox"
+                    checked={settings?.marketingOptIn ?? false}
+                    onChange={(e) => settings && setSettings({ ...settings, marketingOptIn: e.target.checked })}
+                  />
+                  <span className="toggle__track" />
+                </label>
+              </div>
+
+              <div className="settings-group__divider" />
+
               <div className="settings-row">
                 <label className="settings-row__label" htmlFor="reminders-toggle">
                   Vaccine reminders

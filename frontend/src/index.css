@@ -556,10 +556,12 @@ a {
 }
 
 .pet-pin--add .pet-pin__name {
-  color: var(--subtle);
-  font-weight: 500;
+  color: var(--primary);
+  font-weight: 600;
 }
 
+/* Purple by default — hover doesn't exist on phones, and this is the
+   primary "grow your household" affordance. */
 .pet-pin__add-circle {
   display: inline-flex;
   align-items: center;
@@ -567,16 +569,16 @@ a {
   width: 94px;
   height: 94px;
   border-radius: 999px;
-  border: 2px dashed var(--border);
-  color: var(--subtle);
+  border: 2px dashed var(--primary);
+  background: rgba(108, 92, 231, 0.08);
+  color: var(--primary);
   font-size: 2rem;
   line-height: 1;
-  transition: border-color 0.15s, color 0.15s;
+  transition: background 0.15s;
 }
 
 .pet-pin--add:hover .pet-pin__add-circle {
-  border-color: var(--primary);
-  color: var(--primary);
+  background: rgba(108, 92, 231, 0.18);
 }
 
 .share-app-btn {
@@ -923,14 +925,6 @@ a {
   width: 100%;
   text-align: center;
   justify-content: center;
-}
-
-.doc-detail__secondary {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding-top: 0.25rem;
-  border-top: 1px solid var(--border);
 }
 
 /* ---------- Dashboard ---------- */

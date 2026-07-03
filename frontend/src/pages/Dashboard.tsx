@@ -12,7 +12,6 @@ import {
   listDocs,
   uploadDoc,
   updateDoc,
-  updateDocVersion,
   deleteDoc,
   createPassport,
   revokePassport,
@@ -147,7 +146,6 @@ type EditView =
   | { type: 'list' }
   | { type: 'doc'; doc: Doc; petId: string }
   | { type: 'edit'; doc: Doc; petId: string }
-  | { type: 'update'; doc: Doc; petId: string }
   | { type: 'edit-profile' };
 
 // ---- main component ----
@@ -434,18 +432,6 @@ export function Dashboard() {
               onError={setError}
               onNotice={showNotice}
             />
-          ) : editView.type === 'update' ? (
-            <UpdateDocScreen
-              petId={editView.petId}
-              doc={editView.doc}
-              onDone={async () => {
-                setEditView({ type: 'list' });
-                await loadPetDocs(editView.petId);
-              }}
-              onCancel={() => setEditView({ type: 'list' })}
-              onError={setError}
-              onNotice={showNotice}
-            />
           ) : editView.type === 'edit-profile' ? (
             <ProfileEditScreen
               pet={detailPet}
@@ -456,11 +442,9 @@ export function Dashboard() {
             />
           ) : editView.type === 'doc' ? (
             <DocDetailScreen
-              petId={editView.petId}
               doc={editView.doc}
               onBack={() => setEditView({ type: 'list' })}
               onEdit={() => setEditView({ type: 'edit', doc: editView.doc, petId: editView.petId })}
-              onUpdate={() => setEditView({ type: 'update', doc: editView.doc, petId: editView.petId })}
             />
           ) : (
             <PetDetailScreen
@@ -471,7 +455,6 @@ export function Dashboard() {
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
-              onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
               onDocsChanged={() => loadPetDocs(detailPet.id)}
               onPassportChanged={() => void loadPets()}
               onError={setError}
@@ -840,7 +823,6 @@ function PetDetailScreen({
   onEditProfile,
   onViewDoc,
   onEditDoc,
-  onUpdateDoc,
   onDocsChanged,
   onPassportChanged,
   onError,
@@ -853,7 +835,6 @@ function PetDetailScreen({
   onEditProfile: () => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
-  onUpdateDoc: (doc: Doc) => void;
   onDocsChanged: () => Promise<void>;
   onPassportChanged: () => void;
   onError: (msg: string | null) => void;
@@ -943,7 +924,6 @@ function PetDetailScreen({
               onNotice={onNotice}
               onViewDoc={onViewDoc}
               onEditDoc={onEditDoc}
-              onUpdateDoc={onUpdateDoc}
             />
           </>
         ) : tab === 'profile' ? (
@@ -995,7 +975,6 @@ function DocsSection({
   onNotice,
   onViewDoc,
   onEditDoc,
-  onUpdateDoc,
 }: {
   petId: string;
   docs: Doc[];
@@ -1004,7 +983,6 @@ function DocsSection({
   onNotice: (msg: string) => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
-  onUpdateDoc: (doc: Doc) => void;
 }) {
   const [showUpload, setShowUpload] = useState(false);
   const [label, setLabel] = useState('');
@@ -1067,7 +1045,6 @@ function DocsSection({
               doc={doc}
               onView={() => onViewDoc(doc)}
               onEdit={() => { setShowUpload(false); onEditDoc(doc); }}
-              onUpdate={() => { setShowUpload(false); onUpdateDoc(doc); }}
               onChanged={onChanged}
               onError={onError}
               onNotice={onNotice}
@@ -1122,7 +1099,6 @@ function DocItem({
   doc,
   onView,
   onEdit,
-  onUpdate,
   onChanged,
   onError,
   onNotice,
@@ -1131,7 +1107,6 @@ function DocItem({
   doc: Doc;
   onView: () => void;
   onEdit: () => void;
-  onUpdate: () => void;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
@@ -1223,15 +1198,6 @@ function DocItem({
             >
               Edit label / date
             </button>
-            <button
-              role="menuitem"
-              onClick={() => {
-                setMenuOpen(false);
-                onUpdate();
-              }}
-            >
-              Update record
-            </button>
             {confirming ? (
               <button role="menuitem" className="doc-menu__danger" onClick={handleDelete}>
                 {busy ? 'Deleting…' : 'Confirm delete'}
@@ -1253,17 +1219,13 @@ function DocItem({
 }
 
 function DocDetailScreen({
-  petId: _petId,
   doc,
   onBack,
   onEdit,
-  onUpdate,
 }: {
-  petId: string;
   doc: Doc;
   onBack: () => void;
   onEdit: () => void;
-  onUpdate: () => void;
 }) {
   const status = statusOf(doc.expiry);
   const blurb = vaccineBlurb(doc.label);
@@ -1276,6 +1238,9 @@ function DocDetailScreen({
           ← Records
         </button>
         <span className="screen-nav__title">Record Details</span>
+        <button className="screen-nav__action btn btn--link" type="button" onClick={onEdit}>
+          ✎ Edit
+        </button>
       </nav>
       <div className="screen-view__body doc-detail">
         <h2 className="doc-detail__label">{doc.label}</h2>
@@ -1305,14 +1270,6 @@ function DocDetailScreen({
           Open certificate ↗
         </a>
 
-        <div className="doc-detail__secondary">
-          <button className="btn btn--link" type="button" onClick={onEdit}>
-            Edit label / date
-          </button>
-          <button className="btn btn--link" type="button" onClick={onUpdate}>
-            Update record
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -2105,94 +2062,3 @@ function ChangePasswordScreen({
   );
 }
 
-function UpdateDocScreen({
-  petId,
-  doc,
-  onDone,
-  onCancel,
-  onError,
-  onNotice,
-}: {
-  petId: string;
-  doc: Doc;
-  onDone: () => Promise<void>;
-  onCancel: () => void;
-  onError: (msg: string | null) => void;
-  onNotice: (msg: string) => void;
-}) {
-  const [label, setLabel] = useState(doc.label);
-  const [expiry, setExpiry] = useState(doc.expiry ?? '');
-  const [busy, setBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  async function handleUpdate(e: FormEvent) {
-    e.preventDefault();
-    const file = fileRef.current?.files?.[0];
-    if (!file) return;
-    if (!ALLOWED_EXTS.includes(extOf(file.name))) {
-      onError('Please choose a PDF, JPG, or PNG file.');
-      return;
-    }
-    if (file.size > MAX_FILE_BYTES) {
-      onError(`That file is ${formatSize(file.size)} — the limit is 10 MB.`);
-      return;
-    }
-    setBusy(true);
-    onError(null);
-    try {
-      await updateDocVersion(petId, doc.id, file, label.trim() || file.name, expiry || undefined);
-      await onDone();
-      onNotice('Record updated — previous version archived');
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Update failed');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="screen-view">
-      <nav className="screen-nav">
-        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
-          ← Records
-        </button>
-        <span className="screen-nav__title">Update Record</span>
-      </nav>
-      <form className="form" onSubmit={handleUpdate}>
-        <label>
-          Label
-          <input
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            autoFocus
-          />
-        </label>
-        <label>
-          Expiration date (optional)
-          <input
-            type="date"
-            value={expiry}
-            onChange={(e) => setExpiry(e.target.value)}
-          />
-        </label>
-        <label>
-          New file (PDF, JPG, PNG · max 10 MB)
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf,.jpg,.jpeg,.png"
-            required
-          />
-        </label>
-        <div className="actions">
-          <button className="btn btn--primary" type="submit" disabled={busy}>
-            {busy ? 'Uploading…' : 'Upload new version'}
-          </button>
-          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}

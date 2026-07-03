@@ -172,21 +172,6 @@ export function deleteDoc(petId: string, id: string): Promise<void> {
   return request('DELETE', `/pets/${petId}/docs/${id}`);
 }
 
-export async function updateDocVersion(
-  petId: string,
-  id: string,
-  file: File,
-  label: string,
-  expiry?: string,
-): Promise<void> {
-  const presign = await request<{ url: string; fields: Record<string, string> }>(
-    'POST',
-    `/pets/${petId}/docs/${id}/update-url`,
-    { filename: file.name, label, expiry: expiry || undefined, contentType: file.type || 'application/octet-stream' },
-  );
-  await postToS3(presign, file);
-}
-
 // ---- passport ----
 
 export function createPassport(

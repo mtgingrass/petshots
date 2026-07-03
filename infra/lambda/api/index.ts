@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   DeleteObjectCommand,
   CopyObjectCommand,
@@ -92,9 +93,88 @@ async function readJson<T>(key: string): Promise<T | null> {
   }
 }
 
+// ---- public passport (no JWT required) ----
+async function handlePublicPassport(
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+): Promise<APIGatewayProxyResultV2> {
+  const token = event.pathParameters?.token;
+  if (!token || !isUuid(token)) return json(400, { error: 'invalid token' });
+
+  const passportRecord = await readJson<{ userId: string; petId: string; expiry?: string }>(
+    `passports/${token}.json`,
+  );
+  if (!passportRecord) return json(404, { error: 'passport not found' });
+
+  if (passportRecord.expiry) {
+    const exp = new Date(`${passportRecord.expiry}T00:00:00`);
+    exp.setDate(exp.getDate() + 1); // expired after end-of-day on the expiry date
+    if (exp < new Date()) return json(410, { error: 'passport has expired' });
+  }
+
+  const { userId, petId } = passportRecord;
+  const petKey = `users/${userId}/pets/${petId}/pet.json`;
+  const pet = await readJson<Record<string, unknown>>(petKey);
+  if (!pet) return json(404, { error: 'pet not found' });
+
+  // Presign avatar if it exists.
+  const avatarKey = `users/${userId}/pets/${petId}/avatar`;
+  let avatarUrl: string | undefined;
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: avatarKey }));
+    avatarUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: BUCKET, Key: avatarKey }),
+      { expiresIn: 3600 },
+    );
+  } catch { /* no avatar */ }
+
+  // List and presign all current docs.
+  const docsPrefix = `users/${userId}/pets/${petId}/docs/`;
+  const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const statusRank = (expiry?: string) => {
+    if (!expiry) return 3;
+    const d = new Date(`${expiry}T00:00:00`);
+    const days = Math.round((d.getTime() - today.getTime()) / 86_400_000);
+    return days < 0 ? 0 : days <= 30 ? 1 : 2;
+  };
+  const docs = await Promise.all(
+    (list.Contents ?? []).filter((it) => !it.Key!.includes('/_archived/')).map(async (it) => {
+      const key = it.Key!;
+      const parts = key.split('/');
+      const meta = decodeMeta(parts[6]);
+      const url = await getSignedUrl(
+        s3,
+        new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+        { expiresIn: 3600 },
+      );
+      return { id: parts[5], label: meta.label, expiry: meta.expiry, filename: parts.slice(7).join('/'), url };
+    }),
+  );
+  docs.sort((a, b) => statusRank(a.expiry) - statusRank(b.expiry) || (a.expiry ?? '').localeCompare(b.expiry ?? ''));
+
+  return json(200, {
+    pet: {
+      name: pet.name, species: pet.species, breed: pet.breed, dob: pet.dob,
+      weight: pet.weight, allergies: pet.allergies, behavior: pet.behavior,
+      vetName: pet.vetName, vetPhone: pet.vetPhone, emergencyContact: pet.emergencyContact,
+      microchip: pet.microchip, fixed: pet.fixed, notes: pet.notes, avatarUrl,
+    },
+    docs,
+    expiresAt: passportRecord.expiry,
+  });
+}
+
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
+  // Public routes handled before auth check.
+  if (event.routeKey === 'GET /passport/{token}') {
+    try { return await handlePublicPassport(event); }
+    catch (e) { console.error('passport error', e); return json(500, { error: 'internal error' }); }
+  }
+
   // The Cognito JWT authorizer already verified the token; we just read claims.
   // sub is the stable per-user id we scope every S3 key to - a user can never
   // name a key outside their own prefix, so authz is the prefix itself.
@@ -173,12 +253,18 @@ export const handler = async (
         const pet = cleanPet(JSON.parse(event.body ?? '{}'));
         if (!pet.name) return json(400, { error: 'name required' });
         // Update only - creating here would sidestep the POST /pets limit.
-        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const existing = await readJson<Record<string, unknown>>(petKey);
+        if (existing === null) return json(404, { error: 'not found' });
+        // Passport fields are managed by separate endpoints; preserve them across profile edits.
         await s3.send(
           new PutObjectCommand({
             Bucket: BUCKET,
             Key: petKey,
-            Body: JSON.stringify(pet),
+            Body: JSON.stringify({
+              ...pet,
+              passportToken: existing.passportToken,
+              passportExpiry: existing.passportExpiry,
+            }),
             ContentType: 'application/json',
           }),
         );
@@ -392,6 +478,59 @@ export const handler = async (
           (list.Contents ?? []).map((it) =>
             s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),
           ),
+        );
+        return { statusCode: 204 };
+      }
+
+      // ---- passport management ----
+
+      case 'POST /pets/{petId}/passport': {
+        const existing = await readJson<Record<string, unknown>>(petKey);
+        if (!existing) return json(404, { error: 'not found' });
+        const input = JSON.parse(event.body ?? '{}');
+        const expiry = cleanExpiry(input.expiry);
+
+        // Revoke the old token before issuing a new one.
+        const oldToken = existing.passportToken as string | undefined;
+        if (oldToken) {
+          await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `passports/${oldToken}.json` }));
+        }
+
+        const token = randomUUID();
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: `passports/${token}.json`,
+            Body: JSON.stringify({ userId: sub, petId, expiry }),
+            ContentType: 'application/json',
+          }),
+        );
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: petKey,
+            Body: JSON.stringify({ ...existing, passportToken: token, passportExpiry: expiry }),
+            ContentType: 'application/json',
+          }),
+        );
+        return json(200, { token, url: `https://petshots.app/p/${token}`, expiresAt: expiry });
+      }
+
+      case 'DELETE /pets/{petId}/passport': {
+        const existing = await readJson<Record<string, unknown>>(petKey);
+        if (!existing) return json(404, { error: 'not found' });
+        const token = existing.passportToken as string | undefined;
+        if (!token) return json(404, { error: 'no active passport' });
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `passports/${token}.json` }));
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { passportToken: _t, passportExpiry: _e, ...rest } = existing;
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: petKey,
+            Body: JSON.stringify(rest),
+            ContentType: 'application/json',
+          }),
         );
         return { statusCode: 204 };
       }

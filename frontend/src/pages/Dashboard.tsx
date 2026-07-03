@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import QRCode from 'qrcode';
 import { useAuth } from '../auth/AuthContext';
 import { changePassword } from '../auth/cognito';
 import {
@@ -13,6 +14,8 @@ import {
   updateDoc,
   updateDocVersion,
   deleteDoc,
+  createPassport,
+  revokePassport,
   MAX_PETS,
   MAX_DOCS,
   type Pet,
@@ -441,6 +444,7 @@ export function Dashboard() {
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onUpdateDoc={(doc) => setEditView({ type: 'update', doc, petId: detailPet.id })}
               onDocsChanged={() => loadPetDocs(detailPet.id)}
+              onPassportChanged={() => void loadPets()}
               onError={setError}
               onNotice={showNotice}
             />
@@ -818,6 +822,7 @@ function PetDetailScreen({
   onEditDoc,
   onUpdateDoc,
   onDocsChanged,
+  onPassportChanged,
   onError,
   onNotice,
 }: {
@@ -831,10 +836,11 @@ function PetDetailScreen({
   onEditDoc: (doc: Doc) => void;
   onUpdateDoc: (doc: Doc) => void;
   onDocsChanged: () => Promise<void>;
+  onPassportChanged: () => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'profile'>('records');
+  const [tab, setTab] = useState<'records' | 'profile' | 'share'>('records');
 
   return (
     <div className="screen-view">
@@ -886,6 +892,12 @@ function PetDetailScreen({
           >
             Profile
           </button>
+          <button
+            className={`tab-bar__tab${tab === 'share' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('share')}
+          >
+            Share{pet.passportToken ? ' ✓' : ''}
+          </button>
         </div>
 
         {tab === 'records' ? (
@@ -902,8 +914,15 @@ function PetDetailScreen({
               onUpdateDoc={onUpdateDoc}
             />
           </>
-        ) : (
+        ) : tab === 'profile' ? (
           <ProfileSection pet={pet} onEdit={onEditProfile} />
+        ) : (
+          <ShareTabSection
+            pet={pet}
+            onPassportChanged={onPassportChanged}
+            onNotice={onNotice}
+            onError={onError}
+          />
         )}
       </div>
     </div>
@@ -1385,6 +1404,161 @@ function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
           <ProfileField label="Emergency contact" value={pet.emergencyContact} />
         </section>
       )}
+    </div>
+  );
+}
+
+// ---- share / passport tab ----
+
+function ShareTabSection({
+  pet,
+  onPassportChanged,
+  onNotice,
+  onError,
+}: {
+  pet: Pet;
+  onPassportChanged: () => void;
+  onNotice: (msg: string) => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [expiry, setExpiry] = useState('30d');
+  const [busy, setBusy] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const passportUrl = pet.passportToken
+    ? `https://petshots.app/p/${pet.passportToken}`
+    : null;
+
+  useEffect(() => {
+    if (!passportUrl) { setQrDataUrl(null); return; }
+    void QRCode.toDataURL(passportUrl, { width: 220, margin: 2, color: { dark: '#e7e9f3', light: '#1a1e33' } })
+      .then(setQrDataUrl)
+      .catch(() => {});
+  }, [passportUrl]);
+
+  function expiryDate(): string | undefined {
+    if (expiry === 'never') return undefined;
+    const days = expiry === '7d' ? 7 : expiry === '30d' ? 30 : expiry === '90d' ? 90 : 365;
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  }
+
+  async function handleGenerate() {
+    setBusy(true);
+    onError(null);
+    try {
+      await createPassport(pet.id, expiryDate());
+      onPassportChanged();
+      onNotice('Passport link generated');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not generate passport');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevoke() {
+    setBusy(true);
+    onError(null);
+    try {
+      await revokePassport(pet.id);
+      onPassportChanged();
+      onNotice('Passport link revoked');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not revoke passport');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCopy() {
+    if (!passportUrl) return;
+    try {
+      await navigator.clipboard.writeText(passportUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      onError('Could not copy — try long-pressing the link');
+    }
+  }
+
+  async function handleShare() {
+    if (!passportUrl) return;
+    const shareData = {
+      title: `${pet.name}'s vaccine records`,
+      text: `Here are ${pet.name}'s vaccine records from Petshots.`,
+      url: passportUrl,
+    };
+    if (typeof navigator.share === 'function') {
+      try { await navigator.share(shareData); } catch { /* user cancelled */ }
+    } else {
+      await handleCopy();
+    }
+  }
+
+  if (!passportUrl) {
+    return (
+      <div className="share-tab card">
+        <p className="share-tab__intro">
+          Generate a link anyone can open — no login required. Share it with your groomer,
+          boarding facility, or vet ahead of check-in.
+        </p>
+        <label className="share-tab__expiry-label">
+          Link expires
+          <select value={expiry} onChange={(e) => setExpiry(e.target.value)}>
+            <option value="7d">In 7 days</option>
+            <option value="30d">In 30 days</option>
+            <option value="90d">In 90 days</option>
+            <option value="1y">In 1 year</option>
+            <option value="never">Never</option>
+          </select>
+        </label>
+        <button className="btn btn--primary" onClick={handleGenerate} disabled={busy}>
+          {busy ? 'Generating…' : `Generate passport for ${pet.name}`}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="share-tab card">
+      {qrDataUrl && (
+        <div className="share-tab__qr-wrap">
+          <img className="share-tab__qr" src={qrDataUrl} alt="QR code — scan to open passport" />
+        </div>
+      )}
+
+      <div className="share-tab__url-row">
+        <span className="share-tab__url" title={passportUrl}>{passportUrl}</span>
+      </div>
+
+      <div className="share-tab__actions">
+        <button className="btn btn--primary" onClick={handleShare}>
+          Share ↗
+        </button>
+        <button className="btn" onClick={handleCopy}>
+          {copied ? 'Copied!' : 'Copy link'}
+        </button>
+      </div>
+
+      {pet.passportExpiry && (
+        <p className="share-tab__expiry subtle">
+          Expires {formatDate(pet.passportExpiry)}
+        </p>
+      )}
+
+      <div className="share-tab__revoke">
+        <button
+          className="btn btn--link btn--danger"
+          onClick={handleRevoke}
+          disabled={busy}
+        >
+          {busy ? 'Revoking…' : 'Revoke link'}
+        </button>
+        <span className="subtle share-tab__revoke-hint">Revoked links stop working immediately.</span>
+      </div>
     </div>
   );
 }

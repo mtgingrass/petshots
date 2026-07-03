@@ -102,7 +102,7 @@ export class ApiStack extends cdk.Stack {
 
     const integration = new HttpLambdaIntegration('ApiIntegration', apiFn);
 
-    const routes: [HttpMethod, string][] = [
+    const authedRoutes: [HttpMethod, string][] = [
       [HttpMethod.GET, '/pets'],
       [HttpMethod.POST, '/pets'],
       [HttpMethod.PUT, '/pets/{petId}'],
@@ -113,10 +113,16 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
       [HttpMethod.POST, '/pets/{petId}/docs/{id}/update-url'],
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
+      [HttpMethod.POST, '/pets/{petId}/passport'],
+      [HttpMethod.DELETE, '/pets/{petId}/passport'],
     ];
-    for (const [method, routePath] of routes) {
+    for (const [method, routePath] of authedRoutes) {
       httpApi.addRoutes({ path: routePath, methods: [method], integration, authorizer });
     }
+
+    // Public passport endpoint — no Cognito token required; the Lambda checks the
+    // passport token's validity itself.
+    httpApi.addRoutes({ path: '/passport/{token}', methods: [HttpMethod.GET], integration });
 
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: httpApi.apiEndpoint,

@@ -1515,3 +1515,121 @@ a {
 .present-trigger {
   color: var(--primary);
 }
+
+/* ---------- Share / Passport tab ---------- */
+
+.share-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.share-tab__intro {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--subtle);
+  line-height: 1.5;
+}
+
+.share-tab__expiry-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.share-tab__qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 0.25rem 0;
+}
+
+.share-tab__qr {
+  width: 180px;
+  height: 180px;
+  border-radius: 12px;
+  display: block;
+}
+
+.share-tab__url-row {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  overflow: hidden;
+}
+
+.share-tab__url {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: var(--subtle);
+  word-break: break-all;
+}
+
+.share-tab__actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.share-tab__expiry {
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.share-tab__revoke {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.share-tab__revoke-hint {
+  font-size: 0.8rem;
+}
+
+.btn--sm {
+  font-size: 0.85rem;
+  padding: 0.3rem 0.75rem;
+  min-height: 36px;
+}
+
+/* ---------- Public passport page ---------- */
+
+.passport-page__header {
+  margin-bottom: 1.5rem;
+}
+
+.passport-page__docs {
+  margin-top: 1rem;
+}
+
+.passport-doc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.passport-doc-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.passport-doc-open {
+  flex-shrink: 0;
+}
+
+.passport-page__footer {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: center;
+}

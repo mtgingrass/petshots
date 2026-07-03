@@ -13,6 +13,8 @@ export interface Pet {
   name: string;
   species: string;
   avatarUrl?: string;
+  passportToken?: string;
+  passportExpiry?: string; // YYYY-MM-DD
   // optional health profile fields
   breed?: string;
   dob?: string;         // YYYY-MM-DD
@@ -25,6 +27,20 @@ export interface Pet {
   microchip?: string;
   fixed?: boolean;
   notes?: string;
+}
+
+export interface PassportDoc {
+  id: string;
+  label: string;
+  expiry?: string;
+  filename: string;
+  url: string;
+}
+
+export interface PassportData {
+  pet: Omit<Pet, 'id' | 'passportToken' | 'passportExpiry'>;
+  docs: PassportDoc[];
+  expiresAt?: string;
 }
 
 export interface Doc {
@@ -137,6 +153,28 @@ export async function updateDocVersion(
     { filename: file.name, label, expiry: expiry || undefined, contentType: file.type || 'application/octet-stream' },
   );
   await postToS3(presign, file);
+}
+
+// ---- passport ----
+
+export function createPassport(
+  petId: string,
+  expiry?: string,
+): Promise<{ token: string; url: string; expiresAt?: string }> {
+  return request('POST', `/pets/${petId}/passport`, { expiry: expiry || undefined });
+}
+
+export function revokePassport(petId: string): Promise<void> {
+  return request('DELETE', `/pets/${petId}/passport`);
+}
+
+export async function fetchPassport(token: string): Promise<PassportData> {
+  const res = await fetch(config.apiBaseUrl + `/passport/${token}`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error ?? `Failed to load passport (${res.status})`);
+  }
+  return res.json() as Promise<PassportData>;
 }
 
 export async function uploadDoc(

@@ -12,4 +12,14 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [x] **Privacy Policy page + footer link** (2026-07-02) — DONE: `/privacy` route (`Privacy.tsx`), plain-English policy, "Privacy Policy" link in SiteFooter.
 
-- [x] **Vaccine record versioning / "Update" action** (2026-07-02) — DONE: ⋯ menu now has **Edit label / date**, **Update record**, and **Delete**. "Update" archives the current file to `_archived/{timestamp}/…` (preserved in S3 forever), then presigns a new upload slot under the same docId. Archived copies are filtered from the doc listing and don't count toward the 4-doc limit. 34/34 smoke green.
+- [x] ~~**Vaccine record versioning / "Update" action**~~ (2026-07-02) — shipped, then **REMOVED session 12 (2026-07-03)** at Mark's request (simpler flow: delete + re-add). Frontend fully deleted; the API `update-url` route + `_archived/` logic still live in the Lambda — strip next time ApiStack is touched.
+
+- [ ] **Strip dead `update-url` route from API Lambda** (2026-07-03) — leftover from the removed Update-record feature. Harmless (authed) but dead code. Remove route + archive logic + smoke test section [5c] together, redeploy ApiStack.
+
+- [ ] **Medication reminders — monthly heartworm/flea** (2026-07-03) — the #1 retention hook (12×/yr touchpoints vs 2/yr today). See `docs/retention-and-revenue-brainstorm.md`. Extends existing ReminderFn/SES pipeline; `meds.json` per pet + "mark as given".
+
+- [ ] **Pet birthday email** (2026-07-03) — "Ollie turns 7 🎂" via ReminderFn; DOB already a profile field. Weekend-sized, pure warmth.
+
+- [ ] **Reminder email polish + expiry-date nudge** (2026-07-03) — deep links, pet name in subject, nudge at upload when no expiry set ("we can't remind you without a date"), and decide whether reminders should be ON by default for new signups (currently off = zero touchpoints unless they find Settings).
+
+- [ ] **Consider "Upgrade" hook at the 3-pet limit message** (2026-07-03) — the limit message that shipped today is where the paid tier naturally slots in once Stripe exists.

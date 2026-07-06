@@ -80,15 +80,6 @@ export function Privacy() {
         </section>
 
         <section>
-          <h2>Amazon Associates</h2>
-          <p>
-            Product links in the footer of this site are Amazon Associates links. Petshots
-            earns a small commission when you purchase through these links, at no extra
-            cost to you. All affiliate links are labeled.
-          </p>
-        </section>
-
-        <section>
           <h2>Data retention</h2>
           <p>
             Your data is kept for as long as your account exists. We don't automatically

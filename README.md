@@ -1,8 +1,8 @@
 # Petshots
 
-> Pet health records you can actually find when you need them — built on AWS.
+> Pet health records you can actually find when you need them — live at [petshots.app](https://petshots.app), serverless on AWS.
 
-A small SaaS for pet owners: store vaccination records, medication schedules, and (eventually) generate a shareable "pet passport" URL for groomers, sitters, and boarding facilities.
+A SaaS for pet owners: store vaccination records and documents, get expiry reminders by email, and share a QR "pet passport" URL that lets a groomer, sitter, or dog bar verify shots from a link — no account required, expiring and revocable.
 
 ## The problem
 
@@ -10,60 +10,35 @@ A small SaaS for pet owners: store vaccination records, medication schedules, an
 
 When your lived workaround is *asking an LLM to grep Gmail for a PDF at the dog-bar door*, the product opportunity is concrete. Existing apps (Great Pet Care, VitusVet, PetDesk) tend to be bloated, vet-centric, or insurance-upsell vehicles. Petshots leads with the **last-mile retrieval moment**: you're at the front desk, the staff is waiting, you need the rabies cert on your phone in ten seconds.
 
-## What it does (MVP)
+## What it does (shipped)
 
-Free tier, no payments wired up yet — the limits exist so the data model and authz patterns are in place from day one.
+- Sign up with email verification + login (Cognito), bot signups blocked by Cloudflare Turnstile at the PreSignUp trigger
+- Dashboard for pets and their documents (PDF, JPG) — uploads go straight from the browser to S3 via size-limited presigned POST
+- **Pet passports**: shareable QR/URL that shows vaccination status publicly, with token expiry and revocation
+- Daily vaccine-expiry reminder emails (EventBridge cron → Lambda → SES)
+- Free-tier limits (3 pets, 4 documents each) so the data model and authz patterns support a paid tier later
 
-- Public landing page
-- Sign up with email verification + login (AWS Cognito)
-- Simple dashboard
-- Upload + label vaccination documents (PDF, JPG) to S3
-- Limits: 1 pet per account, 4 documents per pet
+## Architecture
 
-**Founder-pain solve in v1:** open the dashboard at the door, show the PDF on your phone. No shareable URL needed *yet*.
+Fully serverless, deployed with AWS CDK (TypeScript). Source of truth is `infra/lib/*.ts`.
 
-## Roadmap (v1.1+)
-
-- Shareable passport URLs (signed-token pattern with short expiry + revocation)
-- Vaccine/medication reminders (SES + EventBridge)
-- Multi-pet households
-- Higher limits + paid tier (Stripe)
-- A better dashboard
-
-## Stack
-
-AWS-native, deployed with the CDK in TypeScript. Choices lean toward services with SAA-C03 exam overlap because the project doubles as hands-on prep.
-
-| Layer | Service |
+| Layer | Implementation |
 |---|---|
-| DNS / domain | Route 53 (`petshots.app`) |
-| Auth | Cognito User Pool (sign-up, login, JWT) |
-| Frontend | React (Vite + TS) on S3 + CloudFront |
-| Backend compute | EC2 + ALB + Auto Scaling Group (Path B, traditional) |
-| Database | RDS Aurora MySQL, Multi-AZ |
-| File storage | S3 |
-| Email | Cognito built-in (MVP); SES later for reminders |
-| Payments | Stripe (post-MVP) |
-| IaC | AWS CDK (TypeScript) |
+| Frontend | React (Vite + TS) SPA, private S3 bucket + CloudFront with Origin Access Control, ACM, Route 53 apex + www, IPv4 + IPv6 |
+| Auth | Cognito User Pool; PreSignUp Lambda verifies Cloudflare Turnstile (secret in Secrets Manager); SES domain identity |
+| API | API Gateway HTTP API + Cognito JWT authorizer → single router Lambda (Node 20, ARM64, esbuild) — 15 routes, including public `GET /passport/{token}` |
+| Data | No database server: pet metadata lives as JSON objects in S3 under per-user prefixes; documents via presigned POST/GET |
+| Scheduled jobs | EventBridge daily cron → reminder Lambda → SES |
+| IaC | AWS CDK (TypeScript), user-data buckets set to `RemovalPolicy.RETAIN` |
 
-Some choices are deliberately dev-flavored to keep monthly cost down during the build — most visibly the **NAT instance** in place of the production-default NAT Gateway (`~$3/mo` vs `~$33/mo`), upgradable with a one-character config change before launch.
+### Design decisions
 
-## Status
-
-| Layer | Status |
-|---|---|
-| Domain registered (`petshots.app`) | ✓ |
-| AWS account hygiene (MFA, $25 budget alert) | ✓ |
-| CDK app initialized + bootstrapped (`us-east-1`) | ✓ |
-| **NetworkStack** — VPC, 6 subnets across 2 AZs, NAT instance, hardened SG | ✓ |
-| NetworkStack — VPC endpoints (S3 Gateway, SSM Interface) | in progress |
-| DataStack — RDS, subnet groups | pending |
-| AuthStack — Cognito User Pool | pending |
-| ComputeStack — ALB, ASG, EC2 launch template | pending |
-| FrontendStack — S3, CloudFront, Route 53 records | pending |
-| App code (frontend + backend) | pending |
-
-This is a live build doc, not a retroactive case study — the repo's commit history is the actual sequence of decisions, mistakes, and fixes.
+- **Serverless over three-tier.** The repo also contains the classic path — VPC + NAT + Aurora Serverless v2 + EC2 ASG behind an ALB (`network-stack`, `data-stack`, `app-stack`) — built first as hands-on SAA-C03 prep. The production call went serverless: near-zero idle cost, nothing to patch. The legacy stacks remain in the CDK app as a record of the trade-off.
+- **S3 as the database.** At this access pattern (read/write a user's `pet.json` by key), object storage beats running DynamoDB or RDS. The migration path exists if access patterns outgrow it.
+- **Authorization at the gateway.** Cognito JWTs are verified by API Gateway, so unauthenticated requests never invoke the Lambda. The one public route (`/passport/{token}`) validates its own signed tokens with expiry + revocation.
+- **Uploads bypass the API.** Browsers upload directly to S3 with a presigned POST policy that enforces size limits — file bytes never transit API Gateway or Lambda.
+- **NAT instance over NAT Gateway** (legacy stacks): fck-nat at ~$3/mo vs ~$33/mo, the classic SAA cost/HA trade-off, flippable with a one-line change.
+- **`RemovalPolicy.RETAIN` on user data** — no stack operation can destroy customer records.
 
 ## Deploying it yourself
 
@@ -71,49 +46,30 @@ This is a live build doc, not a retroactive case study — the repo's commit his
 
 - AWS account with admin or equivalent IAM permissions
 - AWS CLI configured locally (`aws configure` or SSO)
-- Node.js 18+ and npm
-- A region pinned to `us-east-1` (the code currently hardcodes this; multi-region is a later refactor)
+- Node.js 20+ and npm
+- Region pinned to `us-east-1` (currently hardcoded)
 
 ### Steps
 
 ```bash
 # 1. Clone and install dependencies
-git clone https://github.com/<your-handle>/petshots.git
+git clone https://github.com/mtgingrass/petshots.git
 cd petshots/infra
 npm install
 
 # 2. One-time CDK bootstrap (per account + region)
 npx cdk bootstrap aws://<your-account-id>/us-east-1
 
-# 3. Synthesize and review the CloudFormation that'll be deployed
+# 3. Synthesize and review, then deploy the serverless stacks
 npx cdk synth
-
-# 4. Diff against any currently-deployed version (will show "adding all" on first run)
-npx cdk diff
-
-# 5. Deploy
-npx cdk deploy
+npx cdk deploy PetshotsAuthStack PetshotsFrontendStack PetshotsApiStack
 ```
 
-Before deploying, **update the account ID** in `infra/bin/infra.ts` to your own AWS account. The code is currently pinned to the author's account for reproducibility.
+Before deploying, **update the account ID** in `infra/bin/infra.ts`, and expect to swap in your own domain, hosted zone, and Turnstile secret. The legacy `PetshotsNetworkStack` / `PetshotsDataStack` / `PetshotsAppStack` are optional — deploy them only if you want the three-tier variant (they cost real money; Aurora scales to zero, the NAT instance and EC2 do not).
 
-### Estimated monthly cost (dev)
+## History
 
-| | Cost |
-|---|---|
-| VPC, subnets, route tables, IGW | $0 |
-| NAT instance (`t4g.nano`) | ~$3.50 |
-| Route 53 hosted zone | $0.50 |
-| EBS storage attached to NAT | ~$0.30 |
-| **Total before adding RDS / EC2 app tier** | **~$4/mo** |
-
-To stop the meter: `npx cdk destroy PetshotsNetworkStack` removes everything cleanly.
-
-## Notes
-
-- **Why NAT instance, not NAT Gateway?** SAA-C03 covers both as a cost/HA tradeoff. The instance pattern is the dev choice ($3/mo, no built-in HA); a one-line config change flips to NAT Gateway when the app is real.
-- **Why one NAT across both AZs?** Same tradeoff. `natGateways: 2` would give us per-AZ HA at ~$6/mo (instances) or ~$66/mo (gateways).
-- **Why hardcoded AMI ID for fck-nat?** CDK's `MachineImage.lookup()` runs at synth time and was failing intermittently against the fck-nat AMI publisher account. Hardcoding the resolved ID is reproducible and works without a network round-trip during synth. When fck-nat publishes a new version, the ID gets bumped manually.
+This started as a live build doc for a traditional three-tier architecture and pivoted to serverless partway through — the commit history is the actual sequence of decisions, mistakes, and fixes, not a retroactive case study.
 
 ## License
 

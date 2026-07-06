@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "seed-marketing": "node scripts/seed-marketing.mjs",
+    "smoke": "node scripts/smoke-api.mjs"
   },
   "dependencies": {
     "amazon-cognito-identity-js": "^6.3.18",

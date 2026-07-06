@@ -13,18 +13,29 @@ import {
   uploadDoc,
   updateDoc,
   deleteDoc,
+  listMeds,
+  saveMeds,
   createPassport,
   revokePassport,
   getSettings,
   saveSettings,
-  MAX_PETS,
-  MAX_DOCS,
+  DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
+  type Limits,
   type Pet,
   type Doc,
+  type Med,
+  type MedUnit,
   type UserSettings,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
+import {
+  computeNotices,
+  isDismissed,
+  dismissNotice,
+  MAX_NOTICES,
+  type Notice,
+} from '../utils/notices';
 import { SiteFooter } from '../components/SiteFooter';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
@@ -64,6 +75,31 @@ function daysUntil(expiry: string): number {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return Math.round((parseDay(expiry).getTime() - today.getTime()) / 86_400_000);
+}
+
+function toYMD(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function todayYMD(): string {
+  return toYMD(new Date());
+}
+
+// Advance a med's due date by its cadence. Month math is calendar-correct:
+// the next dose lands on the same day-of-month, clamped to month end
+// (Jan 31 + 1 month = Feb 28), never the +30d drift of day arithmetic.
+function addInterval(from: string, interval: number, unit: MedUnit): string {
+  const d = parseDay(from);
+  if (unit === 'day' || unit === 'week') {
+    d.setDate(d.getDate() + interval * (unit === 'week' ? 7 : 1));
+    return toYMD(d);
+  }
+  const dayOfMonth = d.getDate();
+  const r = new Date(d.getFullYear(), d.getMonth() + interval, 1);
+  const lastDay = new Date(r.getFullYear(), r.getMonth() + 1, 0).getDate();
+  r.setDate(Math.min(dayOfMonth, lastDay));
+  return toYMD(r);
 }
 
 function statusOf(expiry?: string): Status {
@@ -157,6 +193,7 @@ export function Dashboard() {
   const [theme, setTheme] = useState<Theme>(getSavedTheme);
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
+  const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
   const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
   const [allDocsLoading, setAllDocsLoading] = useState(false);
@@ -206,6 +243,7 @@ export function Dashboard() {
     try {
       const res = await listPets();
       setPets(res.pets);
+      setLimits(res.limits ?? DEFAULT_LIMITS);
       return res.pets;
     } catch (err) {
       setPets([]);
@@ -450,6 +488,7 @@ export function Dashboard() {
             <PetDetailScreen
               pet={detailPet}
               docs={detailDocs}
+              limits={limits}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPresent={() => setPresenting(true)}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
@@ -474,6 +513,11 @@ export function Dashboard() {
           </div>
         ) : (
           <>
+            <NoticeStrip
+              pets={pets}
+              allDocs={allDocs}
+              onNavigateToPet={(petId) => setDashView({ type: 'detail', petId })}
+            />
             <h2 className="section-title">Your Pets</h2>
             <div className="pet-pins">
               {pets.map((pet) => (
@@ -485,7 +529,7 @@ export function Dashboard() {
                   onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
                 />
               ))}
-              {pets.length < MAX_PETS && (
+              {pets.length < limits.maxPets && (
                 <button
                   className="pet-pin pet-pin--add"
                   onClick={() => setDashView({ type: 'add-pet' })}
@@ -495,12 +539,11 @@ export function Dashboard() {
                 </button>
               )}
             </div>
-            {pets.length >= MAX_PETS && (
+            {pets.length >= limits.maxPets && (
               <p className="pet-pins__limit">
-                You're at the {MAX_PETS}-pet limit. Remove a pet to add another.
+                You're at the {limits.maxPets}-pet limit. Remove a pet to add another.
               </p>
             )}
-            <ShareAppButton onNotice={showNotice} />
           </>
         )}
       </main>
@@ -589,27 +632,82 @@ function ProfileMenu({
   );
 }
 
-// ---- share button ----
+// ---- notice strip ----
 
-function ShareAppButton({ onNotice }: { onNotice: (msg: string) => void }) {
-  async function handleShare() {
-    const data = {
-      title: 'Petshots',
-      text: "Keep your pet's vaccine records in one place — ready at the door in one tap.",
-      url: 'https://petshots.app',
-    };
-    if (typeof navigator.share === 'function') {
-      try { await navigator.share(data); } catch { /* user cancelled */ }
-    } else {
-      await navigator.clipboard.writeText('https://petshots.app');
-      onNotice('Link copied to clipboard!');
-    }
+function NoticeStrip({
+  pets,
+  allDocs,
+  onNavigateToPet,
+}: {
+  pets: Pet[];
+  allDocs: Record<string, Doc[]>;
+  onNavigateToPet: (petId: string) => void;
+}) {
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+
+  const visible = computeNotices(pets, allDocs)
+    .filter((n) => !isDismissed(n) && !dismissedIds.has(n.id))
+    .slice(0, MAX_NOTICES);
+
+  if (visible.length === 0) return null;
+
+  function handleDismiss(notice: Notice) {
+    dismissNotice(notice);
+    setDismissedIds((prev) => new Set([...prev, notice.id]));
   }
 
   return (
-    <button className="share-app-btn btn btn--link" onClick={handleShare}>
-      Share Petshots with a fellow pet owner ↗
-    </button>
+    <div className="notice-strip" role="region" aria-label="Notifications">
+      {visible.map((notice) => (
+        <NoticeCard
+          key={notice.id}
+          notice={notice}
+          onDismiss={() => handleDismiss(notice)}
+          onNavigate={() => onNavigateToPet(notice.petId)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function NoticeCard({
+  notice,
+  onDismiss,
+  onNavigate,
+}: {
+  notice: Notice;
+  onDismiss: () => void;
+  onNavigate: () => void;
+}) {
+  const typeClass = notice.type.startsWith('birthday')
+    ? 'birthday'
+    : notice.type === 'overdue'
+      ? 'overdue'
+      : notice.type === 'duesoon-critical'
+        ? 'critical'
+        : notice.type === 'duesoon-warning'
+          ? 'warning'
+          : notice.type === 'dob-nudge'
+            ? 'nudge'
+            : 'headsup';
+
+  return (
+    <div className={`notice-card notice-card--${typeClass}`}>
+      <button
+        className="notice-card__body"
+        onClick={onNavigate}
+        aria-label={`${notice.message} — tap to view`}
+      >
+        {notice.message}
+      </button>
+      <button
+        className="notice-card__dismiss"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+      >
+        ✕
+      </button>
+    </div>
   );
 }
 
@@ -823,6 +921,7 @@ function DashboardSkeleton() {
 function PetDetailScreen({
   pet,
   docs,
+  limits,
   onEditPet,
   onPresent,
   onEditProfile,
@@ -835,6 +934,7 @@ function PetDetailScreen({
 }: {
   pet: Pet;
   docs: Doc[];
+  limits: Limits;
   onEditPet: () => void;
   onPresent: () => void;
   onEditProfile: () => void;
@@ -845,7 +945,7 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'profile' | 'share'>('records');
+  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'share'>('records');
   const [showPhoto, setShowPhoto] = useState(false);
 
   return (
@@ -905,6 +1005,12 @@ function PetDetailScreen({
             Records
           </button>
           <button
+            className={`tab-bar__tab${tab === 'meds' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('meds')}
+          >
+            Meds
+          </button>
+          <button
             className={`tab-bar__tab${tab === 'profile' ? ' tab-bar__tab--active' : ''}`}
             onClick={() => setTab('profile')}
           >
@@ -924,6 +1030,7 @@ function PetDetailScreen({
             <DocsSection
               petId={pet.id}
               docs={docs}
+              maxDocs={limits.maxDocs}
               onChanged={onDocsChanged}
               onError={onError}
               onNotice={onNotice}
@@ -931,6 +1038,8 @@ function PetDetailScreen({
               onEditDoc={onEditDoc}
             />
           </>
+        ) : tab === 'meds' ? (
+          <MedsSection petId={pet.id} maxMeds={limits.maxMeds} onError={onError} onNotice={onNotice} />
         ) : tab === 'profile' ? (
           <ProfileSection pet={pet} onEdit={onEditProfile} />
         ) : (
@@ -975,6 +1084,7 @@ function PhotoLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
 function DocsSection({
   petId,
   docs,
+  maxDocs,
   onChanged,
   onError,
   onNotice,
@@ -983,6 +1093,7 @@ function DocsSection({
 }: {
   petId: string;
   docs: Doc[];
+  maxDocs: number;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
@@ -992,9 +1103,10 @@ function DocsSection({
   const [showUpload, setShowUpload] = useState(false);
   const [label, setLabel] = useState('');
   const [expiry, setExpiry] = useState('');
+  const [remindersEnabled, setRemindersEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  const atLimit = docs.length >= MAX_DOCS;
+  const atLimit = docs.length >= maxDocs;
 
   async function handleUpload(e: FormEvent) {
     e.preventDefault();
@@ -1013,9 +1125,10 @@ function DocsSection({
     setBusy(true);
     onError(null);
     try {
-      await uploadDoc(petId, file, label.trim() || file.name, expiry || undefined);
+      await uploadDoc(petId, file, label.trim() || file.name, expiry || undefined, remindersEnabled);
       setLabel('');
       setExpiry('');
+      setRemindersEnabled(true);
       if (fileRef.current) fileRef.current.value = '';
       setShowUpload(false);
       await onChanged();
@@ -1030,7 +1143,7 @@ function DocsSection({
   return (
     <section className="card">
       <h2 className="card__title">
-        Records · {docs.length}/{MAX_DOCS}
+        Records · {docs.length}/{maxDocs}
       </h2>
 
       {docs.length === 0 ? (
@@ -1060,7 +1173,7 @@ function DocsSection({
 
       {atLimit ? (
         <p className="subtle">
-          You've reached the {MAX_DOCS}-document limit. Delete one to add another.
+          You've reached the {maxDocs}-document limit. Delete one to add another.
         </p>
       ) : showUpload ? (
         <form className="form" onSubmit={handleUpload}>
@@ -1076,6 +1189,14 @@ function DocsSection({
           <label>
             Expiration date (optional)
             <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={remindersEnabled}
+              onChange={(e) => setRemindersEnabled(e.target.checked)}
+            />
+            <span>Send reminders before this expires</span>
           </label>
           <label>
             File (PDF, JPG, PNG · max 10 MB)
@@ -1260,6 +1381,10 @@ function DocDetailScreen({
 
         {blurb && <p className="doc-detail__blurb">{blurb}</p>}
 
+        <p className="doc-detail__reminder subtle">
+          {doc.remindersEnabled !== false ? '🔔 Reminders on' : '🔕 Reminders off'} · Edit to change
+        </p>
+
         {isImage && (
           <div className="doc-detail__preview">
             <img src={doc.url} alt={doc.label} loading="lazy" />
@@ -1297,6 +1422,7 @@ function EditDocScreen({
 }) {
   const [label, setLabel] = useState(doc.label);
   const [expiry, setExpiry] = useState(doc.expiry ?? '');
+  const [remindersEnabled, setRemindersEnabled] = useState(doc.remindersEnabled !== false);
   const [busy, setBusy] = useState(false);
 
   async function handleSave(e: FormEvent) {
@@ -1306,7 +1432,7 @@ function EditDocScreen({
     setBusy(true);
     onError(null);
     try {
-      await updateDoc(petId, doc.id, next, expiry || undefined);
+      await updateDoc(petId, doc.id, next, expiry || undefined, remindersEnabled);
       await onDone();
       onNotice('Document updated');
     } catch (err) {
@@ -1342,6 +1468,14 @@ function EditDocScreen({
             onChange={(e) => setExpiry(e.target.value)}
           />
         </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={remindersEnabled}
+            onChange={(e) => setRemindersEnabled(e.target.checked)}
+          />
+          <span>Send reminders before this expires</span>
+        </label>
         <div className="actions">
           <button className="btn btn--primary" type="submit" disabled={busy || !label.trim()}>
             {busy ? 'Saving…' : 'Save'}
@@ -1352,6 +1486,488 @@ function EditDocScreen({
         </div>
       </form>
     </div>
+  );
+}
+
+// ---- medications ----
+
+// Quick-add presets: the meds people actually give on a schedule. Daily meds
+// default reminders OFF (a daily email is noise); interval meds default ON.
+const MED_PRESETS: { name: string; interval: number; unit: MedUnit; reminders: boolean }[] = [
+  { name: 'Heartworm prevention', interval: 1, unit: 'month', reminders: true },
+  { name: 'Flea & tick prevention', interval: 1, unit: 'month', reminders: true },
+  { name: 'Bravecto', interval: 12, unit: 'week', reminders: true },
+  { name: 'Joint supplement', interval: 1, unit: 'day', reminders: false },
+  { name: 'Thyroid medication', interval: 1, unit: 'day', reminders: false },
+  { name: 'Insulin', interval: 1, unit: 'day', reminders: false },
+];
+
+const CADENCE_OPTIONS: { value: string; label: string; interval: number; unit: MedUnit }[] = [
+  { value: '1:day', label: 'Daily', interval: 1, unit: 'day' },
+  { value: '1:week', label: 'Weekly', interval: 1, unit: 'week' },
+  { value: '2:week', label: 'Every 2 weeks', interval: 2, unit: 'week' },
+  { value: '1:month', label: 'Monthly', interval: 1, unit: 'month' },
+  { value: '2:month', label: 'Every 2 months', interval: 2, unit: 'month' },
+  { value: '3:month', label: 'Every 3 months', interval: 3, unit: 'month' },
+  { value: '12:week', label: 'Every 12 weeks', interval: 12, unit: 'week' },
+  { value: '6:month', label: 'Every 6 months', interval: 6, unit: 'month' },
+  { value: '12:month', label: 'Yearly', interval: 12, unit: 'month' },
+];
+
+function cadenceLabel(interval: number, unit: MedUnit): string {
+  const preset = CADENCE_OPTIONS.find((o) => o.interval === interval && o.unit === unit);
+  if (preset) return preset.label;
+  return `Every ${interval} ${unit}${interval !== 1 ? 's' : ''}`;
+}
+
+// Meds use a tighter urgency window than vaccines: a monthly med inside a
+// 30-day "due soon" window would never leave it.
+function medStatus(nextDue: string): { status: Status; pill: string | null } {
+  const days = daysUntil(nextDue);
+  if (days < 0) return { status: 'overdue', pill: `Overdue ${-days}d` };
+  if (days === 0) return { status: 'due-soon', pill: 'Due today' };
+  if (days === 1) return { status: 'due-soon', pill: 'Due tomorrow' };
+  if (days <= 3) return { status: 'due-soon', pill: `Due in ${days}d` };
+  return { status: 'current', pill: null };
+}
+
+// Reminder emails go to settings.email, which users who never opened Settings
+// don't have yet. Backfill it (once per session) so a med's reminder toggle
+// alone is enough to actually get email.
+let reminderEmailEnsured = false;
+async function ensureReminderEmail(email: string) {
+  if (reminderEmailEnsured || !email) return;
+  reminderEmailEnsured = true;
+  try {
+    const s = await getSettings();
+    if (!s.email) await saveSettings({ ...DEFAULT_SETTINGS, ...s, email });
+  } catch {
+    // Non-fatal: the reminder Lambda simply skips users without an email.
+  }
+}
+
+function MedsSummary({ meds }: { meds: Med[] }) {
+  if (meds.length === 0) return null;
+  const overdue = meds.filter((m) => daysUntil(m.nextDue) < 0);
+  const dueToday = meds.filter((m) => daysUntil(m.nextDue) === 0);
+  if (overdue.length > 0) {
+    return (
+      <section className="summary summary--overdue">
+        ⚠ {overdue.length} medication{overdue.length > 1 ? 's are' : ' is'} overdue —{' '}
+        {overdue.map((m) => m.name).join(', ')}.
+      </section>
+    );
+  }
+  if (dueToday.length > 0) {
+    return (
+      <section className="summary summary--due-soon">
+        💊 Due today — {dueToday.map((m) => m.name).join(', ')}.
+      </section>
+    );
+  }
+  return <section className="summary summary--current">✓ All medications on schedule.</section>;
+}
+
+function MedsSection({
+  petId,
+  maxMeds,
+  onError,
+  onNotice,
+}: {
+  petId: string;
+  maxMeds: number;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const { email } = useAuth();
+  const [meds, setMeds] = useState<Med[] | null>(null); // null = loading
+  const [form, setForm] = useState<
+    | { mode: 'closed' }
+    | { mode: 'add'; preset?: (typeof MED_PRESETS)[number] }
+    | { mode: 'edit'; med: Med }
+  >({ mode: 'closed' });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setMeds(null);
+    setForm({ mode: 'closed' });
+    listMeds(petId)
+      .then((r) => { if (live) setMeds(r.meds); })
+      .catch((err) => {
+        if (live) {
+          setMeds([]);
+          onError(err instanceof Error ? err.message : 'Could not load medications');
+        }
+      });
+    return () => { live = false; };
+  }, [petId, onError]);
+
+  // Whole-list save with rollback: local state is the source of truth, the
+  // server echo (cleaned ids/fields) replaces it on success.
+  async function persist(next: Med[], successNotice?: string): Promise<boolean> {
+    const prev = meds;
+    setMeds(next);
+    setBusy(true);
+    onError(null);
+    try {
+      const res = await saveMeds(petId, next);
+      setMeds(res.meds);
+      if (next.some((m) => m.remindersEnabled)) void ensureReminderEmail(email ?? '');
+      if (successNotice) onNotice(successNotice);
+      return true;
+    } catch (err) {
+      setMeds(prev);
+      onError(err instanceof Error ? err.message : 'Could not save medications');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleMarkGiven(med: Med) {
+    const today = todayYMD();
+    const nextDue = addInterval(today, med.interval, med.unit);
+    const next = (meds ?? []).map((m) =>
+      m.id === med.id ? { ...m, lastGiven: today, nextDue } : m,
+    );
+    void persist(next, `${med.name} marked as given — next due ${formatDate(nextDue)}`);
+  }
+
+  function handleToggleReminders(med: Med, enabled: boolean) {
+    const next = (meds ?? []).map((m) =>
+      m.id === med.id ? { ...m, remindersEnabled: enabled } : m,
+    );
+    void persist(next, enabled ? `Reminders on for ${med.name}` : `Reminders off for ${med.name}`);
+  }
+
+  function handleDelete(med: Med) {
+    void persist((meds ?? []).filter((m) => m.id !== med.id), `${med.name} removed`);
+  }
+
+  async function handleFormSave(med: Med) {
+    const current = meds ?? [];
+    const next =
+      form.mode === 'edit'
+        ? current.map((m) => (m.id === med.id ? med : m))
+        : [...current, med];
+    const ok = await persist(next, form.mode === 'edit' ? 'Medication updated' : `${med.name} added`);
+    if (ok) setForm({ mode: 'closed' });
+  }
+
+  if (meds === null) {
+    return (
+      <section className="card" aria-busy="true" aria-label="Loading medications">
+        <span className="skeleton skeleton--line" />
+        <span className="skeleton skeleton--line" />
+      </section>
+    );
+  }
+
+  const existingNames = new Set(meds.map((m) => m.name.toLowerCase()));
+  const availablePresets = MED_PRESETS.filter((p) => !existingNames.has(p.name.toLowerCase()));
+  const atLimit = meds.length >= maxMeds;
+
+  return (
+    <>
+      <MedsSummary meds={meds} />
+      <section className="card">
+        <h2 className="card__title">Medications · {meds.length}</h2>
+
+        {meds.length === 0 && form.mode === 'closed' && (
+          <div className="empty-state">
+            <span className="empty-state__icon" aria-hidden="true">💊</span>
+            Track heartworm, flea &amp; tick, and any other meds here. Add one
+            and we'll email you when the next dose is due.
+          </div>
+        )}
+
+        {meds.length > 0 && (
+          <ul className="doc-list">
+            {meds.map((med) => (
+              <MedItem
+                key={med.id}
+                med={med}
+                busy={busy}
+                onMarkGiven={() => handleMarkGiven(med)}
+                onToggleReminders={(enabled) => handleToggleReminders(med, enabled)}
+                onEdit={() => setForm({ mode: 'edit', med })}
+                onDelete={() => handleDelete(med)}
+              />
+            ))}
+          </ul>
+        )}
+
+        {form.mode !== 'closed' ? (
+          <MedForm
+            key={form.mode === 'edit' ? form.med.id : (form.preset?.name ?? 'new')}
+            initial={form.mode === 'edit' ? form.med : undefined}
+            preset={form.mode === 'add' ? form.preset : undefined}
+            busy={busy}
+            onSave={handleFormSave}
+            onCancel={() => setForm({ mode: 'closed' })}
+          />
+        ) : atLimit ? (
+          <p className="subtle">
+            You've reached the {maxMeds}-medication limit. Remove one to add another.
+          </p>
+        ) : (
+          <div className="med-add">
+            {availablePresets.length > 0 && (
+              <div className="preset-chips" role="group" aria-label="Common medications">
+                {availablePresets.map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    className="preset-chip"
+                    onClick={() => setForm({ mode: 'add', preset: p })}
+                  >
+                    + {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button className="btn btn--add" onClick={() => setForm({ mode: 'add' })}>
+              + Add your own
+            </button>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function MedItem({
+  med,
+  busy,
+  onMarkGiven,
+  onToggleReminders,
+  onEdit,
+  onDelete,
+}: {
+  med: Med;
+  busy: boolean;
+  onMarkGiven: () => void;
+  onToggleReminders: (enabled: boolean) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const { status, pill } = medStatus(med.nextDue);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onDown(e: MouseEvent | TouchEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setConfirming(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+        setConfirming(false);
+      }
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+
+  return (
+    <li className="med-item">
+      <div className="med-item__row">
+        <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
+        <span className="doc-meta">
+          <span className="doc-label">
+            {med.name}{' '}
+            {pill && <span className={`status status--${status}`}>{pill}</span>}
+          </span>
+          <span className="subtle">
+            {cadenceLabel(med.interval, med.unit)} · Next due {formatDate(med.nextDue)}
+            {med.lastGiven ? ` · Last given ${formatDate(med.lastGiven)}` : ''}
+          </span>
+        </span>
+        <div className="doc-menu-wrap" ref={menuRef}>
+          <button
+            className="btn btn--icon"
+            aria-label={`Options for ${med.name}`}
+            aria-expanded={menuOpen}
+            onClick={() => { setMenuOpen((v) => !v); setConfirming(false); }}
+            disabled={busy}
+          >
+            ⋯
+          </button>
+          {menuOpen && (
+            <div className="doc-menu" role="menu">
+              <button role="menuitem" onClick={() => { setMenuOpen(false); onEdit(); }}>
+                Edit
+              </button>
+              {confirming ? (
+                <button
+                  role="menuitem"
+                  className="doc-menu__danger"
+                  onClick={() => { setMenuOpen(false); onDelete(); }}
+                >
+                  Confirm delete
+                </button>
+              ) : (
+                <button
+                  role="menuitem"
+                  className="doc-menu__danger"
+                  onClick={() => setConfirming(true)}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="med-item__actions">
+        <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
+          ✓ Mark as given
+        </button>
+        <label className="med-remind">
+          <span className="med-remind__label subtle">
+            {med.remindersEnabled ? '🔔 Reminders' : '🔕 Reminders'}
+          </span>
+          <span className="toggle toggle--sm" aria-label={`Toggle reminders for ${med.name}`}>
+            <input
+              type="checkbox"
+              checked={med.remindersEnabled}
+              onChange={(e) => onToggleReminders(e.target.checked)}
+              disabled={busy}
+            />
+            <span className="toggle__track" />
+          </span>
+        </label>
+      </div>
+    </li>
+  );
+}
+
+function MedForm({
+  initial,
+  preset,
+  busy,
+  onSave,
+  onCancel,
+}: {
+  initial?: Med; // present = edit mode
+  preset?: (typeof MED_PRESETS)[number];
+  busy: boolean;
+  onSave: (med: Med) => void;
+  onCancel: () => void;
+}) {
+  const source = initial ?? (preset ? { ...preset, nextDue: todayYMD(), remindersEnabled: preset.reminders } : null);
+  const initialCadence = source
+    ? (CADENCE_OPTIONS.find((o) => o.interval === source.interval && o.unit === source.unit)?.value ?? 'custom')
+    : '1:month';
+
+  const [name, setName] = useState(source?.name ?? '');
+  const [cadence, setCadence] = useState(initialCadence);
+  const [customDays, setCustomDays] = useState(
+    initialCadence === 'custom' && source ? String(source.interval) : '30',
+  );
+  const [nextDue, setNextDue] = useState(initial?.nextDue ?? todayYMD());
+  const [remindersEnabled, setRemindersEnabled] = useState(
+    initial ? initial.remindersEnabled : (preset ? preset.reminders : true),
+  );
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || !nextDue) return;
+    let interval: number;
+    let unit: MedUnit;
+    if (cadence === 'custom') {
+      interval = Math.max(1, Math.min(365, Math.round(Number(customDays) || 1)));
+      unit = 'day';
+    } else {
+      const opt = CADENCE_OPTIONS.find((o) => o.value === cadence)!;
+      interval = opt.interval;
+      unit = opt.unit;
+    }
+    onSave({
+      id: initial?.id ?? crypto.randomUUID(),
+      name: trimmed,
+      interval,
+      unit,
+      nextDue,
+      remindersEnabled,
+      lastGiven: initial?.lastGiven,
+    });
+  }
+
+  return (
+    <form className="form med-form" onSubmit={handleSubmit}>
+      <label>
+        Medication
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Heartworm prevention"
+          maxLength={100}
+          autoFocus={!initial}
+          required
+        />
+      </label>
+      <label>
+        How often
+        <select value={cadence} onChange={(e) => setCadence(e.target.value)}>
+          {CADENCE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+          <option value="custom">Every N days…</option>
+        </select>
+      </label>
+      {cadence === 'custom' && (
+        <label>
+          Repeat every (days)
+          <input
+            type="number"
+            min={1}
+            max={365}
+            value={customDays}
+            onChange={(e) => setCustomDays(e.target.value)}
+            required
+          />
+        </label>
+      )}
+      <label>
+        Next dose due
+        <input
+          type="date"
+          value={nextDue}
+          onChange={(e) => setNextDue(e.target.value)}
+          required
+        />
+      </label>
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={remindersEnabled}
+          onChange={(e) => setRemindersEnabled(e.target.checked)}
+        />
+        <span>Email me when a dose is due</span>
+      </label>
+      <div className="actions">
+        <button className="btn btn--primary" type="submit" disabled={busy || !name.trim()}>
+          {busy ? 'Saving…' : initial ? 'Save' : 'Add medication'}
+        </button>
+        <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -1965,6 +2581,10 @@ function SettingsScreen({
                   </div>
                 </>
               )}
+
+              <p className="settings-hint subtle">
+                Medication reminders are set per medication on each pet's Meds tab.
+              </p>
             </fieldset>
 
             <div className="actions">

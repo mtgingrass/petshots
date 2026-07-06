@@ -65,8 +65,15 @@ export class ApiStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
-        MAX_PETS: '3', // free-tier cap; bump per-user when a paid tier exists
+        // Free-tier caps. A user is paid when users/{sub}/plan.json says so
+        // (written by billing tooling/operator only); paid users get PAID_*.
+        MAX_PETS: '2',
         MAX_DOCS: '4',
+        MAX_MEDS: '4', // medications per pet
+        PAID_MAX_PETS: '10',
+        PAID_MAX_DOCS: '20',
+        PAID_MAX_MEDS: '20',
+
         MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
       },
       bundling: {
@@ -146,6 +153,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
       [HttpMethod.POST, '/pets/{petId}/docs/{id}/update-url'],
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
+      [HttpMethod.GET, '/pets/{petId}/meds'],
+      [HttpMethod.PUT, '/pets/{petId}/meds'],
       [HttpMethod.POST, '/pets/{petId}/passport'],
       [HttpMethod.DELETE, '/pets/{petId}/passport'],
       [HttpMethod.GET, '/settings'],

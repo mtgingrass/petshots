@@ -69,14 +69,36 @@ export interface Doc {
   id: string;
   label: string;
   expiry?: string; // YYYY-MM-DD, the vaccine's expiration date (optional)
+  remindersEnabled: boolean; // per-record reminder opt-in; true by default
   filename: string;
   size: number;
   uploadedAt: string;
   url: string; // short-lived presigned GET URL
 }
 
-export const MAX_PETS = 3;
-export const MAX_DOCS = 4;
+export type MedUnit = 'day' | 'week' | 'month';
+
+export interface Med {
+  id: string;
+  name: string;
+  interval: number; // "every {interval} {unit}s"
+  unit: MedUnit;
+  nextDue: string; // YYYY-MM-DD
+  remindersEnabled: boolean;
+  lastGiven?: string; // YYYY-MM-DD
+}
+
+// Per-user limits, resolved server-side from the user's plan and returned by
+// GET /pets. The defaults mirror the free tier and only cover the moment
+// before the first listPets response (or an older API without limits).
+export interface Limits {
+  plan: 'free' | 'paid';
+  maxPets: number;
+  maxDocs: number;
+  maxMeds: number;
+}
+
+export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 4, maxMeds: 4 };
 
 // fetch() rejects with a browser-internal message ("Failed to fetch") when the
 // network is down or CORS blocks the call — translate it for humans.
@@ -127,7 +149,7 @@ async function postToS3(presign: { url: string; fields: Record<string, string> }
 
 // ---- pets ----
 
-export function listPets(): Promise<{ pets: Pet[] }> {
+export function listPets(): Promise<{ pets: Pet[]; limits?: Limits }> {
   return request('GET', '/pets');
 }
 
@@ -164,12 +186,28 @@ export function updateDoc(
   id: string,
   label: string,
   expiry?: string,
+  remindersEnabled?: boolean,
 ): Promise<{ ok: true }> {
-  return request('PATCH', `/pets/${petId}/docs/${id}`, { label, expiry: expiry || undefined });
+  return request('PATCH', `/pets/${petId}/docs/${id}`, {
+    label,
+    expiry: expiry || undefined,
+    remindersEnabled: remindersEnabled !== false,
+  });
 }
 
 export function deleteDoc(petId: string, id: string): Promise<void> {
   return request('DELETE', `/pets/${petId}/docs/${id}`);
+}
+
+// ---- medications (per pet) ----
+
+export function listMeds(petId: string): Promise<{ meds: Med[] }> {
+  return request('GET', `/pets/${petId}/meds`);
+}
+
+// Whole-list replace; the server validates every entry and echoes the stored list.
+export function saveMeds(petId: string, meds: Med[]): Promise<{ meds: Med[] }> {
+  return request('PUT', `/pets/${petId}/meds`, { meds });
 }
 
 // ---- passport ----
@@ -199,6 +237,7 @@ export async function uploadDoc(
   file: File,
   label: string,
   expiry?: string,
+  remindersEnabled?: boolean,
 ): Promise<void> {
   const presign = await request<{
     url: string;
@@ -208,6 +247,7 @@ export async function uploadDoc(
     filename: file.name,
     label,
     expiry: expiry || undefined,
+    remindersEnabled: remindersEnabled !== false,
     contentType: file.type || 'application/octet-stream',
   });
   await postToS3(presign, file);

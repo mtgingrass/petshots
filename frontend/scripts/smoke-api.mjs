@@ -14,7 +14,7 @@ import pkg from 'amazon-cognito-identity-js';
 const { CognitoUserPool, CognitoUser, AuthenticationDetails } = pkg;
 
 const API = process.env.API_URL ?? 'https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com';
-const MAX_PETS = 3;
+const MAX_PETS = 2; // free-tier cap (the smoke user has no plan.json)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const env = Object.fromEntries(
@@ -106,9 +106,14 @@ async function main() {
   let pre = await api(token, 'GET', '/pets');
   for (const p of pre.body?.pets ?? []) await api(token, 'DELETE', `/pets/${p.id}`);
 
-  console.log('\n[2] GET /pets starts empty');
+  console.log('\n[2] GET /pets starts empty + returns free-tier limits');
   let r = await api(token, 'GET', '/pets');
   check(r.status === 200 && r.body.pets.length === 0, 'no pets yet');
+  check(
+    r.body.limits?.plan === 'free' && r.body.limits?.maxPets === MAX_PETS,
+    `limits returned (plan=${r.body.limits?.plan}, maxPets=${r.body.limits?.maxPets})`,
+  );
+  check(r.body.limits?.maxDocs === 4 && r.body.limits?.maxMeds === 4, 'free maxDocs=4, maxMeds=4');
 
   console.log('\n[3] POST /pets then GET /pets');
   r = await api(token, 'POST', '/pets', { name: 'Rex', species: 'dog' });
@@ -208,13 +213,70 @@ async function main() {
   console.log(`\n[8] fill to pet limit (${MAX_PETS}) then expect 409`);
   let p2 = await api(token, 'POST', '/pets', { name: 'Milo', species: 'cat' });
   check(p2.status === 200, 'second pet created');
-  await api(token, 'POST', '/pets', { name: 'Kiwi', species: 'other' });
   let overPet = await api(token, 'POST', '/pets', { name: 'One Too Many', species: 'dog' });
   check(overPet.status === 409, `pet #${MAX_PETS + 1} rejected with 409 (got ${overPet.status})`);
 
   console.log("\n[8b] second pet's docs are isolated");
   r = await api(token, 'GET', `/pets/${p2.body.pet.id}/docs`);
   check(r.status === 200 && r.body.docs.length === 0, "Milo has no docs (Rexy's don't leak)");
+
+  console.log('\n[8c] medications: empty list, save, round-trip, defaults');
+  r = await api(token, 'GET', `/pets/${petId}/meds`);
+  check(r.status === 200 && Array.isArray(r.body.meds) && r.body.meds.length === 0, 'meds start empty');
+
+  const medId = crypto.randomUUID();
+  const goodMeds = [
+    { id: medId, name: 'Heartworm prevention', interval: 1, unit: 'month', nextDue: '2027-01-15', remindersEnabled: true, lastGiven: '2026-12-15' },
+    { name: '  Bravecto  ', interval: 12, unit: 'week', nextDue: '2026-01-01' }, // no id, no remindersEnabled, untrimmed name
+  ];
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: goodMeds });
+  check(r.status === 200 && r.body.meds.length === 2, `PUT meds 200 (got ${r.status})`);
+  check(r.body.meds[0].id === medId, 'client-supplied uuid preserved');
+  check(/^[0-9a-f-]{36}$/.test(r.body.meds[1].id ?? ''), 'missing id generated server-side');
+  check(r.body.meds[1].remindersEnabled === true, 'remindersEnabled defaults to true');
+  check(r.body.meds[1].name === 'Bravecto', 'name trimmed');
+  check(r.body.meds[0].lastGiven === '2026-12-15', 'lastGiven round-trips');
+  r = await api(token, 'GET', `/pets/${petId}/meds`);
+  check(r.status === 200 && r.body.meds.length === 2 && r.body.meds[0].name === 'Heartworm prevention', 'meds persisted');
+
+  console.log('\n[8d] medications: validation rejects bad input');
+  const base = { name: 'X', interval: 1, unit: 'month', nextDue: '2027-01-15' };
+  const badCases = [
+    ['non-array meds', { meds: 'nope' }],
+    ['empty name', { meds: [{ ...base, name: '   ' }] }],
+    ['bad unit', { meds: [{ ...base, unit: 'year' }] }],
+    ['zero interval', { meds: [{ ...base, interval: 0 }] }],
+    ['fractional interval', { meds: [{ ...base, interval: 1.5 }] }],
+    ['interval over unit max (25 months)', { meds: [{ ...base, interval: 25 }] }],
+    ['interval as string', { meds: [{ ...base, interval: '1' }] }],
+    ['missing nextDue', { meds: [{ ...base, nextDue: undefined }] }],
+    ['impossible date (Feb 30)', { meds: [{ ...base, nextDue: '2027-02-30' }] }],
+    ['non-ISO date', { meds: [{ ...base, nextDue: '06/15/2027' }] }],
+    ['bad lastGiven', { meds: [{ ...base, lastGiven: '2026-13-01' }] }],
+    ['5 meds over free limit', { meds: Array.from({ length: 5 }, (_, i) => ({ ...base, name: `Med ${i}` })) }],
+  ];
+  for (const [label, body] of badCases) {
+    const res = await api(token, 'PUT', `/pets/${petId}/meds`, body);
+    check(res.status === 400, `${label} rejected 400 (got ${res.status})`);
+  }
+  r = await api(token, 'GET', `/pets/${petId}/meds`);
+  check(r.body.meds.length === 2, 'failed PUTs did not overwrite stored meds');
+
+  console.log('\n[8e] medications: duplicate ids deduped, authz boundaries');
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, {
+    meds: [
+      { id: medId, name: 'A', interval: 1, unit: 'day', nextDue: '2027-01-15' },
+      { id: medId, name: 'B', interval: 1, unit: 'day', nextDue: '2027-01-15' },
+    ],
+  });
+  check(r.status === 200 && new Set(r.body.meds.map((m) => m.id)).size === 2, 'duplicate med ids regenerated');
+  const ghostPet = crypto.randomUUID();
+  r = await api(token, 'PUT', `/pets/${ghostPet}/meds`, { meds: [] });
+  check(r.status === 404, `PUT meds on nonexistent pet 404 (got ${r.status})`);
+  r = await api(token, 'GET', `/pets/${p2.body.pet.id}/meds`);
+  check(r.status === 200 && r.body.meds.length === 0, "Milo has no meds (Rexy's don't leak)");
+  const noAuth = await fetch(`${API}/pets/${petId}/meds`);
+  check(noAuth.status === 401, `unauthenticated meds GET 401 (got ${noAuth.status})`);
 
   console.log('\n[9] DELETE pet removes it and its docs');
   del = await api(token, 'DELETE', `/pets/${petId}`);
@@ -223,6 +285,8 @@ async function main() {
   check(!r.body.pets.some((p) => p.id === petId), 'deleted pet gone from list');
   r = await api(token, 'GET', `/pets/${petId}/docs`);
   check(r.body.docs.length === 0, 'deleted pet has no docs left');
+  r = await api(token, 'GET', `/pets/${petId}/meds`);
+  check(r.body.meds.length === 0, 'deleted pet has no meds left (meds.json cascaded)');
 
   console.log('\n[10] cleanup');
   r = await api(token, 'GET', '/pets');

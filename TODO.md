@@ -16,7 +16,9 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [ ] **Strip dead `update-url` route from API Lambda** (2026-07-03) — leftover from the removed Update-record feature. Harmless (authed) but dead code. Remove route + archive logic + smoke test section [5c] together, redeploy ApiStack.
 
-- [ ] **Medication reminders — monthly heartworm/flea** (2026-07-03) — the #1 retention hook (12×/yr touchpoints vs 2/yr today). See `docs/retention-and-revenue-brainstorm.md`. Extends existing ReminderFn/SES pipeline; `meds.json` per pet + "mark as given".
+- [x] **Medication reminders — monthly heartworm/flea** (2026-07-03) — **DONE session 13 (2026-07-06)**: Meds tab per pet (presets + custom, per-med reminder toggle, mark-as-given), `meds.json` per pet, ReminderFn extended (due-day + weekly-overdue emails), smoke-tested 60/60 + 29/29. See CLAUDE.md session 13 notes.
+
+- [ ] **Meds on overview + passport** (2026-07-06) — meds are invisible outside the pet's Meds tab: pet pin status rings, overview notices, and the public passport page ignore them. Passport especially — boarding facilities want the med list + dosing schedule. Also consider a count/dot badge on the Meds tab itself.
 
 - [ ] **Pet birthday email** (2026-07-03) — "Ollie turns 7 🎂" via ReminderFn; DOB already a profile field. Weekend-sized, pure warmth.
 

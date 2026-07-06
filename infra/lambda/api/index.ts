@@ -27,7 +27,7 @@ const s3 = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const BUCKET = process.env.UPLOADS_BUCKET!;
-const MAX_PETS = Number(process.env.MAX_PETS ?? '3');
+const MAX_PETS = Number(process.env.MAX_PETS ?? '2');
 const MAX_DOCS = Number(process.env.MAX_DOCS ?? '4');
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
@@ -45,6 +45,7 @@ const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
 interface DocMeta {
   label: string;
   expiry?: string; // YYYY-MM-DD
+  remindersEnabled?: boolean; // per-record opt-out; absent/true = remind, false = skip
 }
 const encodeMeta = (m: DocMeta): string => encodeURIComponent(JSON.stringify(m));
 function decodeMeta(seg: string | undefined): DocMeta {
@@ -52,12 +53,17 @@ function decodeMeta(seg: string | undefined): DocMeta {
   try {
     const m = JSON.parse(raw);
     if (m && typeof m === 'object') {
-      return { label: String(m.label ?? ''), expiry: m.expiry ? String(m.expiry) : undefined };
+      return {
+        label: String(m.label ?? ''),
+        expiry: m.expiry ? String(m.expiry) : undefined,
+        // Legacy keys have no remindersEnabled — treat absence as true (opted in).
+        remindersEnabled: m.remindersEnabled !== false,
+      };
     }
   } catch {
     /* legacy key: the segment is just the label, no JSON */
   }
-  return { label: raw };
+  return { label: raw, remindersEnabled: true };
 }
 // Accept only a strict YYYY-MM-DD date; ignore anything else.
 const cleanExpiry = (v: unknown): string | undefined =>
@@ -65,6 +71,76 @@ const cleanExpiry = (v: unknown): string | undefined =>
 
 const isUuid = (v: string | undefined): v is string =>
   !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+// ---- medications ----
+// Per-pet medication list stored whole in meds.json (same no-DB pattern as
+// pet.json). The reminder Lambda reads this nightly, so a med that passes
+// validation here must always be schedulable there — reject the whole PUT on
+// any bad entry rather than storing a partially-valid list.
+interface Med {
+  id: string;
+  name: string;
+  interval: number; // paired with unit: "every {interval} {unit}s"
+  unit: 'day' | 'week' | 'month';
+  nextDue: string; // YYYY-MM-DD
+  remindersEnabled: boolean;
+  lastGiven?: string; // YYYY-MM-DD
+}
+const MAX_MEDS = Number(process.env.MAX_MEDS ?? '4');
+const MED_UNIT_MAX: Record<Med['unit'], number> = { day: 365, week: 52, month: 24 };
+
+// Strict calendar date: correct shape AND a real day. Round-trip through Date
+// components — V8 string parsing silently rolls Feb 30 over to Mar 2, so a
+// NaN check alone is not enough.
+function isStrictDay(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const [y, m, d] = v.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
+function cleanMeds(input: unknown, maxMeds: number): { meds: Med[] } | { error: string } {
+  if (!Array.isArray(input)) return { error: 'meds must be an array' };
+  if (input.length > maxMeds) return { error: `limit of ${maxMeds} medications per pet` };
+  const seenIds = new Set<string>();
+  const meds: Med[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') return { error: 'each medication must be an object' };
+    const m = raw as Record<string, unknown>;
+    const name = String(m.name ?? '').trim().slice(0, 100);
+    if (!name) return { error: 'medication name required' };
+    const unit = m.unit === 'day' || m.unit === 'week' || m.unit === 'month' ? m.unit : null;
+    if (!unit) return { error: 'unit must be day, week, or month' };
+    if (
+      typeof m.interval !== 'number' ||
+      !Number.isInteger(m.interval) ||
+      m.interval < 1 ||
+      m.interval > MED_UNIT_MAX[unit]
+    ) {
+      return { error: `interval must be a whole number between 1 and ${MED_UNIT_MAX[unit]} ${unit}s` };
+    }
+    if (!isStrictDay(m.nextDue)) return { error: 'nextDue must be a valid YYYY-MM-DD date' };
+    if (m.lastGiven !== undefined && !isStrictDay(m.lastGiven)) {
+      return { error: 'lastGiven must be a valid YYYY-MM-DD date' };
+    }
+    // Client supplies ids so unsaved UI state can key rows; regenerate anything
+    // malformed or duplicated instead of trusting it.
+    const id = isUuid(typeof m.id === 'string' ? m.id : undefined) && !seenIds.has(m.id as string)
+      ? (m.id as string)
+      : randomUUID();
+    seenIds.add(id);
+    meds.push({
+      id,
+      name,
+      interval: m.interval,
+      unit,
+      nextDue: m.nextDue,
+      remindersEnabled: m.remindersEnabled !== false,
+      lastGiven: m.lastGiven as string | undefined,
+    });
+  }
+  return { meds };
+}
 
 const str = (v: unknown, max: number) => String(v ?? '').slice(0, max) || undefined;
 const cleanPet = (input: Record<string, unknown>) => ({
@@ -91,6 +167,44 @@ async function readJson<T>(key: string): Promise<T | null> {
     if ((e as { name?: string }).name === 'NoSuchKey') return null;
     throw e;
   }
+}
+
+// ---- plans / entitlements ----
+// Free-tier limits come from the env; a paid user has users/{sub}/plan.json,
+// written only by billing tooling or an operator — never by any user-writable
+// route — so a user can't grant themselves the paid tier. plan.json may carry
+// per-user limit overrides (comped accounts, support bumps).
+//
+// Limits gate CREATION only. A user over their limit (downgrade, cap change)
+// keeps everything and can view/edit/delete freely; they just can't add more.
+interface Limits {
+  maxPets: number;
+  maxDocs: number;
+  maxMeds: number;
+}
+type Entitlements = Limits & { plan: 'free' | 'paid' };
+const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
+  free: { maxPets: MAX_PETS, maxDocs: MAX_DOCS, maxMeds: MAX_MEDS },
+  paid: {
+    maxPets: Number(process.env.PAID_MAX_PETS ?? '10'),
+    maxDocs: Number(process.env.PAID_MAX_DOCS ?? '20'),
+    maxMeds: Number(process.env.PAID_MAX_MEDS ?? '20'),
+  },
+};
+const posInt = (v: unknown, fallback: number): number =>
+  typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : fallback;
+async function getEntitlements(sub: string): Promise<Entitlements> {
+  const file = await readJson<{ plan?: string; limits?: Partial<Limits> }>(
+    `users/${sub}/plan.json`,
+  );
+  const plan = file?.plan === 'paid' ? 'paid' : 'free';
+  const base = PLAN_LIMITS[plan];
+  return {
+    plan,
+    maxPets: posInt(file?.limits?.maxPets, base.maxPets),
+    maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
+    maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
+  };
 }
 
 // ---- public passport (no JWT required) ----
@@ -199,9 +313,10 @@ export const handler = async (
       case 'GET /pets': {
         // One LIST covers everything under pets/: pet.json keys identify the
         // pets, an `avatar` key marks a photo. Doc keys in the result are ignored.
-        const list = await s3.send(
-          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }),
-        );
+        const [list, entitlements] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix })),
+          getEntitlements(sub),
+        ]);
         const keys = (list.Contents ?? []).map((it) => it.Key!);
         const ids = keys
           .filter((k) => k.endsWith('/pet.json'))
@@ -224,18 +339,20 @@ export const handler = async (
         );
         // Stable order so the switcher doesn't shuffle between loads.
         pets.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-        return json(200, { pets });
+        // The client reads its limits from here — never hardcode them in the UI.
+        return json(200, { pets, limits: entitlements });
       }
 
       case 'POST /pets': {
         const pet = cleanPet(JSON.parse(event.body ?? '{}'));
         if (!pet.name) return json(400, { error: 'name required' });
-        const list = await s3.send(
-          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }),
-        );
+        const [list, ent] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix })),
+          getEntitlements(sub),
+        ]);
         const count = (list.Contents ?? []).filter((it) => it.Key!.endsWith('/pet.json')).length;
-        if (count >= MAX_PETS) {
-          return json(409, { error: `limit of ${MAX_PETS} pets reached` });
+        if (count >= ent.maxPets) {
+          return json(409, { error: `limit of ${ent.maxPets} pets reached` });
         }
         const id = randomUUID();
         await s3.send(
@@ -331,6 +448,7 @@ export const handler = async (
               id: parts[5],
               label: meta.label,
               expiry: meta.expiry,
+              remindersEnabled: meta.remindersEnabled !== false,
               filename: parts.slice(7).join('/'),
               size: it.Size,
               uploadedAt: it.LastModified,
@@ -348,6 +466,7 @@ export const handler = async (
           .slice(0, 200);
         const label = String(input.label ?? '').slice(0, 200);
         const expiry = cleanExpiry(input.expiry);
+        const remindersEnabled = input.remindersEnabled !== false;
         const contentType = String(input.contentType ?? 'application/octet-stream');
         if (!filename) return json(400, { error: 'filename required' });
         if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
@@ -355,14 +474,15 @@ export const handler = async (
         // Enforce the per-pet limit before handing out an upload URL.
         // Count only current (non-archived) docs so archived versions don't
         // inflate the count and block uploads.
-        const list = await s3.send(
-          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
-        );
+        const [list, ent] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
+          getEntitlements(sub),
+        ]);
         const currentDocs = (list.Contents ?? []).filter(
           (it) => !it.Key!.includes('/_archived/'),
         );
-        if (currentDocs.length >= MAX_DOCS) {
-          return json(409, { error: `limit of ${MAX_DOCS} documents reached` });
+        if (currentDocs.length >= ent.maxDocs) {
+          return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
         }
 
         const docId = randomUUID();
@@ -370,7 +490,7 @@ export const handler = async (
         // x-amz-meta-*. Fall back to the filename if no label was given (avoids an
         // empty key segment).
         const safeLabel = label || filename;
-        const key = `${docsPrefix}${docId}/${encodeMeta({ label: safeLabel, expiry })}/${filename}`;
+        const key = `${docsPrefix}${docId}/${encodeMeta({ label: safeLabel, expiry, remindersEnabled })}/${filename}`;
 
         // Presigned POST (not PUT): the signed policy carries conditions that S3
         // enforces itself. content-length-range rejects an oversized upload
@@ -406,8 +526,14 @@ export const handler = async (
         const oldKey = list.Contents?.find((it) => !it.Key!.includes('/_archived/'))?.Key;
         if (!oldKey) return json(404, { error: 'not found' });
 
-        const filename = oldKey.split('/').slice(7).join('/');
-        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry })}/${filename}`;
+        const oldParts = oldKey.split('/');
+        const filename = oldParts.slice(7).join('/');
+        const oldMeta = decodeMeta(oldParts[6]);
+        // Preserve existing remindersEnabled if not provided in request.
+        const newRemindersEnabled = typeof input.remindersEnabled === 'boolean'
+          ? input.remindersEnabled
+          : oldMeta.remindersEnabled !== false;
+        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry, remindersEnabled: newRemindersEnabled })}/${filename}`;
         if (newKey === oldKey) return json(200, { ok: true });
 
         // CopySource must be a URL-encoded bucket/key, but with '/' preserved as
@@ -480,6 +606,40 @@ export const handler = async (
           ),
         );
         return { statusCode: 204 };
+      }
+
+      // ---- medications (per pet) ----
+
+      case 'GET /pets/{petId}/meds': {
+        const stored = await readJson<{ meds: Med[] }>(`${petPrefix}meds.json`);
+        return json(200, { meds: stored?.meds ?? [] });
+      }
+
+      case 'PUT /pets/{petId}/meds': {
+        // Whole-list replace, like settings.json. Require the pet to exist so
+        // meds can't be stashed under arbitrary petIds outside the pet limit.
+        const [existingPet, ent, stored] = await Promise.all([
+          readJson(petKey),
+          getEntitlements(sub),
+          readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
+        ]);
+        if (existingPet === null) return json(404, { error: 'not found' });
+        const input = JSON.parse(event.body ?? '{}');
+        // Grandfather clause: whole-list replace means a user left over the cap
+        // by a downgrade must still be able to edit/shrink the list — only
+        // growing past what they already have is blocked.
+        const effectiveMax = Math.max(ent.maxMeds, stored?.meds?.length ?? 0);
+        const result = cleanMeds(input.meds, effectiveMax);
+        if ('error' in result) return json(400, { error: result.error });
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: `${petPrefix}meds.json`,
+            Body: JSON.stringify(result),
+            ContentType: 'application/json',
+          }),
+        );
+        return json(200, result);
       }
 
       // ---- user settings ----

@@ -1647,6 +1647,20 @@ function EditDocScreen({
 
 // ---- AI extraction review ----
 
+// Typical booster cadences for tap-to-fill expiry suggestions when the
+// document printed neither a date nor a duration. Never auto-applied —
+// protocols genuinely vary (1yr vs 3yr rabies), so the user picks.
+const VACCINE_CADENCES: { match: RegExp; label: string; options: { text: string; months: number }[] }[] = [
+  { match: /rabies/i, label: 'Rabies', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
+  { match: /dhpp|da2pp|dapp|distemper|parvo/i, label: 'DHPP', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
+  { match: /bordetella|kennel cough/i, label: 'Bordetella', options: [{ text: '6 months', months: 6 }, { text: '1 year', months: 12 }] },
+  { match: /lepto/i, label: 'Leptospirosis', options: [{ text: '1 year', months: 12 }] },
+  { match: /lyme/i, label: 'Lyme', options: [{ text: '1 year', months: 12 }] },
+  { match: /influenza|canine.?flu/i, label: 'Influenza', options: [{ text: '1 year', months: 12 }] },
+  { match: /fvrcp|rhinotracheitis|calici/i, label: 'FVRCP', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
+  { match: /felv|feline.?leukemia/i, label: 'FeLV', options: [{ text: '1 year', months: 12 }] },
+];
+
 interface ReviewRow {
   key: string;
   include: boolean;
@@ -1654,6 +1668,9 @@ interface ReviewRow {
   given: string;
   expiry: string;
   remindersEnabled: boolean;
+  // Why the expiry field was pre-filled without a printed date, e.g. "1 year"
+  // from the document — shown as a note under the field.
+  expiryFrom?: string;
 }
 
 interface ProfileCandidate {
@@ -1721,7 +1738,14 @@ function ReviewExtractionScreen({
           include: i < remaining,
           label: v.name,
           given: v.dateGiven ?? '',
-          expiry: v.expiry ?? '',
+          // A printed duration ("1 year") + given date is grounded in the
+          // document, so pre-fill the computed expiry with a note; a bare
+          // known-cadence guess is only offered as chips below.
+          expiry: v.expiry ?? v.suggestedExpiry ?? '',
+          expiryFrom:
+            !v.expiry && v.suggestedExpiry && v.validityText
+              ? `Calculated from “${v.validityText.trim()}” printed on the document — double-check it.`
+              : undefined,
           remindersEnabled: true,
         })),
   );
@@ -1734,6 +1758,8 @@ function ReviewExtractionScreen({
   const included = rows.filter((r) => r.include);
   const overBudget = included.length > remaining;
   const missingLabel = included.some((r) => !r.label.trim());
+
+  const cadenceFor = (label: string) => VACCINE_CADENCES.find((c) => c.match.test(label));
 
   const existingLabels = docs.map((d) => d.label.trim().toLowerCase());
   const isDupe = (label: string) => {
@@ -1851,10 +1877,35 @@ function ReviewExtractionScreen({
                       <input
                         type="date"
                         value={row.expiry}
-                        onChange={(e) => setRow(row.key, { expiry: e.target.value })}
+                        onChange={(e) => setRow(row.key, { expiry: e.target.value, expiryFrom: undefined })}
                       />
                     </label>
                   </div>
+                  {row.expiry && row.expiryFrom && (
+                    <p className="subtle review-row__suggest-note">💡 {row.expiryFrom}</p>
+                  )}
+                  {!row.expiry && row.given && cadenceFor(row.label) && (
+                    <div className="review-row__chips">
+                      <span className="subtle">
+                        No expiry on the document — typical {cadenceFor(row.label)!.label} boosters:
+                      </span>
+                      {cadenceFor(row.label)!.options.map((o) => (
+                        <button
+                          key={o.months}
+                          type="button"
+                          className="preset-chip"
+                          onClick={() =>
+                            setRow(row.key, {
+                              expiry: addInterval(row.given, o.months, 'month'),
+                              expiryFrom: `Suggested from a typical ${o.text} booster schedule — not printed on the document.`,
+                            })
+                          }
+                        >
+                          + {o.text}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <label className="checkbox-label">
                     <input
                       type="checkbox"

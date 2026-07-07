@@ -258,7 +258,9 @@ export async function fetchPassport(token: string): Promise<PassportData> {
 export interface ExtractedVaccine {
   name: string;
   dateGiven?: string; // YYYY-MM-DD
-  expiry?: string; // YYYY-MM-DD
+  expiry?: string; // YYYY-MM-DD, only when a date is printed on the document
+  validityText?: string; // duration as printed, e.g. "1 year", "(3 Months)"
+  suggestedExpiry?: string; // dateGiven + validityText, computed server-side
 }
 
 export interface Extraction {

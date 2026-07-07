@@ -2273,3 +2273,17 @@ a {
 .doc-detail__given {
   margin: 0.25rem 0 0;
 }
+
+/* Expiry suggestion chips + note on the review screen */
+.review-row__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.review-row__suggest-note {
+  margin: -0.2rem 0 0;
+  font-size: 0.85rem;
+}

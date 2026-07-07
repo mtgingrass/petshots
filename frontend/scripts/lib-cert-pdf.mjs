@@ -104,6 +104,38 @@ export function makeMultiVaccineCert() {
   return buildPdf(ops);
 }
 
+// Cert that prints validity DURATIONS ("1 Year", "(6 Months)") instead of
+// expiration dates — exercises validityText extraction + server-computed
+// suggestedExpiry + name cleanup (no duration suffix in the vaccine name).
+export const DURATION_CERT = {
+  vaccines: [
+    { name: 'Rabies', given: '2025-07-01', validity: '1 Year', suggestedExpiry: '2026-07-01' },
+    { name: 'Bordetella', given: '2025-01-15', validity: '(6 Months)', suggestedExpiry: '2025-07-15' },
+  ],
+};
+
+export function makeDurationCert() {
+  const ops = [];
+  ops.push('0.13 0.36 0.62 rg', '0 730 612 62 re f', '1 1 1 rg');
+  ops.push(bold(36, 764, 16, CERT.clinic));
+  ops.push('0 0 0 rg');
+  ops.push(bold(36, 706, 13, 'CERTIFICATE OF VACCINATION'));
+  let y = 683;
+  ops.push(bold(36, y, 9, 'Patient:'), reg(185, y, 9, CERT.petName));
+  y -= 16;
+  ops.push(bold(36, y, 9, 'Species:'), reg(185, y, 9, 'Canine (dog)'));
+  y -= 28;
+  ops.push(bold(36, y, 10, 'VACCINATIONS ADMINISTERED'));
+  y -= 17;
+  ops.push(bold(36, y, 9, 'Vaccine'), bold(280, y, 9, 'Date Given'), bold(420, y, 9, 'Valid For'));
+  y -= 15;
+  for (const v of DURATION_CERT.vaccines) {
+    ops.push(reg(36, y, 9, v.name), reg(280, y, 9, v.given), reg(420, y, 9, v.validity));
+    y -= 15;
+  }
+  return buildPdf(ops);
+}
+
 export function makeNonVaccinePdf() {
   const ops = [];
   ops.push(bold(36, 740, 14, 'Weekly Grocery List'));

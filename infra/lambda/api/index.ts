@@ -275,8 +275,13 @@ const EXTRACTION_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['name', 'dateGiven', 'expiry'],
-        properties: { name: { type: 'string' }, dateGiven: nullableString, expiry: nullableString },
+        required: ['name', 'dateGiven', 'expiry', 'validityText'],
+        properties: {
+          name: { type: 'string' },
+          dateGiven: nullableString,
+          expiry: nullableString,
+          validityText: nullableString,
+        },
       },
     },
   },
@@ -290,8 +295,10 @@ Extract ONLY information explicitly printed in the document:
 - EVERY vaccination listed: its common name (e.g. "Rabies", "DHPP (Distemper/Parvo)", "Bordetella", "FVRCP", "FeLV", "Leptospirosis"), the date it was administered, and its expiration/due date.
 
 Rules:
+- name is the vaccine's common name ONLY — never append durations or parenthetical validity periods like "(1 Year)" or "(3 Months)" to it.
+- If the document states a validity period or duration instead of (or alongside) a date — e.g. "1 year", "(3 Months)", "annual", "good for 36 months" — copy that phrase verbatim into validityText.
 - All dates in YYYY-MM-DD. If a date is partial or unreadable, use null for it.
-- NEVER infer or calculate an expiration date that is not written in the document (do not guess 1-year vs 3-year durations).
+- NEVER infer or calculate an expiration date that is not written in the document (do not guess 1-year vs 3-year durations); expiry is only for an explicitly printed date. Printed durations belong in validityText.
 - Use null for anything not present or not legible.
 - If this is not a pet health document at all, set isPetHealthDocument to false and return an empty vaccines list.`;
 
@@ -299,7 +306,44 @@ interface Extraction {
   isPetHealthDocument: boolean;
   pet: { name?: string; species?: string; breed?: string; birthday?: string; weight?: string; microchip?: string };
   vet: { name?: string; clinic?: string; phone?: string };
-  vaccines: { name: string; dateGiven?: string; expiry?: string }[];
+  vaccines: {
+    name: string;
+    dateGiven?: string;
+    expiry?: string;
+    validityText?: string; // duration as printed, e.g. "1 year", "(3 Months)"
+    suggestedExpiry?: string; // dateGiven + validityText, computed server-side
+  }[];
+}
+
+// "1 year" / "(3 Months)" / "annual" / "good for 36 months" -> a day/month
+// offset. Month math must be calendar-clamped (Jan 31 + 1mo = Feb 28), same
+// rule as the meds cadence code in the frontend.
+function parseValidity(text: string): { months?: number; days?: number } | null {
+  const t = text.toLowerCase();
+  if (/\bannual(ly)?\b/.test(t)) return { months: 12 };
+  const m = t.match(/(\d+(?:\.\d+)?)\s*(year|yr|month|mo|week|wk|day)s?\b/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0 || n > 120) return null;
+  const unit = m[2];
+  if (unit.startsWith('y')) return Number.isInteger(n) ? { months: n * 12 } : { days: Math.round(n * 365) };
+  if (unit.startsWith('mo')) return Number.isInteger(n) ? { months: n } : { days: Math.round(n * 30) };
+  if (unit.startsWith('w')) return { days: Math.round(n * 7) };
+  return { days: Math.round(n) };
+}
+
+function addToDay(ymd: string, offset: { months?: number; days?: number }): string {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  let r: Date;
+  if (offset.months) {
+    r = new Date(y, mo - 1 + offset.months, 1);
+    const lastDay = new Date(r.getFullYear(), r.getMonth() + 1, 0).getDate();
+    r.setDate(Math.min(d, lastDay));
+  } else {
+    r = new Date(y, mo - 1, d + (offset.days ?? 0));
+  }
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${r.getFullYear()}-${p(r.getMonth() + 1)}-${p(r.getDate())}`;
 }
 
 // Model output is never trusted: structured outputs constrain the shape, not
@@ -311,11 +355,26 @@ function cleanExtraction(raw: unknown): Extraction {
   const vet = (r.vet ?? {}) as Record<string, unknown>;
   const vaccines = (Array.isArray(r.vaccines) ? r.vaccines : [])
     .slice(0, 12)
-    .map((v: Record<string, unknown>) => ({
-      name: String(v?.name ?? '').trim().slice(0, 100),
-      dateGiven: day(v?.dateGiven),
-      expiry: day(v?.expiry),
-    }))
+    .map((v: Record<string, unknown>) => {
+      const dateGiven = day(v?.dateGiven);
+      const expiry = day(v?.expiry);
+      const validityText = str(v?.validityText, 60);
+      // The document printed a duration instead of a date: given + duration is
+      // grounded in the document itself, so surface it as a suggestion. (Bare
+      // known-cadence guesses stay client-side as tap-to-fill chips.)
+      let suggestedExpiry: string | undefined;
+      if (!expiry && dateGiven && validityText) {
+        const offset = parseValidity(validityText);
+        if (offset) suggestedExpiry = addToDay(dateGiven, offset);
+      }
+      // Prompt says common-name only, but strip stray duration suffixes
+      // anyway: "Rabies (1 Year)" / "Bordetella - 6 months" -> clean name.
+      const name = String(v?.name ?? '')
+        .replace(/\s*[-–—]?\s*\(?\s*\d+(?:\.\d+)?\s*(?:year|yr|month|mo|week|wk|day)s?\s*\)?\s*$/i, '')
+        .trim()
+        .slice(0, 100);
+      return { name, dateGiven, expiry, validityText, suggestedExpiry };
+    })
     .filter((v: { name: string }) => v.name.length > 0);
   return {
     isPetHealthDocument: r.isPetHealthDocument === true,

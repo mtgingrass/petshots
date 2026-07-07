@@ -6,14 +6,20 @@
 // Run with a THROWAWAY user (admin-created) and delete it afterwards.
 // Needs AWS CLI creds (s3 read/write on the uploads bucket) for the quota and
 // read-only-pet setup, which write users/{sub}/*.json directly.
-// Makes 2 real Claude Haiku calls (~$0.01/run).
+// Makes 3 real Claude Haiku calls (~$0.02/run).
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import pkg from 'amazon-cognito-identity-js';
-import { CERT, makeMultiVaccineCert, makeNonVaccinePdf } from './lib-cert-pdf.mjs';
+import {
+  CERT,
+  DURATION_CERT,
+  makeMultiVaccineCert,
+  makeDurationCert,
+  makeNonVaccinePdf,
+} from './lib-cert-pdf.mjs';
 
 const { CognitoUserPool, CognitoUser, AuthenticationDetails } = pkg;
 
@@ -230,6 +236,32 @@ try {
       (an2.body?.extraction?.vaccines ?? []).length === 0,
     'grocery list -> not a pet health document, no vaccines',
   );
+
+  // -- durations printed instead of dates ("1 Year", "(6 Months)") --
+  console.log('\nduration cert (validity periods, no printed expiry):');
+  const preD = await api(token, 'POST', `/pets/${petId}/docs/analyze-upload-url`, {
+    filename: 'duration-cert.pdf',
+    contentType: 'application/pdf',
+  });
+  await s3Post(preD.body, makeDurationCert(), 'application/pdf');
+  const anD = await api(token, 'POST', `/pets/${petId}/docs/analyze`, {
+    uploadId: preD.body.uploadId,
+  });
+  check(anD.status === 200, `duration cert analyzes (got ${anD.status})`);
+  const dvax = anD.body?.extraction?.vaccines ?? [];
+  for (const expect of DURATION_CERT.vaccines) {
+    const v = dvax.find((x) => x.name.toLowerCase().includes(expect.name.toLowerCase()));
+    check(!!v, `found ${expect.name}`);
+    check(
+      v && !/\d\s*(year|month|yr|mo)/i.test(v.name) && !v.name.includes('('),
+      `${expect.name} label is clean (got "${v?.name}")`,
+    );
+    check(!v?.expiry, `${expect.name} has no printed expiry`);
+    check(
+      v?.suggestedExpiry === expect.suggestedExpiry,
+      `${expect.name} suggestedExpiry ${expect.suggestedExpiry} from "${expect.validity}" (got ${v?.suggestedExpiry})`,
+    );
+  }
 
   // -- edge: doc cap (3 committed + 2 would exceed the 4-doc free cap) --
   const over = await api(token, 'POST', `/pets/${petId}/docs/commit`, {

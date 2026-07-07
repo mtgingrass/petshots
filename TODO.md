@@ -14,6 +14,12 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [x] ~~**Vaccine record versioning / "Update" action**~~ (2026-07-02) — shipped, then **REMOVED session 12 (2026-07-03)** at Mark's request (simpler flow: delete + re-add). Frontend fully deleted; the API `update-url` route + `_archived/` logic still live in the Lambda — strip next time ApiStack is touched.
 
+- [ ] **Stripe GO-LIVE checklist** (2026-07-06) — billing is fully wired in TEST mode. To take real money: activate Stripe account → live restricted key (same template + Webhook Endpoints write) → `put-secret-value` → re-run `infra/scripts/setup-stripe.mjs` → activate Customer Portal in live mode → redeploy ApiStack to flush the cached secret. Verify the live key pasted into terminal during s14 was rolled.
+
+- [ ] **Customer Portal activation (test mode)** (2026-07-06) — Stripe dashboard → Settings → Billing → Customer portal → Activate, or the "Manage billing" button errors. One click, needs Mark.
+
+- [ ] **Downgrade copy softening** (2026-07-06) — over-cap (lapsed) users see "You're at the 2-pet limit" + read-only notes; consider "Your plan includes 2 pets — upgrade to add more" phrasing distinct from at-cap free users.
+
 - [ ] **Strip dead `update-url` route from API Lambda** (2026-07-03) — leftover from the removed Update-record feature. Harmless (authed) but dead code. Remove route + archive logic + smoke test section [5c] together, redeploy ApiStack.
 
 - [x] **Medication reminders — monthly heartworm/flea** (2026-07-03) — **DONE session 13 (2026-07-06)**: Meds tab per pet (presets + custom, per-med reminder toggle, mark-as-given), `meds.json` per pet, ReminderFn extended (due-day + weekly-overdue emails), smoke-tested 60/60 + 29/29. See CLAUDE.md session 13 notes.

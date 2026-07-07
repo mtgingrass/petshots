@@ -14,9 +14,9 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [x] ~~**Vaccine record versioning / "Update" action**~~ (2026-07-02) — shipped, then **REMOVED session 12 (2026-07-03)** at Mark's request (simpler flow: delete + re-add). Frontend fully deleted; the API `update-url` route + `_archived/` logic still live in the Lambda — strip next time ApiStack is touched.
 
-- [ ] **Stripe GO-LIVE checklist** (2026-07-06) — billing is fully wired in TEST mode. To take real money: activate Stripe account → live restricted key (same template + Webhook Endpoints write) → `put-secret-value` → re-run `infra/scripts/setup-stripe.mjs` → activate Customer Portal in live mode → redeploy ApiStack to flush the cached secret. Verify the live key pasted into terminal during s14 was rolled. Cosmetics: set public business name + statement descriptor to "Petshots" (Settings → Business details), trim checkout payment methods (drop Klarna/Bank for a $5 sub; Settings → Payment methods).
+- [x] ~~**Stripe GO-LIVE**~~ (2026-07-06) — **LIVE as of s14**: live key in Secrets Manager, live product/prices/webhook provisioned, Lambda cache flushed, checkout verified creating `cs_live_` sessions. Mark's account = founder comp (`{"plan":"paid"}`, no Stripe linkage).
 
-- [ ] **Customer Portal activation (test mode)** (2026-07-06) — Stripe dashboard → Settings → Billing → Customer portal → Activate, or the "Manage billing" button errors. One click, needs Mark.
+- [ ] **Stripe live-mode loose ends** (2026-07-06) — (a) activate Customer Portal in LIVE mode (Settings → Billing → Customer portal) or "Manage billing" errors for real subscribers; (b) verify the live key pasted into terminal scrollback earlier in s14 was rolled; (c) branding: public business name + statement descriptor → "Petshots" (checkout page currently says "Mark Gingrass"); (d) trim payment methods (drop Klarna/Bank for a $5 sub); (e) optional: one real $5 self-subscription as the true end-to-end test (cancel after via portal; ~44¢ in fees).
 
 - [ ] **Downgrade copy softening** (2026-07-06) — over-cap (lapsed) users see "You're at the 2-pet limit" + read-only notes; consider "Your plan includes 2 pets — upgrade to add more" phrasing distinct from at-cap free users.
 

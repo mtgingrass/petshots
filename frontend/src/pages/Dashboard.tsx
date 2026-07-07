@@ -17,6 +17,8 @@ import {
   saveMeds,
   createPassport,
   revokePassport,
+  createCheckout,
+  createBillingPortal,
   getSettings,
   saveSettings,
   DEFAULT_LIMITS,
@@ -301,6 +303,20 @@ export function Dashboard() {
     if (pets !== null) void loadAllDocs(pets);
   }, [pets, loadAllDocs]);
 
+  // Returning from Stripe checkout. The webhook that flips the plan usually
+  // lands before the redirect does, but give it a moment and refetch limits.
+  useEffect(() => {
+    const billing = new URLSearchParams(window.location.search).get('billing');
+    if (!billing) return;
+    window.history.replaceState({}, '', window.location.pathname);
+    if (billing === 'success') {
+      showNotice('Payment received — welcome to Petshots Paid! 🎉');
+      const t = setTimeout(() => void loadPets(), 2500);
+      return () => clearTimeout(t);
+    }
+    if (billing === 'cancelled') showNotice('Checkout cancelled — nothing was charged');
+  }, [showNotice, loadPets]);
+
   useEffect(() => {
     document.title = detailPet ? `${detailPet.name} · Petshots` : 'Petshots';
   }, [detailPet]);
@@ -445,6 +461,7 @@ export function Dashboard() {
         ) : dashView.type === 'settings' ? (
           <SettingsScreen
             email={email ?? ''}
+            limits={limits}
             theme={theme}
             onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
             onDone={backToOverview}
@@ -541,7 +558,17 @@ export function Dashboard() {
             </div>
             {pets.length >= limits.maxPets && (
               <p className="pet-pins__limit">
-                You're at the {limits.maxPets}-pet limit. Remove a pet to add another.
+                You're at the {limits.maxPets}-pet limit.{' '}
+                {limits.plan === 'free' ? (
+                  <button
+                    className="btn btn--link"
+                    onClick={() => setDashView({ type: 'settings' })}
+                  >
+                    Upgrade for more →
+                  </button>
+                ) : (
+                  'Remove a pet to add another.'
+                )}
               </p>
             )}
           </>
@@ -1031,6 +1058,7 @@ function PetDetailScreen({
               petId={pet.id}
               docs={docs}
               maxDocs={limits.maxDocs}
+              readOnly={pet.active === false}
               onChanged={onDocsChanged}
               onError={onError}
               onNotice={onNotice}
@@ -1039,7 +1067,13 @@ function PetDetailScreen({
             />
           </>
         ) : tab === 'meds' ? (
-          <MedsSection petId={pet.id} maxMeds={limits.maxMeds} onError={onError} onNotice={onNotice} />
+          <MedsSection
+            petId={pet.id}
+            maxMeds={limits.maxMeds}
+            readOnly={pet.active === false}
+            onError={onError}
+            onNotice={onNotice}
+          />
         ) : tab === 'profile' ? (
           <ProfileSection pet={pet} onEdit={onEditProfile} />
         ) : (
@@ -1085,6 +1119,7 @@ function DocsSection({
   petId,
   docs,
   maxDocs,
+  readOnly = false,
   onChanged,
   onError,
   onNotice,
@@ -1094,6 +1129,7 @@ function DocsSection({
   petId: string;
   docs: Doc[];
   maxDocs: number;
+  readOnly?: boolean;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
@@ -1171,7 +1207,12 @@ function DocsSection({
         </ul>
       )}
 
-      {atLimit ? (
+      {readOnly ? (
+        <p className="subtle">
+          This pet is read-only on your plan — everything stays viewable, but new
+          records need an upgrade (Settings → Plan).
+        </p>
+      ) : atLimit ? (
         <p className="subtle">
           You've reached the {maxDocs}-document limit. Delete one to add another.
         </p>
@@ -1571,11 +1612,13 @@ function MedsSummary({ meds }: { meds: Med[] }) {
 function MedsSection({
   petId,
   maxMeds,
+  readOnly = false,
   onError,
   onNotice,
 }: {
   petId: string;
   maxMeds: number;
+  readOnly?: boolean;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
@@ -1707,6 +1750,11 @@ function MedsSection({
             onSave={handleFormSave}
             onCancel={() => setForm({ mode: 'closed' })}
           />
+        ) : readOnly ? (
+          <p className="subtle">
+            This pet is read-only on your plan — existing meds stay editable, but
+            adding new ones needs an upgrade (Settings → Plan).
+          </p>
         ) : atLimit ? (
           <p className="subtle">
             You've reached the {maxMeds}-medication limit. Remove one to add another.
@@ -2443,6 +2491,7 @@ const REMINDER_DAY_OPTIONS: { value: number; label: string }[] = [
 
 function SettingsScreen({
   email,
+  limits,
   theme,
   onThemeChange,
   onDone,
@@ -2450,6 +2499,7 @@ function SettingsScreen({
   onNotice,
 }: {
   email: string;
+  limits: Limits;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   onDone: () => void;
@@ -2459,6 +2509,36 @@ function SettingsScreen({
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Both hand the browser to a Stripe-hosted page; errors keep the user here.
+  async function handleCheckout(interval: 'month' | 'year') {
+    setBusy(true);
+    onError(null);
+    try {
+      const { url } = await createCheckout(interval);
+      window.location.href = url;
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not start checkout');
+      setBusy(false);
+    }
+  }
+
+  async function handlePortal() {
+    setBusy(true);
+    onError(null);
+    try {
+      const { url } = await createBillingPortal();
+      window.location.href = url;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      onError(
+        msg.includes('no billing account')
+          ? "Your plan isn't managed through Stripe — contact support to change it."
+          : msg || 'Could not open billing',
+      );
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     getSettings()
@@ -2504,6 +2584,50 @@ function SettingsScreen({
           <p className="subtle">Loading…</p>
         ) : (
           <form className="form settings-form" onSubmit={handleSave}>
+
+            <fieldset className="settings-group">
+              <legend>Plan</legend>
+              <div className="settings-row">
+                <span className="settings-row__label">
+                  {limits.plan === 'paid' ? 'Petshots Paid' : 'Free plan'}
+                  <span className="subtle settings-row__sub">
+                    {limits.maxPets} pets · {limits.maxDocs} records &amp; {limits.maxMeds} meds
+                    per pet
+                  </span>
+                </span>
+              </div>
+              <div className="plan-actions">
+                {limits.plan === 'free' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      disabled={busy}
+                      onClick={() => void handleCheckout('month')}
+                    >
+                      Upgrade · $5/mo
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      disabled={busy}
+                      onClick={() => void handleCheckout('year')}
+                    >
+                      $49/yr · 2 months free
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => void handlePortal()}
+                  >
+                    Manage billing
+                  </button>
+                )}
+              </div>
+            </fieldset>
 
             <fieldset className="settings-group">
               <legend>Appearance</legend>

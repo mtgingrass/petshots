@@ -1862,6 +1862,13 @@ a {
   padding: 0.6rem 0 0;
 }
 
+.plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding-top: 0.8rem;
+}
+
 .settings-row__label {
   font-size: 0.95rem;
   font-weight: 500;

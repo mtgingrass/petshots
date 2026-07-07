@@ -75,6 +75,11 @@ export class ApiStack extends cdk.Stack {
         PAID_MAX_MEDS: '20',
 
         MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
+
+        // Stripe key/webhook-secret/price-ids live in this Secrets Manager
+        // secret, maintained by infra/scripts/setup-stripe.mjs.
+        STRIPE_SECRET_NAME: 'petshots/stripe',
+        APP_URL: 'https://petshots.app',
       },
       bundling: {
         externalModules: [],
@@ -86,6 +91,18 @@ export class ApiStack extends cdk.Stack {
     // The presigned URLs inherit the Lambda role's permissions, so the role must
     // actually be allowed to Get/Put/Delete/List on the bucket.
     uploads.grantReadWrite(apiFn);
+
+    // Explicit wildcard-suffix ARN: importing by name and calling grantRead
+    // emits a policy that misses the 6-char random suffix on the real ARN
+    // (the session-6 turnstile-secret AccessDenied bug).
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
+        ],
+      }),
+    );
 
     // API Gateway verifies the Cognito token before our code runs; the Lambda
     // only ever sees a valid token's claims.
@@ -159,6 +176,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.DELETE, '/pets/{petId}/passport'],
       [HttpMethod.GET, '/settings'],
       [HttpMethod.PUT, '/settings'],
+      [HttpMethod.POST, '/billing/checkout'],
+      [HttpMethod.POST, '/billing/portal'],
     ];
     for (const [method, routePath] of authedRoutes) {
       httpApi.addRoutes({ path: routePath, methods: [method], integration, authorizer });
@@ -167,6 +186,10 @@ export class ApiStack extends cdk.Stack {
     // Public passport endpoint — no Cognito token required; the Lambda checks the
     // passport token's validity itself.
     httpApi.addRoutes({ path: '/passport/{token}', methods: [HttpMethod.GET], integration });
+
+    // Stripe webhook — server-to-server, authenticated by the webhook signature
+    // (verified in the Lambda), so no Cognito authorizer.
+    httpApi.addRoutes({ path: '/billing/webhook', methods: [HttpMethod.POST], integration });
 
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: httpApi.apiEndpoint,

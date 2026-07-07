@@ -13,6 +13,10 @@ export interface Pet {
   name: string;
   species: string;
   avatarUrl?: string;
+  createdAt?: string; // ISO; server-stamped, drives active-pets ranking
+  // False when the account holds more pets than its plan allows and this pet
+  // is outside the oldest-N set: still fully viewable, but no new docs/meds.
+  active?: boolean;
   passportToken?: string;
   passportExpiry?: string; // YYYY-MM-DD
   // optional health profile fields
@@ -221,6 +225,17 @@ export function createPassport(
 
 export function revokePassport(petId: string): Promise<void> {
   return request('DELETE', `/pets/${petId}/passport`);
+}
+
+// ---- billing ----
+
+// Both return a Stripe-hosted URL to redirect the browser to.
+export function createCheckout(interval: 'month' | 'year'): Promise<{ url: string }> {
+  return request('POST', '/billing/checkout', { interval });
+}
+
+export function createBillingPortal(): Promise<{ url: string }> {
+  return request('POST', '/billing/portal');
 }
 
 export async function fetchPassport(token: string): Promise<PassportData> {

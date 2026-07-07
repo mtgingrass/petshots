@@ -9,6 +9,8 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -207,6 +209,127 @@ async function getEntitlements(sub: string): Promise<Entitlements> {
   };
 }
 
+async function putJson(key: string, body: unknown): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      Body: JSON.stringify(body),
+      ContentType: 'application/json',
+    }),
+  );
+}
+
+// Active-pets rule: an account holding more pets than its plan allows
+// (downgrade, lapsed trial) keeps every pet fully visible and presentable,
+// but only the OLDEST maxPets pets accept new docs/meds. Otherwise one month's
+// payment would buy write access to 10 pets forever. Legacy pets without a
+// createdAt stamp sort as oldest; ids break ties so the set is deterministic.
+function rankActivePets(pets: { id: string; createdAt?: string }[], maxPets: number): Set<string> {
+  const byAge = [...pets].sort(
+    (a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id),
+  );
+  return new Set(byAge.slice(0, maxPets).map((p) => p.id));
+}
+
+async function petAcceptsWrites(petsPrefix: string, petId: string, maxPets: number): Promise<boolean> {
+  const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }));
+  const ids = (list.Contents ?? [])
+    .map((it) => it.Key!)
+    .filter((k) => k.endsWith('/pet.json'))
+    .map((k) => k.slice(petsPrefix.length).split('/')[0]);
+  if (ids.length <= maxPets) return true;
+  const stamped = await Promise.all(
+    ids.map(async (id) => ({
+      id,
+      createdAt: (await readJson<{ createdAt?: string }>(`${petsPrefix}${id}/pet.json`))?.createdAt,
+    })),
+  );
+  return rankActivePets(stamped, maxPets).has(petId);
+}
+const READ_ONLY_PET_ERROR =
+  'This pet is read-only on your current plan. Upgrade to add new records.';
+
+// ---- billing (Stripe) ----
+// The Stripe secret key, webhook signing secret, and price ids live in one
+// Secrets Manager secret (written by infra/scripts/setup-stripe.mjs), fetched
+// lazily so non-billing routes never pay the lookup. plan.json is written
+// ONLY here (webhook) or by an operator — no user-authed route can touch it.
+const STRIPE_SECRET_NAME = process.env.STRIPE_SECRET_NAME ?? 'petshots/stripe';
+const APP_URL = process.env.APP_URL ?? 'https://petshots.app';
+interface StripeConfig {
+  secretKey: string;
+  webhookSecret: string;
+  priceMonthly?: string;
+  priceYearly?: string;
+}
+const sm = new SecretsManagerClient({});
+let stripeCache: { stripe: Stripe; config: StripeConfig } | null = null;
+async function getStripe(): Promise<{ stripe: Stripe; config: StripeConfig }> {
+  if (!stripeCache) {
+    const res = await sm.send(new GetSecretValueCommand({ SecretId: STRIPE_SECRET_NAME }));
+    const config = JSON.parse(res.SecretString!) as StripeConfig;
+    stripeCache = { stripe: new Stripe(config.secretKey), config };
+  }
+  return stripeCache;
+}
+
+async function handleStripeWebhook(
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+): Promise<APIGatewayProxyResultV2> {
+  const { stripe, config } = await getStripe();
+  const sig = event.headers?.['stripe-signature'];
+  if (!sig) return json(400, { error: 'missing signature' });
+  const raw = event.isBase64Encoded
+    ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
+    : (event.body ?? '');
+  let evt: Stripe.Event;
+  try {
+    evt = stripe.webhooks.constructEvent(raw, sig, config.webhookSecret);
+  } catch {
+    return json(400, { error: 'invalid signature' });
+  }
+
+  switch (evt.type) {
+    case 'checkout.session.completed': {
+      const session = evt.data.object as Stripe.Checkout.Session;
+      const userSub = session.client_reference_id;
+      const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+      if (!userSub || !customerId) break;
+      // customer -> Cognito sub mapping, so later subscription.* events (which
+      // carry only the customer id) can find the user's plan.json.
+      await putJson(`billing/customers/${customerId}.json`, { sub: userSub });
+      await putJson(`users/${userSub}/plan.json`, {
+        plan: 'paid',
+        stripeCustomerId: customerId,
+        stripeSubscriptionId:
+          typeof session.subscription === 'string' ? session.subscription : session.subscription?.id,
+      });
+      break;
+    }
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted': {
+      const subscription = evt.data.object as Stripe.Subscription;
+      const customerId =
+        typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
+      const mapping = await readJson<{ sub: string }>(`billing/customers/${customerId}.json`);
+      if (!mapping) break; // customer not created through our checkout — ignore
+      // past_due stays paid: Stripe retries the charge for days before firing
+      // subscription.deleted, and yanking access mid-retry punishes card hiccups.
+      const stillPaid =
+        evt.type !== 'customer.subscription.deleted' &&
+        ['active', 'trialing', 'past_due'].includes(subscription.status);
+      await putJson(`users/${mapping.sub}/plan.json`, {
+        plan: stillPaid ? 'paid' : 'free',
+        stripeCustomerId: customerId,
+        stripeSubscriptionId: subscription.id,
+      });
+      break;
+    }
+  }
+  return json(200, { received: true });
+}
+
 // ---- public passport (no JWT required) ----
 async function handlePublicPassport(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -288,6 +411,11 @@ export const handler = async (
     try { return await handlePublicPassport(event); }
     catch (e) { console.error('passport error', e); return json(500, { error: 'internal error' }); }
   }
+  // Stripe calls this server-to-server; auth is the webhook signature, not a JWT.
+  if (event.routeKey === 'POST /billing/webhook') {
+    try { return await handleStripeWebhook(event); }
+    catch (e) { console.error('webhook error', e); return json(500, { error: 'internal error' }); }
+  }
 
   // The Cognito JWT authorizer already verified the token; we just read claims.
   // sub is the stable per-user id we scope every S3 key to - a user can never
@@ -339,8 +467,14 @@ export const handler = async (
         );
         // Stable order so the switcher doesn't shuffle between loads.
         pets.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+        // Over-cap accounts: flag which pets still accept new docs/meds.
+        const activeIds = rankActivePets(
+          pets as { id: string; createdAt?: string }[],
+          entitlements.maxPets,
+        );
+        const flagged = pets.map((p) => ({ ...p, active: activeIds.has(p.id) }));
         // The client reads its limits from here — never hardcode them in the UI.
-        return json(200, { pets, limits: entitlements });
+        return json(200, { pets: flagged, limits: entitlements });
       }
 
       case 'POST /pets': {
@@ -355,15 +489,11 @@ export const handler = async (
           return json(409, { error: `limit of ${ent.maxPets} pets reached` });
         }
         const id = randomUUID();
-        await s3.send(
-          new PutObjectCommand({
-            Bucket: BUCKET,
-            Key: `${petsPrefix}${id}/pet.json`,
-            Body: JSON.stringify(pet),
-            ContentType: 'application/json',
-          }),
-        );
-        return json(200, { pet: { id, ...pet } });
+        // createdAt drives the active-pets ranking on downgrade; server-stamped
+        // so it can't be forged into a better rank.
+        const createdAt = new Date().toISOString();
+        await putJson(`${petsPrefix}${id}/pet.json`, { ...pet, createdAt });
+        return json(200, { pet: { id, ...pet, createdAt } });
       }
 
       case 'PUT /pets/{petId}': {
@@ -372,7 +502,7 @@ export const handler = async (
         // Update only - creating here would sidestep the POST /pets limit.
         const existing = await readJson<Record<string, unknown>>(petKey);
         if (existing === null) return json(404, { error: 'not found' });
-        // Passport fields are managed by separate endpoints; preserve them across profile edits.
+        // Passport/createdAt fields are managed server-side; preserve them across profile edits.
         await s3.send(
           new PutObjectCommand({
             Bucket: BUCKET,
@@ -381,6 +511,7 @@ export const handler = async (
               ...pet,
               passportToken: existing.passportToken,
               passportExpiry: existing.passportExpiry,
+              createdAt: existing.createdAt,
             }),
             ContentType: 'application/json',
           }),
@@ -483,6 +614,9 @@ export const handler = async (
         );
         if (currentDocs.length >= ent.maxDocs) {
           return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
+        }
+        if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
         }
 
         const docId = randomUUID();
@@ -631,6 +765,14 @@ export const handler = async (
         const effectiveMax = Math.max(ent.maxMeds, stored?.meds?.length ?? 0);
         const result = cleanMeds(input.meds, effectiveMax);
         if ('error' in result) return json(400, { error: result.error });
+        // Growing the list counts as a write; read-only (over-cap) pets can
+        // still have meds edited, toggled, and removed — just not added.
+        if (
+          result.meds.length > (stored?.meds?.length ?? 0) &&
+          !(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))
+        ) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
+        }
         await s3.send(
           new PutObjectCommand({
             Bucket: BUCKET,
@@ -671,6 +813,38 @@ export const handler = async (
           }),
         );
         return json(200, settings);
+      }
+
+      // ---- billing ----
+
+      case 'POST /billing/checkout': {
+        const { stripe, config } = await getStripe();
+        const input = JSON.parse(event.body ?? '{}');
+        const price = input.interval === 'year' ? config.priceYearly : config.priceMonthly;
+        if (!price) return json(503, { error: 'billing not configured' });
+        // Reuse the Stripe customer on re-upgrade so their history stays whole.
+        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
+        const session = await stripe.checkout.sessions.create({
+          mode: 'subscription',
+          line_items: [{ price, quantity: 1 }],
+          client_reference_id: sub,
+          ...(plan?.stripeCustomerId ? { customer: plan.stripeCustomerId } : {}),
+          allow_promotion_codes: true,
+          success_url: `${APP_URL}/dashboard?billing=success`,
+          cancel_url: `${APP_URL}/dashboard?billing=cancelled`,
+        });
+        return json(200, { url: session.url });
+      }
+
+      case 'POST /billing/portal': {
+        const { stripe } = await getStripe();
+        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
+        if (!plan?.stripeCustomerId) return json(404, { error: 'no billing account' });
+        const session = await stripe.billingPortal.sessions.create({
+          customer: plan.stripeCustomerId,
+          return_url: `${APP_URL}/dashboard`,
+        });
+        return json(200, { url: session.url });
       }
 
       // ---- passport management ----
@@ -730,6 +904,10 @@ export const handler = async (
         return json(404, { error: 'not found' });
     }
   } catch (e) {
+    // Billing routes before setup-stripe.mjs has run: the secret isn't there yet.
+    if ((e as { name?: string }).name === 'ResourceNotFoundException') {
+      return json(503, { error: 'billing not configured yet' });
+    }
     console.error('handler error', e);
     return json(500, { error: 'internal error' });
   }

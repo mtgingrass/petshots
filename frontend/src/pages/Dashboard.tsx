@@ -513,6 +513,7 @@ export function Dashboard() {
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onDocsChanged={() => loadPetDocs(detailPet.id)}
               onPassportChanged={() => void loadPets()}
+              onUpgrade={() => setDashView({ type: 'settings' })}
               onError={setError}
               onNotice={showNotice}
             />
@@ -956,6 +957,7 @@ function PetDetailScreen({
   onEditDoc,
   onDocsChanged,
   onPassportChanged,
+  onUpgrade,
   onError,
   onNotice,
 }: {
@@ -969,6 +971,7 @@ function PetDetailScreen({
   onEditDoc: (doc: Doc) => void;
   onDocsChanged: () => Promise<void>;
   onPassportChanged: () => void;
+  onUpgrade: () => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
@@ -1059,6 +1062,7 @@ function PetDetailScreen({
               docs={docs}
               maxDocs={limits.maxDocs}
               readOnly={pet.active === false}
+              onUpgrade={onUpgrade}
               onChanged={onDocsChanged}
               onError={onError}
               onNotice={onNotice}
@@ -1071,6 +1075,7 @@ function PetDetailScreen({
             petId={pet.id}
             maxMeds={limits.maxMeds}
             readOnly={pet.active === false}
+            onUpgrade={onUpgrade}
             onError={onError}
             onNotice={onNotice}
           />
@@ -1120,6 +1125,7 @@ function DocsSection({
   docs,
   maxDocs,
   readOnly = false,
+  onUpgrade,
   onChanged,
   onError,
   onNotice,
@@ -1130,6 +1136,7 @@ function DocsSection({
   docs: Doc[];
   maxDocs: number;
   readOnly?: boolean;
+  onUpgrade: () => void;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
@@ -1209,8 +1216,10 @@ function DocsSection({
 
       {readOnly ? (
         <p className="subtle">
-          This pet is read-only on your plan — everything stays viewable, but new
-          records need an upgrade (Settings → Plan).
+          This pet is read-only on your plan — everything stays viewable.{' '}
+          <button type="button" className="btn btn--link" onClick={onUpgrade}>
+            Upgrade to add records →
+          </button>
         </p>
       ) : atLimit ? (
         <p className="subtle">
@@ -1613,12 +1622,14 @@ function MedsSection({
   petId,
   maxMeds,
   readOnly = false,
+  onUpgrade,
   onError,
   onNotice,
 }: {
   petId: string;
   maxMeds: number;
   readOnly?: boolean;
+  onUpgrade: () => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
@@ -1752,8 +1763,10 @@ function MedsSection({
           />
         ) : readOnly ? (
           <p className="subtle">
-            This pet is read-only on your plan — existing meds stay editable, but
-            adding new ones needs an upgrade (Settings → Plan).
+            This pet is read-only on your plan — existing meds stay editable.{' '}
+            <button type="button" className="btn btn--link" onClick={onUpgrade}>
+              Upgrade to add meds →
+            </button>
           </p>
         ) : atLimit ? (
           <p className="subtle">

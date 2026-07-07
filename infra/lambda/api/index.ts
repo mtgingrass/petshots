@@ -10,6 +10,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 import Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -47,6 +48,7 @@ const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
 interface DocMeta {
   label: string;
   expiry?: string; // YYYY-MM-DD
+  given?: string; // YYYY-MM-DD date administered
   remindersEnabled?: boolean; // per-record opt-out; absent/true = remind, false = skip
 }
 const encodeMeta = (m: DocMeta): string => encodeURIComponent(JSON.stringify(m));
@@ -58,6 +60,7 @@ function decodeMeta(seg: string | undefined): DocMeta {
       return {
         label: String(m.label ?? ''),
         expiry: m.expiry ? String(m.expiry) : undefined,
+        given: m.given ? String(m.given) : undefined,
         // Legacy keys have no remindersEnabled — treat absence as true (opted in).
         remindersEnabled: m.remindersEnabled !== false,
       };
@@ -207,6 +210,141 @@ async function getEntitlements(sub: string): Promise<Entitlements> {
     maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
     maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
   };
+}
+
+// ---- AI document extraction (Bedrock / Claude Haiku) ----
+// Uploads land in tmp/{sub}/{uploadId}/ first (a lifecycle rule expires the
+// prefix after a day), get read by Claude, and only become doc records when the
+// user confirms the extraction on the review screen (POST .../docs/commit).
+// bedrock-runtime path with a cross-region inference profile id. (The newer
+// Mantle endpoint rejected this account's model entitlement at ship time —
+// revisit `AnthropicBedrockMantle` + 'anthropic.claude-haiku-4-5' later.)
+const BEDROCK_MODEL_ID =
+  process.env.BEDROCK_MODEL_ID ?? 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+const MAX_AI_SCANS = Number(process.env.MAX_AI_SCANS ?? '10');
+const PAID_MAX_AI_SCANS = Number(process.env.PAID_MAX_AI_SCANS ?? '50');
+// Bedrock InvokeModel caps the request body at 25 MB; base64 inflates 4/3, so
+// anything over ~15 MB can't be analyzed and falls back to manual entry.
+const MAX_AI_FILE_BYTES = 15 * 1024 * 1024;
+const AI_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+let claudeClient: AnthropicBedrock | null = null;
+function getClaude(): AnthropicBedrock {
+  if (!claudeClient) {
+    claudeClient = new AnthropicBedrock({
+      awsRegion: process.env.AWS_REGION ?? 'us-east-1',
+      // Finish (or fail) before API Gateway's ~30s integration cap so the
+      // client always gets a real response it can fall back from.
+      timeout: 23_000,
+      maxRetries: 0,
+    });
+  }
+  return claudeClient;
+}
+
+// Structured-outputs schema: every property required-but-nullable, since the
+// API demands additionalProperties:false + full required lists.
+const nullableString = { type: ['string', 'null'] };
+const EXTRACTION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['isPetHealthDocument', 'pet', 'vet', 'vaccines'],
+  properties: {
+    isPetHealthDocument: { type: 'boolean' },
+    pet: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'species', 'breed', 'birthday', 'weight', 'microchip'],
+      properties: {
+        name: nullableString,
+        species: nullableString,
+        breed: nullableString,
+        birthday: nullableString,
+        weight: nullableString,
+        microchip: nullableString,
+      },
+    },
+    vet: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'clinic', 'phone'],
+      properties: { name: nullableString, clinic: nullableString, phone: nullableString },
+    },
+    vaccines: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'dateGiven', 'expiry'],
+        properties: { name: { type: 'string' }, dateGiven: nullableString, expiry: nullableString },
+      },
+    },
+  },
+};
+
+const EXTRACTION_PROMPT = `You are reading a document uploaded to a pet health records app — usually a vaccination certificate or vet record, as a photo or PDF.
+
+Extract ONLY information explicitly printed in the document:
+- Pet details: name, species (dog, cat, ...), breed, birth date, weight (as written, e.g. "62 lbs"), microchip number.
+- Veterinarian: doctor name, clinic name, phone number.
+- EVERY vaccination listed: its common name (e.g. "Rabies", "DHPP (Distemper/Parvo)", "Bordetella", "FVRCP", "FeLV", "Leptospirosis"), the date it was administered, and its expiration/due date.
+
+Rules:
+- All dates in YYYY-MM-DD. If a date is partial or unreadable, use null for it.
+- NEVER infer or calculate an expiration date that is not written in the document (do not guess 1-year vs 3-year durations).
+- Use null for anything not present or not legible.
+- If this is not a pet health document at all, set isPetHealthDocument to false and return an empty vaccines list.`;
+
+interface Extraction {
+  isPetHealthDocument: boolean;
+  pet: { name?: string; species?: string; breed?: string; birthday?: string; weight?: string; microchip?: string };
+  vet: { name?: string; clinic?: string; phone?: string };
+  vaccines: { name: string; dateGiven?: string; expiry?: string }[];
+}
+
+// Model output is never trusted: structured outputs constrain the shape, not
+// the semantics — re-validate every date (real calendar day) and cap lengths.
+function cleanExtraction(raw: unknown): Extraction {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, any>;
+  const day = (v: unknown): string | undefined => (isStrictDay(v) ? v : undefined);
+  const pet = (r.pet ?? {}) as Record<string, unknown>;
+  const vet = (r.vet ?? {}) as Record<string, unknown>;
+  const vaccines = (Array.isArray(r.vaccines) ? r.vaccines : [])
+    .slice(0, 12)
+    .map((v: Record<string, unknown>) => ({
+      name: String(v?.name ?? '').trim().slice(0, 100),
+      dateGiven: day(v?.dateGiven),
+      expiry: day(v?.expiry),
+    }))
+    .filter((v: { name: string }) => v.name.length > 0);
+  return {
+    isPetHealthDocument: r.isPetHealthDocument === true,
+    pet: {
+      name: str(pet.name, 100),
+      species: str(pet.species, 50),
+      breed: str(pet.breed, 100),
+      birthday: day(pet.birthday),
+      weight: str(pet.weight, 50),
+      microchip: str(pet.microchip, 50),
+    },
+    vet: { name: str(vet.name, 150), clinic: str(vet.clinic, 150), phone: str(vet.phone, 50) },
+    vaccines,
+  };
+}
+
+// Best-effort daily counter in users/{sub}/ai-usage.json. A race between two
+// tabs can under-count by one — acceptable; this guards cost abuse, not billing.
+async function bumpAiQuota(
+  sub: string,
+  cap: number,
+): Promise<{ ok: true; remaining: number } | { ok: false }> {
+  const key = `users/${sub}/ai-usage.json`;
+  const today = new Date().toISOString().slice(0, 10);
+  const usage = await readJson<{ date?: string; count?: number }>(key);
+  const count = usage?.date === today ? Math.max(0, Number(usage.count) || 0) : 0;
+  if (count >= cap) return { ok: false };
+  await putJson(key, { date: today, count: count + 1 });
+  return { ok: true, remaining: cap - count - 1 };
 }
 
 async function putJson(key: string, body: unknown): Promise<void> {
@@ -579,6 +717,7 @@ export const handler = async (
               id: parts[5],
               label: meta.label,
               expiry: meta.expiry,
+              given: meta.given,
               remindersEnabled: meta.remindersEnabled !== false,
               filename: parts.slice(7).join('/'),
               size: it.Size,
@@ -643,6 +782,199 @@ export const handler = async (
         return json(200, { url, fields, key });
       }
 
+      // ---- AI extraction: temp upload -> analyze -> review (client) -> commit ----
+
+      case 'POST /pets/{petId}/docs/analyze-upload-url': {
+        const input = JSON.parse(event.body ?? '{}');
+        const filename = String(input.filename ?? '')
+          .replace(/[^\w.\- ]/g, '_')
+          .slice(0, 200);
+        const contentType = String(input.contentType ?? 'application/octet-stream');
+        if (!filename) return json(400, { error: 'filename required' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+
+        // Same gates as a direct upload: a full or read-only pet shouldn't get
+        // a temp file it can never commit.
+        const [list, ent] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
+          getEntitlements(sub),
+        ]);
+        const currentDocs = (list.Contents ?? []).filter((it) => !it.Key!.includes('/_archived/'));
+        if (currentDocs.length >= ent.maxDocs) {
+          return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
+        }
+        if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
+        }
+
+        const uploadId = randomUUID();
+        const tmpKey = `tmp/${sub}/${uploadId}/${filename}`;
+        const { url, fields } = await createPresignedPost(s3, {
+          Bucket: BUCKET,
+          Key: tmpKey,
+          Conditions: [
+            ['content-length-range', 1, MAX_FILE_BYTES],
+            ['eq', '$Content-Type', contentType],
+          ],
+          Fields: { 'Content-Type': contentType },
+          Expires: 300,
+        });
+        return json(200, { url, fields, uploadId });
+      }
+
+      case 'POST /pets/{petId}/docs/analyze': {
+        const input = JSON.parse(event.body ?? '{}');
+        const uploadId = input.uploadId;
+        if (!isUuid(uploadId)) return json(400, { error: 'uploadId required' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+
+        // uploadId is scoped under the caller's own tmp/{sub}/ prefix, so one
+        // user can never analyze (or even probe for) another user's upload.
+        const tmpPrefix = `tmp/${sub}/${uploadId}/`;
+        const tmpList = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: tmpPrefix }),
+        );
+        const tmpObj = tmpList.Contents?.[0];
+        if (!tmpObj) return json(404, { error: 'upload not found' });
+        if ((tmpObj.Size ?? 0) > MAX_AI_FILE_BYTES) {
+          return json(413, { error: 'TOO_LARGE_FOR_AI' });
+        }
+
+        const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: tmpObj.Key! }));
+        const contentType = (obj.ContentType ?? '').toLowerCase().split(';')[0].trim();
+        const isPdf = contentType === 'application/pdf';
+        if (!isPdf && !AI_IMAGE_TYPES.includes(contentType)) {
+          return json(415, { error: 'UNSUPPORTED_TYPE_FOR_AI' });
+        }
+        const data = Buffer.from(await obj.Body!.transformToByteArray()).toString('base64');
+
+        const ent = await getEntitlements(sub);
+        const cap = ent.plan === 'paid' ? PAID_MAX_AI_SCANS : MAX_AI_SCANS;
+        // Bump after the cheap rejections but before the model call: failed
+        // model calls still count, so a hostile client can't loop free scans.
+        const quota = await bumpAiQuota(sub, cap);
+        if (!quota.ok) return json(429, { error: 'AI_QUOTA_EXCEEDED' });
+
+        let extraction: Extraction;
+        try {
+          const msg = await getClaude().messages.create({
+            model: BEDROCK_MODEL_ID,
+            max_tokens: 1500,
+            output_config: { format: { type: 'json_schema', schema: EXTRACTION_SCHEMA } },
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  isPdf
+                    ? { type: 'document' as const, source: { type: 'base64' as const, media_type: 'application/pdf' as const, data } }
+                    : { type: 'image' as const, source: { type: 'base64' as const, media_type: contentType as 'image/jpeg', data } },
+                  { type: 'text' as const, text: EXTRACTION_PROMPT },
+                ],
+              },
+            ],
+          });
+          if (msg.stop_reason === 'refusal') return json(502, { error: 'AI_FAILED' });
+          const text = msg.content.find((b) => b.type === 'text');
+          extraction = cleanExtraction(JSON.parse(text && 'text' in text ? text.text : '{}'));
+        } catch (e) {
+          // Model access not enabled, throttled, timed out, unparseable — the
+          // client falls back to manual entry; the upload itself is fine.
+          console.error('bedrock analyze error', e);
+          return json(502, { error: 'AI_FAILED' });
+        }
+        return json(200, { extraction, scansRemaining: quota.remaining });
+      }
+
+      case 'POST /pets/{petId}/docs/commit': {
+        const input = JSON.parse(event.body ?? '{}');
+        const uploadId = input.uploadId;
+        if (!isUuid(uploadId)) return json(400, { error: 'uploadId required' });
+        if (!Array.isArray(input.records) || input.records.length === 0) {
+          return json(400, { error: 'at least one record required' });
+        }
+
+        // Validate every record before touching S3 — all-or-nothing.
+        const records: { label: string; expiry?: string; given?: string; remindersEnabled: boolean }[] = [];
+        for (const raw of input.records) {
+          const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+          const label = String(r.label ?? '').trim().slice(0, 200);
+          if (!label) return json(400, { error: 'record label required' });
+          if (r.expiry !== undefined && r.expiry !== null && r.expiry !== '' && !isStrictDay(r.expiry)) {
+            return json(400, { error: 'expiry must be a valid YYYY-MM-DD date' });
+          }
+          if (r.given !== undefined && r.given !== null && r.given !== '' && !isStrictDay(r.given)) {
+            return json(400, { error: 'given must be a valid YYYY-MM-DD date' });
+          }
+          records.push({
+            label,
+            expiry: isStrictDay(r.expiry) ? r.expiry : undefined,
+            given: isStrictDay(r.given) ? r.given : undefined,
+            remindersEnabled: r.remindersEnabled !== false,
+          });
+        }
+
+        const existingPet = await readJson<Record<string, unknown>>(petKey);
+        if (existingPet === null) return json(404, { error: 'not found' });
+
+        const tmpPrefix = `tmp/${sub}/${uploadId}/`;
+        const [tmpList, docList, ent] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: tmpPrefix })),
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
+          getEntitlements(sub),
+        ]);
+        const tmpKey = tmpList.Contents?.[0]?.Key;
+        if (!tmpKey) return json(404, { error: 'upload not found' });
+        const currentDocs = (docList.Contents ?? []).filter(
+          (it) => !it.Key!.includes('/_archived/'),
+        );
+        if (currentDocs.length + records.length > ent.maxDocs) {
+          return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
+        }
+        if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
+        }
+
+        // One uploaded file can become several records (a cert listing three
+        // vaccines): server-side copy per record, each with its own docId/meta.
+        const filename = tmpKey.slice(tmpPrefix.length);
+        const copySource = `${BUCKET}/${encodeURIComponent(tmpKey).replace(/%2F/g, '/')}`;
+        const created = await Promise.all(
+          records.map(async (rec) => {
+            const docId = randomUUID();
+            const newKey = `${docsPrefix}${docId}/${encodeMeta({
+              label: rec.label,
+              expiry: rec.expiry,
+              given: rec.given,
+              remindersEnabled: rec.remindersEnabled,
+            })}/${filename}`;
+            await s3.send(
+              new CopyObjectCommand({ Bucket: BUCKET, Key: newKey, CopySource: copySource }),
+            );
+            return { id: docId, ...rec, filename };
+          }),
+        );
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: tmpKey }));
+
+        // Optional profile enrichment from the extraction. Only a whitelist of
+        // health fields, and only the keys the client explicitly sent — the UI
+        // offers these solely for fields the profile doesn't already have.
+        if (input.profile && typeof input.profile === 'object') {
+          const p = input.profile as Record<string, unknown>;
+          const patch: Record<string, unknown> = {};
+          if (typeof p.breed === 'string') patch.breed = str(p.breed, 100);
+          if (isStrictDay(p.dob)) patch.dob = p.dob;
+          if (typeof p.weight === 'string') patch.weight = str(p.weight, 50);
+          if (typeof p.vetName === 'string') patch.vetName = str(p.vetName, 150);
+          if (typeof p.vetPhone === 'string') patch.vetPhone = str(p.vetPhone, 50);
+          if (typeof p.microchip === 'string') patch.microchip = str(p.microchip, 50);
+          if (Object.keys(patch).length > 0) {
+            await putJson(petKey, { ...existingPet, ...patch });
+          }
+        }
+
+        return json(200, { docs: created });
+      }
+
       case 'PATCH /pets/{petId}/docs/{id}': {
         // Edit = change label and/or expiry, which live in the key -> S3 has no
         // rename, so copy the object to a new key and delete the old one. docId +
@@ -663,11 +995,17 @@ export const handler = async (
         const oldParts = oldKey.split('/');
         const filename = oldParts.slice(7).join('/');
         const oldMeta = decodeMeta(oldParts[6]);
-        // Preserve existing remindersEnabled if not provided in request.
+        // Preserve existing remindersEnabled/given if not provided in request.
         const newRemindersEnabled = typeof input.remindersEnabled === 'boolean'
           ? input.remindersEnabled
           : oldMeta.remindersEnabled !== false;
-        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry, remindersEnabled: newRemindersEnabled })}/${filename}`;
+        const newGiven =
+          input.given === null || input.given === ''
+            ? undefined // explicit clear
+            : isStrictDay(input.given)
+              ? input.given
+              : oldMeta.given;
+        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry, given: newGiven, remindersEnabled: newRemindersEnabled })}/${filename}`;
         if (newKey === oldKey) return json(200, { ok: true });
 
         // CopySource must be a URL-encoded bucket/key, but with '/' preserved as

@@ -2139,3 +2139,137 @@ a {
   background: var(--primary);
   color: #fff;
 }
+
+/* ---- AI document extraction (upload flow + review screen) ---- */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ai-hint {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+/* Upload/analyze progress card */
+.ai-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ai-status__spinner {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border-radius: 999px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  animation: ai-spin 0.8s linear infinite;
+}
+
+@keyframes ai-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ai-status__text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.95rem;
+}
+
+.ai-status__text .btn--link {
+  align-self: flex-start;
+  padding: 0.25rem 0;
+}
+
+/* Review-screen banner */
+.ai-note {
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  font-size: 0.92rem;
+  margin: 0 0 1rem;
+}
+
+.ai-note--ok {
+  border-color: var(--primary);
+}
+
+/* One editable record row on the review screen */
+.review-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-row:last-of-type {
+  border-bottom: none;
+}
+
+.review-row label:not(.checkbox-label) {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: var(--subtle);
+}
+
+.review-row input[type='text'],
+.review-row input:not([type]) ,
+.review-row input[type='date'] {
+  font-size: 16px; /* kills iOS focus-zoom, same as .form inputs */
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg, transparent);
+  color: inherit;
+}
+
+.review-row--off {
+  opacity: 0.6;
+}
+
+.review-row__toggle {
+  font-weight: 600;
+}
+
+.review-row__dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+@media (max-width: 420px) {
+  .review-row__dates {
+    grid-template-columns: 1fr;
+  }
+}
+
+.review-row__dupe {
+  margin: -0.2rem 0 0;
+  font-size: 0.85rem;
+}
+
+.review-profile__item {
+  padding: 0.45rem 0;
+}
+
+.doc-detail__given {
+  margin: 0.25rem 0 0;
+}

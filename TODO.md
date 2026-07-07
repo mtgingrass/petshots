@@ -18,6 +18,10 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [ ] **Stripe live-mode loose ends** (2026-07-06) — (a) activate Customer Portal in LIVE mode (Settings → Billing → Customer portal) or "Manage billing" errors for real subscribers; (b) verify the live key pasted into terminal scrollback earlier in s14 was rolled; (c) branding: public business name + statement descriptor → "Petshots" (checkout page currently says "Mark Gingrass"); (d) trim payment methods (drop Klarna/Bank for a $5 sub); (e) optional: one real $5 self-subscription as the true end-to-end test (cancel after via portal; ~44¢ in fees).
 
+- [ ] **AI extraction: exact-duplicate detection via S3 ETag** (2026-07-07) — a byte-identical re-upload currently only gets the label-based "already has a record like this" hint on the review screen. Compare the tmp object's ETag against existing docs' ETags at analyze time (both listings already fetched) → lead the review screen with "same file as your Rabies record" + prominent Cancel, and skip the Claude call. ~20 min; decided to ship without it.
+
+- [ ] **AI extraction: revisit Bedrock Mantle endpoint** (2026-07-07) — the Lambda uses the legacy `AnthropicBedrock` client + `us.anthropic.claude-haiku-4-5-20251001-v1:0` inference profile because the Mantle (Messages-API) endpoint returned 403 "not available for this account" even after the marketplace agreement went ACTIVE. Retry `AnthropicBedrockMantle` + `anthropic.claude-haiku-4-5` later (BEDROCK_MODEL_ID env var + client class in `infra/lambda/api/index.ts`); entitlement may just need time to propagate.
+
 - [ ] **Downgrade copy softening** (2026-07-06) — over-cap (lapsed) users see "You're at the 2-pet limit" + read-only notes; consider "Your plan includes 2 pets — upgrade to add more" phrasing distinct from at-cap free users.
 
 - [ ] **Strip dead `update-url` route from API Lambda** (2026-07-03) — leftover from the removed Update-record feature. Harmless (authed) but dead code. Remove route + archive logic + smoke test section [5c] together, redeploy ApiStack.

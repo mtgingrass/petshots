@@ -73,6 +73,7 @@ export interface Doc {
   id: string;
   label: string;
   expiry?: string; // YYYY-MM-DD, the vaccine's expiration date (optional)
+  given?: string; // YYYY-MM-DD, the date the shot was administered (optional)
   remindersEnabled: boolean; // per-record reminder opt-in; true by default
   filename: string;
   size: number;
@@ -191,10 +192,13 @@ export function updateDoc(
   label: string,
   expiry?: string,
   remindersEnabled?: boolean,
+  given?: string,
 ): Promise<{ ok: true }> {
   return request('PATCH', `/pets/${petId}/docs/${id}`, {
     label,
     expiry: expiry || undefined,
+    // '' = explicit clear; the server preserves the stored value when absent.
+    given,
     remindersEnabled: remindersEnabled !== false,
   });
 }
@@ -245,6 +249,83 @@ export async function fetchPassport(token: string): Promise<PassportData> {
     throw new Error(data?.error ?? `Failed to load passport (${res.status})`);
   }
   return res.json() as Promise<PassportData>;
+}
+
+// ---- AI document extraction ----
+// Flow: upload the file to a temp slot, ask Claude to read it, show the user a
+// pre-filled review screen, then commit — one upload can become several records.
+
+export interface ExtractedVaccine {
+  name: string;
+  dateGiven?: string; // YYYY-MM-DD
+  expiry?: string; // YYYY-MM-DD
+}
+
+export interface Extraction {
+  isPetHealthDocument: boolean;
+  pet: {
+    name?: string;
+    species?: string;
+    breed?: string;
+    birthday?: string;
+    weight?: string;
+    microchip?: string;
+  };
+  vet: { name?: string; clinic?: string; phone?: string };
+  vaccines: ExtractedVaccine[];
+}
+
+export interface CommitRecord {
+  label: string;
+  expiry?: string;
+  given?: string;
+  remindersEnabled: boolean;
+}
+
+// Fields the commit route will merge into the pet profile (whitelisted server-side).
+export interface ProfilePatch {
+  breed?: string;
+  dob?: string;
+  weight?: string;
+  vetName?: string;
+  vetPhone?: string;
+  microchip?: string;
+}
+
+// Uploads to the temp slot and returns the uploadId to analyze/commit with.
+export async function uploadForAnalysis(petId: string, file: File): Promise<string> {
+  const presign = await request<{
+    url: string;
+    fields: Record<string, string>;
+    uploadId: string;
+  }>('POST', `/pets/${petId}/docs/analyze-upload-url`, {
+    filename: file.name,
+    contentType: file.type || 'application/octet-stream',
+  });
+  await postToS3(presign, file);
+  return presign.uploadId;
+}
+
+// Server errors surface as Error(message) with machine-readable messages:
+// AI_QUOTA_EXCEEDED, TOO_LARGE_FOR_AI, UNSUPPORTED_TYPE_FOR_AI, AI_FAILED.
+export function analyzeUpload(
+  petId: string,
+  uploadId: string,
+): Promise<{ extraction: Extraction; scansRemaining: number }> {
+  return request('POST', `/pets/${petId}/docs/analyze`, { uploadId });
+}
+
+export function commitUpload(
+  petId: string,
+  uploadId: string,
+  records: CommitRecord[],
+  profile?: ProfilePatch,
+): Promise<{ docs: (CommitRecord & { id: string; filename: string })[] }> {
+  return request('POST', `/pets/${petId}/docs/commit`, {
+    uploadId,
+    records,
+    ...(profile && Object.keys(profile).length > 0 ? { profile } : {}),
+  });
 }
 
 export async function uploadDoc(

@@ -10,9 +10,11 @@ import {
   deletePet,
   uploadAvatar,
   listDocs,
-  uploadDoc,
   updateDoc,
   deleteDoc,
+  uploadForAnalysis,
+  analyzeUpload,
+  commitUpload,
   listMeds,
   saveMeds,
   createPassport,
@@ -29,6 +31,9 @@ import {
   type Med,
   type MedUnit,
   type UserSettings,
+  type Extraction,
+  type CommitRecord,
+  type ProfilePatch,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import {
@@ -184,7 +189,17 @@ type EditView =
   | { type: 'list' }
   | { type: 'doc'; doc: Doc; petId: string }
   | { type: 'edit'; doc: Doc; petId: string }
-  | { type: 'edit-profile' };
+  | { type: 'edit-profile' }
+  // Post-upload review: the file sits in a temp slot until the user confirms
+  // what Claude read (extraction=null -> AI unavailable, plain manual entry).
+  | {
+      type: 'review-extraction';
+      petId: string;
+      uploadId: string;
+      fileName: string;
+      extraction: Extraction | null;
+      aiNote?: string;
+    };
 
 // ---- main component ----
 
@@ -501,6 +516,24 @@ export function Dashboard() {
               onBack={() => setEditView({ type: 'list' })}
               onEdit={() => setEditView({ type: 'edit', doc: editView.doc, petId: editView.petId })}
             />
+          ) : editView.type === 'review-extraction' ? (
+            <ReviewExtractionScreen
+              pet={detailPet}
+              docs={detailDocs}
+              maxDocs={limits.maxDocs}
+              uploadId={editView.uploadId}
+              fileName={editView.fileName}
+              extraction={editView.extraction}
+              aiNote={editView.aiNote}
+              onDone={async (message, profileApplied) => {
+                setEditView({ type: 'list' });
+                await loadPetDocs(detailPet.id);
+                if (profileApplied) await loadPets();
+                showNotice(message);
+              }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+            />
           ) : (
             <PetDetailScreen
               pet={detailPet}
@@ -511,6 +544,16 @@ export function Dashboard() {
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
+              onReviewExtraction={(uploadId, fileName, extraction, aiNote) =>
+                setEditView({
+                  type: 'review-extraction',
+                  petId: detailPet.id,
+                  uploadId,
+                  fileName,
+                  extraction,
+                  aiNote,
+                })
+              }
               onDocsChanged={() => loadPetDocs(detailPet.id)}
               onPassportChanged={() => void loadPets()}
               onUpgrade={() => setDashView({ type: 'settings' })}
@@ -955,6 +998,7 @@ function PetDetailScreen({
   onEditProfile,
   onViewDoc,
   onEditDoc,
+  onReviewExtraction,
   onDocsChanged,
   onPassportChanged,
   onUpgrade,
@@ -969,6 +1013,12 @@ function PetDetailScreen({
   onEditProfile: () => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
+  onReviewExtraction: (
+    uploadId: string,
+    fileName: string,
+    extraction: Extraction | null,
+    aiNote?: string,
+  ) => void;
   onDocsChanged: () => Promise<void>;
   onPassportChanged: () => void;
   onUpgrade: () => void;
@@ -1068,6 +1118,7 @@ function PetDetailScreen({
               onNotice={onNotice}
               onViewDoc={onViewDoc}
               onEditDoc={onEditDoc}
+              onReviewExtraction={onReviewExtraction}
             />
           </>
         ) : tab === 'meds' ? (
@@ -1120,6 +1171,18 @@ function PhotoLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
 
 // ---- documents ----
 
+// Friendly framing for the machine-readable analyze errors — every one of
+// these lands the user on the manual form with their upload intact.
+function aiFailureNote(message: string): string {
+  if (message === 'AI_QUOTA_EXCEEDED')
+    return "You've used today's document scans — fill in the details below and they'll save just the same.";
+  if (message === 'TOO_LARGE_FOR_AI')
+    return 'This file is too large to read automatically — fill in the details below.';
+  if (message === 'UNSUPPORTED_TYPE_FOR_AI')
+    return "This file type can't be read automatically — fill in the details below.";
+  return "We couldn't read this document automatically — fill in the details below.";
+}
+
 function DocsSection({
   petId,
   docs,
@@ -1131,6 +1194,7 @@ function DocsSection({
   onNotice,
   onViewDoc,
   onEditDoc,
+  onReviewExtraction,
 }: {
   petId: string;
   docs: Doc[];
@@ -1142,19 +1206,27 @@ function DocsSection({
   onNotice: (msg: string) => void;
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
+  onReviewExtraction: (
+    uploadId: string,
+    fileName: string,
+    extraction: Extraction | null,
+    aiNote?: string,
+  ) => void;
 }) {
-  const [showUpload, setShowUpload] = useState(false);
-  const [label, setLabel] = useState('');
-  const [expiry, setExpiry] = useState('');
-  const [remindersEnabled, setRemindersEnabled] = useState(true);
-  const [busy, setBusy] = useState(false);
+  // Upload flow: pick file -> temp upload -> Claude reads it -> review screen.
+  const [phase, setPhase] = useState<'idle' | 'uploading' | 'analyzing'>('idle');
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [fileName, setFileName] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+  // Once the user (or the analyze result) has moved on to the review screen,
+  // a late-resolving analyze call must not hand off a second time.
+  const handedOffRef = useRef(false);
   const atLimit = docs.length >= maxDocs;
 
-  async function handleUpload(e: FormEvent) {
-    e.preventDefault();
+  async function handleFilePicked() {
     const file = fileRef.current?.files?.[0];
     if (!file) return;
+    if (fileRef.current) fileRef.current.value = '';
 
     if (!ALLOWED_EXTS.includes(extOf(file.name))) {
       onError('Please choose a PDF, JPG, or PNG file.');
@@ -1165,22 +1237,45 @@ function DocsSection({
       return;
     }
 
-    setBusy(true);
     onError(null);
+    handedOffRef.current = false;
+    setFileName(file.name);
+    setPhase('uploading');
+    let id: string;
     try {
-      await uploadDoc(petId, file, label.trim() || file.name, expiry || undefined, remindersEnabled);
-      setLabel('');
-      setExpiry('');
-      setRemindersEnabled(true);
-      if (fileRef.current) fileRef.current.value = '';
-      setShowUpload(false);
-      await onChanged();
-      onNotice('Document uploaded');
+      id = await uploadForAnalysis(petId, file);
     } catch (err) {
+      setPhase('idle');
       onError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setBusy(false);
+      return;
     }
+    setUploadId(id);
+    setPhase('analyzing');
+    try {
+      const { extraction } = await analyzeUpload(petId, id);
+      if (handedOffRef.current) return; // user already chose manual entry
+      handedOffRef.current = true;
+      setPhase('idle');
+      onReviewExtraction(id, file.name, extraction);
+    } catch (err) {
+      if (handedOffRef.current) return;
+      handedOffRef.current = true;
+      setPhase('idle');
+      // The upload itself succeeded — fall through to manual entry.
+      onReviewExtraction(
+        id,
+        file.name,
+        null,
+        aiFailureNote(err instanceof Error ? err.message : ''),
+      );
+    }
+  }
+
+  function enterManually() {
+    if (!uploadId || handedOffRef.current) return;
+    handedOffRef.current = true;
+    setPhase('idle');
+    onReviewExtraction(uploadId, fileName, null);
   }
 
   return (
@@ -1194,8 +1289,8 @@ function DocsSection({
           <span className="empty-state__icon" aria-hidden="true">
             📄
           </span>
-          No records yet. Snap a photo of the vaccine cert from your vet and add
-          it below — future-you at the daycare door says thanks.
+          No records yet. Snap a photo of the vaccine cert from your vet — we'll
+          read the names and dates for you.
         </div>
       ) : (
         <ul className="doc-list">
@@ -1205,7 +1300,7 @@ function DocsSection({
               petId={petId}
               doc={doc}
               onView={() => onViewDoc(doc)}
-              onEdit={() => { setShowUpload(false); onEditDoc(doc); }}
+              onEdit={() => onEditDoc(doc)}
               onChanged={onChanged}
               onError={onError}
               onNotice={onNotice}
@@ -1225,46 +1320,43 @@ function DocsSection({
         <p className="subtle">
           You've reached the {maxDocs}-document limit. Delete one to add another.
         </p>
-      ) : showUpload ? (
-        <form className="form" onSubmit={handleUpload}>
-          <label>
-            Label
-            <input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="e.g. Rabies 2026"
-              autoFocus
-            />
-          </label>
-          <label>
-            Expiration date (optional)
-            <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
-          </label>
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={remindersEnabled}
-              onChange={(e) => setRemindersEnabled(e.target.checked)}
-            />
-            <span>Send reminders before this expires</span>
-          </label>
-          <label>
-            File (PDF, JPG, PNG · max 10 MB)
-            <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" required />
-          </label>
-          <div className="actions">
-            <button className="btn btn--primary" type="submit" disabled={busy}>
-              {busy ? 'Uploading…' : 'Upload'}
-            </button>
-            <button type="button" className="btn" onClick={() => setShowUpload(false)} disabled={busy}>
-              Cancel
-            </button>
+      ) : phase !== 'idle' ? (
+        <div className="ai-status" role="status">
+          <span className="ai-status__spinner" aria-hidden="true" />
+          <div className="ai-status__text">
+            <strong>
+              {phase === 'uploading' ? 'Uploading…' : 'Reading your document…'}
+            </strong>
+            <span className="subtle">
+              {phase === 'uploading'
+                ? fileName
+                : 'Finding vaccine names and dates — a few seconds.'}
+            </span>
+            {phase === 'analyzing' && (
+              <button type="button" className="btn btn--link" onClick={enterManually}>
+                Enter details manually instead
+              </button>
+            )}
           </div>
-        </form>
+        </div>
       ) : (
-        <button className="btn btn--add" onClick={() => setShowUpload(true)}>
-          + Add record
-        </button>
+        <>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png"
+            className="visually-hidden"
+            aria-hidden="true"
+            tabIndex={-1}
+            onChange={() => void handleFilePicked()}
+          />
+          <button className="btn btn--add" onClick={() => fileRef.current?.click()}>
+            + Add record
+          </button>
+          <p className="subtle ai-hint">
+            Pick a photo or PDF — we'll read the vaccine names and dates for you.
+          </p>
+        </>
       )}
     </section>
   );
@@ -1429,6 +1521,10 @@ function DocDetailScreen({
           </span>
         </div>
 
+        {doc.given && (
+          <p className="subtle doc-detail__given">💉 Given {formatDate(doc.given)}</p>
+        )}
+
         {blurb && <p className="doc-detail__blurb">{blurb}</p>}
 
         <p className="doc-detail__reminder subtle">
@@ -1472,6 +1568,7 @@ function EditDocScreen({
 }) {
   const [label, setLabel] = useState(doc.label);
   const [expiry, setExpiry] = useState(doc.expiry ?? '');
+  const [given, setGiven] = useState(doc.given ?? '');
   const [remindersEnabled, setRemindersEnabled] = useState(doc.remindersEnabled !== false);
   const [busy, setBusy] = useState(false);
 
@@ -1482,7 +1579,8 @@ function EditDocScreen({
     setBusy(true);
     onError(null);
     try {
-      await updateDoc(petId, doc.id, next, expiry || undefined, remindersEnabled);
+      // given: '' clears the stored date server-side; a value replaces it.
+      await updateDoc(petId, doc.id, next, expiry || undefined, remindersEnabled, given);
       await onDone();
       onNotice('Document updated');
     } catch (err) {
@@ -1511,6 +1609,14 @@ function EditDocScreen({
           />
         </label>
         <label>
+          Date given (optional)
+          <input
+            type="date"
+            value={given}
+            onChange={(e) => setGiven(e.target.value)}
+          />
+        </label>
+        <label>
           Expiration date (optional)
           <input
             type="date"
@@ -1535,6 +1641,302 @@ function EditDocScreen({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+// ---- AI extraction review ----
+
+interface ReviewRow {
+  key: string;
+  include: boolean;
+  label: string;
+  given: string;
+  expiry: string;
+  remindersEnabled: boolean;
+}
+
+interface ProfileCandidate {
+  field: keyof ProfilePatch;
+  title: string;
+  value: string;
+  current?: string; // existing profile value when it conflicts
+}
+
+// Offer a profile field only when the document had a value AND it adds
+// something: empty profile field -> checked by default; conflicting value ->
+// unchecked with the current value shown, so nothing is silently overwritten.
+function profileCandidates(pet: Pet, extraction: Extraction | null): ProfileCandidate[] {
+  if (!extraction) return [];
+  const out: ProfileCandidate[] = [];
+  const add = (field: keyof ProfilePatch, title: string, value?: string, current?: string) => {
+    const v = value?.trim();
+    if (!v) return;
+    const cur = current?.trim();
+    if (cur && cur.toLowerCase() === v.toLowerCase()) return; // already matches
+    out.push({ field, title, value: v, current: cur || undefined });
+  };
+  add('breed', 'Breed', extraction.pet.breed, pet.breed);
+  add('dob', 'Birthday', extraction.pet.birthday, pet.dob);
+  add('weight', 'Weight', extraction.pet.weight, pet.weight);
+  add('microchip', 'Microchip', extraction.pet.microchip, pet.microchip);
+  const vetName = [extraction.vet.name, extraction.vet.clinic].filter(Boolean).join(' — ');
+  add('vetName', 'Vet', vetName, pet.vetName);
+  add('vetPhone', 'Vet phone', extraction.vet.phone, pet.vetPhone);
+  return out;
+}
+
+function ReviewExtractionScreen({
+  pet,
+  docs,
+  maxDocs,
+  uploadId,
+  fileName,
+  extraction,
+  aiNote,
+  onDone,
+  onCancel,
+  onError,
+}: {
+  pet: Pet;
+  docs: Doc[];
+  maxDocs: number;
+  uploadId: string;
+  fileName: string;
+  extraction: Extraction | null;
+  aiNote?: string;
+  onDone: (message: string, profileApplied: boolean) => Promise<void>;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const remaining = Math.max(0, maxDocs - docs.length);
+  const vaccines = extraction?.vaccines ?? [];
+
+  const [rows, setRows] = useState<ReviewRow[]>(() =>
+    vaccines.length === 0
+      ? [{ key: 'r0', include: true, label: '', given: '', expiry: '', remindersEnabled: true }]
+      : vaccines.map((v, i) => ({
+          key: `r${i}`,
+          // Rows past the plan's remaining slots start deselected, never dropped.
+          include: i < remaining,
+          label: v.name,
+          given: v.dateGiven ?? '',
+          expiry: v.expiry ?? '',
+          remindersEnabled: true,
+        })),
+  );
+  const [candidates] = useState<ProfileCandidate[]>(() => profileCandidates(pet, extraction));
+  const [applyProfile, setApplyProfile] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(candidates.map((c) => [c.field, !c.current])),
+  );
+  const [busy, setBusy] = useState(false);
+
+  const included = rows.filter((r) => r.include);
+  const overBudget = included.length > remaining;
+  const missingLabel = included.some((r) => !r.label.trim());
+
+  const existingLabels = docs.map((d) => d.label.trim().toLowerCase());
+  const isDupe = (label: string) => {
+    const l = label.trim().toLowerCase();
+    if (l.length < 3) return false;
+    return existingLabels.some((e) => e === l || e.includes(l) || l.includes(e));
+  };
+
+  const setRow = (key: string, patch: Partial<ReviewRow>) =>
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  async function handleSave() {
+    if (included.length === 0 || overBudget || missingLabel) return;
+    const records: CommitRecord[] = included.map((r) => ({
+      label: r.label.trim(),
+      given: r.given || undefined,
+      expiry: r.expiry || undefined,
+      remindersEnabled: r.remindersEnabled,
+    }));
+    const profile: ProfilePatch = {};
+    for (const c of candidates) {
+      if (applyProfile[c.field]) profile[c.field] = c.value;
+    }
+    const profileApplied = Object.keys(profile).length > 0;
+
+    setBusy(true);
+    onError(null);
+    try {
+      await commitUpload(pet.id, uploadId, records, profileApplied ? profile : undefined);
+      const noun = records.length === 1 ? 'Record added' : `${records.length} records added`;
+      await onDone(profileApplied ? `${noun} · profile updated` : noun, profileApplied);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Save failed');
+      setBusy(false);
+    }
+  }
+
+  const intro = aiNote
+    ? { tone: 'warn' as const, text: aiNote }
+    : extraction && vaccines.length > 0
+      ? {
+          tone: 'ok' as const,
+          text: `✨ We read ${fileName} — check everything looks right, then save.`,
+        }
+      : extraction && !extraction.isPetHealthDocument
+        ? {
+            tone: 'warn' as const,
+            text: "This doesn't look like a pet health document — you can still save it as a record below.",
+          }
+        : extraction
+          ? {
+              tone: 'warn' as const,
+              text: "We couldn't find vaccine entries in this document — fill in the details below.",
+            }
+          : null;
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel} disabled={busy}>
+          ← Records
+        </button>
+        <span className="screen-nav__title">Review &amp; Save</span>
+      </nav>
+      <div className="screen-view__body">
+        {intro && (
+          <p className={`ai-note${intro.tone === 'ok' ? ' ai-note--ok' : ''}`} role="status">
+            {intro.text}
+          </p>
+        )}
+
+        <section className="card">
+          <h2 className="card__title">
+            {vaccines.length > 0 ? `Vaccines found · ${vaccines.length}` : 'New record'}
+          </h2>
+
+          {rows.map((row) => (
+            <div className={`review-row${row.include ? '' : ' review-row--off'}`} key={row.key}>
+              {rows.length > 1 && (
+                <label className="checkbox-label review-row__toggle">
+                  <input
+                    type="checkbox"
+                    checked={row.include}
+                    onChange={(e) => setRow(row.key, { include: e.target.checked })}
+                  />
+                  <span>{row.include ? 'Save this record' : 'Skipped'}</span>
+                </label>
+              )}
+              {row.include && (
+                <>
+                  <label>
+                    Label
+                    <input
+                      value={row.label}
+                      onChange={(e) => setRow(row.key, { label: e.target.value })}
+                      placeholder="e.g. Rabies"
+                    />
+                  </label>
+                  {isDupe(row.label) && (
+                    <p className="subtle review-row__dupe">
+                      ⚠️ {pet.name} already has a record like this.
+                    </p>
+                  )}
+                  <div className="review-row__dates">
+                    <label>
+                      Date given (optional)
+                      <input
+                        type="date"
+                        value={row.given}
+                        onChange={(e) => setRow(row.key, { given: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Expiration date (optional)
+                      <input
+                        type="date"
+                        value={row.expiry}
+                        onChange={(e) => setRow(row.key, { expiry: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={row.remindersEnabled}
+                      onChange={(e) => setRow(row.key, { remindersEnabled: e.target.checked })}
+                    />
+                    <span>Send reminders before this expires</span>
+                  </label>
+                </>
+              )}
+            </div>
+          ))}
+
+          {rows.length > remaining && (
+            <p className="subtle">
+              Your plan has {remaining} record slot{remaining === 1 ? '' : 's'} left for {pet.name}
+              {overBudget ? ` — deselect ${included.length - remaining} to save.` : '.'}
+            </p>
+          )}
+
+          <button
+            type="button"
+            className="btn btn--link"
+            onClick={() =>
+              setRows((prev) => [
+                ...prev,
+                {
+                  key: `r${prev.length}-extra`,
+                  include: true,
+                  label: '',
+                  given: '',
+                  expiry: '',
+                  remindersEnabled: true,
+                },
+              ])
+            }
+          >
+            + Add another record from this document
+          </button>
+        </section>
+
+        {candidates.length > 0 && (
+          <section className="card">
+            <h2 className="card__title">Also update {pet.name}'s profile?</h2>
+            {candidates.map((c) => (
+              <label className="checkbox-label review-profile__item" key={c.field}>
+                <input
+                  type="checkbox"
+                  checked={!!applyProfile[c.field]}
+                  onChange={(e) =>
+                    setApplyProfile((prev) => ({ ...prev, [c.field]: e.target.checked }))
+                  }
+                />
+                <span>
+                  <strong>{c.title}:</strong> {c.value}
+                  {c.current && <span className="subtle"> · currently “{c.current}”</span>}
+                </span>
+              </label>
+            ))}
+          </section>
+        )}
+
+        <div className="actions">
+          <button
+            className="btn btn--primary btn--lg"
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={busy || included.length === 0 || overBudget || missingLabel}
+          >
+            {busy
+              ? 'Saving…'
+              : included.length > 1
+                ? `Save ${included.length} records`
+                : 'Save record'}
+          </button>
+          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+        {missingLabel && <p className="subtle">Every selected record needs a label.</p>}
+        <p className="subtle">Cancelling discards this upload.</p>
+      </div>
     </div>
   );
 }

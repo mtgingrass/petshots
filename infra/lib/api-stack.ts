@@ -52,6 +52,15 @@ export class ApiStack extends cdk.Stack {
           maxAge: 3000,
         },
       ],
+      lifecycleRules: [
+        {
+          // AI-extraction uploads sit in tmp/ until the user confirms the
+          // review screen; anything abandoned is swept after a day, free.
+          id: 'ExpireTmpUploads',
+          prefix: 'tmp/',
+          expiration: cdk.Duration.days(1),
+        },
+      ],
     });
 
     // The single router Lambda. esbuild bundles the AWS SDK + presigner in
@@ -61,8 +70,12 @@ export class ApiStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
-      memorySize: 256,
-      timeout: cdk.Duration.seconds(10),
+      // 1024 MB / 29s for the AI-extraction routes: base64-encoding a multi-MB
+      // upload needs the memory, and the Bedrock vision call needs the time
+      // (HTTP API caps the integration at 30s regardless). Normal routes still
+      // finish in <100ms, so the memory bump costs effectively nothing.
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(29),
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
         // Free-tier caps. A user is paid when users/{sub}/plan.json says so
@@ -75,6 +88,13 @@ export class ApiStack extends cdk.Stack {
         PAID_MAX_MEDS: '20',
 
         MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
+
+        // AI document extraction (Bedrock, Claude Haiku). Daily per-user scan
+        // caps bound worst-case model spend to pennies per user. Cross-region
+        // inference-profile id (the bare Mantle alias 403'd for this account).
+        BEDROCK_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        MAX_AI_SCANS: '10',
+        PAID_MAX_AI_SCANS: '50',
 
         // Stripe key/webhook-secret/price-ids live in this Secrets Manager
         // secret, maintained by infra/scripts/setup-stripe.mjs.
@@ -100,6 +120,19 @@ export class ApiStack extends cdk.Stack {
         actions: ['secretsmanager:GetSecretValue'],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
+        ],
+      }),
+    );
+
+    // Claude on Bedrock for document extraction. Scoped to the Haiku model;
+    // the inference-profile ARN covers the cross-region routing variant.
+    // (Model access must also be enabled once in the Bedrock console.)
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+        resources: [
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5*',
+          `arn:aws:bedrock:*:${this.account}:inference-profile/*anthropic.claude-haiku-4-5*`,
         ],
       }),
     );
@@ -167,6 +200,9 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.POST, '/pets/{petId}/avatar/upload-url'],
       [HttpMethod.GET, '/pets/{petId}/docs'],
       [HttpMethod.POST, '/pets/{petId}/docs/upload-url'],
+      [HttpMethod.POST, '/pets/{petId}/docs/analyze-upload-url'],
+      [HttpMethod.POST, '/pets/{petId}/docs/analyze'],
+      [HttpMethod.POST, '/pets/{petId}/docs/commit'],
       [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
       [HttpMethod.POST, '/pets/{petId}/docs/{id}/update-url'],
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],

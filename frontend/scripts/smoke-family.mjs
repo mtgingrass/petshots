@@ -221,6 +221,83 @@ async function main() {
     "member's email covers the household pet's med",
   );
 
+  console.log('\n[8b] daily checklist: shared, attributed, med-integrated');
+  const today = ymd(0);
+  let daily = await api(owner, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.status === 200, 'GET daily works');
+  const names = daily.body.items.map((i) => i.name);
+  check(
+    names.includes('Breakfast') && names.includes('Dinner'),
+    'preset items present (Breakfast, Dinner)',
+  );
+  const medItem = daily.body.items.find((i) => i.id.startsWith('med:'));
+  check(!!medItem && medItem.name === 'Heartworm prevention', 'due med appears on the daily list');
+  const badDate = await api(owner, 'GET', `/pets/${pet.id}/daily?date=1999-01-01`);
+  check(badDate.status === 400, 'far-off date rejected');
+
+  const breakfast = daily.body.items.find((i) => i.name === 'Breakfast');
+  const ownerCheck = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: today, itemId: breakfast.id, checked: true,
+  });
+  check(ownerCheck.status === 200 && ownerCheck.body.checks[breakfast.id]?.by === ownerEmail,
+    'owner check-off stamped with owner email');
+
+  daily = await api(member, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.body.checks[breakfast.id]?.by === ownerEmail,
+    "member sees WHO checked Breakfast (owner)");
+  // Re-checking by someone else never steals attribution (first checker wins).
+  await api(member, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: breakfast.id, checked: true });
+  daily = await api(member, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.body.checks[breakfast.id]?.by === ownerEmail, 'attribution survives a duplicate check');
+
+  const medCheck = await api(member, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: today, itemId: medItem.id, checked: true,
+  });
+  check(medCheck.status === 200 && medCheck.body.checks[medItem.id]?.by === memberEmail,
+    'member med check-off stamped with member email');
+  let medsNow = await api(owner, 'GET', `/pets/${pet.id}/meds`);
+  const hw = medsNow.body.meds.find((m) => `med:${m.id}` === medItem.id);
+  check(hw.lastGiven === today && hw.nextDue > today,
+    `med check-off marked as given + advanced (nextDue ${hw.nextDue})`);
+  daily = await api(owner, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.body.items.some((i) => i.id === medItem.id),
+    'given med stays visible (checked) on the daily list');
+
+  const medUncheck = await api(member, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: today, itemId: medItem.id, checked: false,
+  });
+  check(medUncheck.status === 200 && !medUncheck.body.checks[medItem.id], 'med uncheck clears the entry');
+  medsNow = await api(owner, 'GET', `/pets/${pet.id}/meds`);
+  const hw2 = medsNow.body.meds.find((m) => `med:${m.id}` === medItem.id);
+  check(hw2.nextDue === today, 'med uncheck restores the prior schedule');
+
+  const putItems = await api(owner, 'PUT', `/pets/${pet.id}/daily/items`, {
+    items: [...daily.body.items.filter((i) => !i.id.startsWith('med:')), { name: 'Evening walk' }],
+  });
+  check(putItems.status === 200 && putItems.body.items.length === 3, 'owner adds a custom item');
+  daily = await api(member, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.body.items.some((i) => i.name === 'Evening walk'), 'member sees the new item');
+  check(daily.body.checks[breakfast.id]?.by === ownerEmail, 'attribution survives the items edit');
+  const ghostCheck = await api(member, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: today, itemId: 'no-such-item', checked: true,
+  });
+  check(ghostCheck.status === 404, 'unknown item 404s');
+
+  console.log('\n[8c] daily mood: first press attributed, override re-attributes');
+  const m1 = await api(owner, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 4 });
+  check(m1.status === 200 && m1.body.mood.value === 4 && m1.body.mood.by === ownerEmail,
+    'owner sets mood 4, attributed to owner');
+  const m2 = await api(member, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 4 });
+  check(m2.body.mood.by === ownerEmail, 'same-value press keeps the first attribution');
+  const m3 = await api(member, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 2 });
+  check(m3.body.mood.value === 2 && m3.body.mood.by === memberEmail,
+    'different value overrides and re-attributes');
+  daily = await api(owner, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(daily.body.mood?.value === 2 && daily.body.mood?.by === memberEmail,
+    'owner sees the member-set mood');
+  const mBad = await api(owner, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 9 });
+  check(mBad.status === 400, 'out-of-range mood rejected');
+
   console.log('\n[9] removal cuts access immediately');
   hh = await api(owner, 'GET', '/household');
   const memberSub = hh.body.members[0].sub;

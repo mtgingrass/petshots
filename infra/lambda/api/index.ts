@@ -294,6 +294,118 @@ async function getUserEmail(sub: string): Promise<string> {
   return res.UserAttributes?.find((a) => a.Name === 'email')?.Value ?? '';
 }
 
+// Cache sub→email per container: daily check-offs stamp the actor on every
+// toggle and shouldn't pay a Cognito round-trip each time.
+const emailCache = new Map<string, string>();
+async function actorEmail(sub: string): Promise<string> {
+  const hit = emailCache.get(sub);
+  if (hit) return hit;
+  const email = await getUserEmail(sub);
+  emailCache.set(sub, email);
+  return email;
+}
+
+// ---- daily care checklist ----
+// Per-pet shared to-do for the day (Breakfast, Dinner, walks, plus every med
+// due today). Lives in daily.json under the pet, so family members see and
+// check the same list; each check-off is stamped server-side with WHO did it
+// (the verified JWT's user — unforgeable) and when. Log is keyed by the
+// CLIENT's local date: feeding days are local days, and a UTC key would reset
+// the list at 8pm Eastern.
+interface DailyItem {
+  id: string;
+  name: string;
+}
+interface DailyCheck {
+  by: string; // actor email, server-stamped
+  at: string; // ISO timestamp
+  // Med check-offs advance the med schedule; the prior state rides along so
+  // unchecking can restore it exactly.
+  prev?: { lastGiven?: string; nextDue: string };
+}
+// One mood reading per pet per day ("how does your pet feel and act today"),
+// 1 (rough) … 5 (great). First press wins and is attributed; pressing a
+// DIFFERENT value overrides and re-attributes; re-pressing the same value
+// never steals the original attribution.
+interface DailyMood {
+  value: number; // 1..5
+  by: string;
+  at: string;
+}
+interface DailyFile {
+  items: DailyItem[] | null; // null = never customized; presets apply
+  log: Record<string, Record<string, DailyCheck>>; // date -> itemId -> check
+  moods?: Record<string, DailyMood>; // date -> mood
+}
+const DAILY_PRESETS: DailyItem[] = [
+  { id: 'preset-breakfast', name: 'Breakfast' },
+  { id: 'preset-dinner', name: 'Dinner' },
+];
+const MAX_DAILY_ITEMS = 20;
+const DAILY_LOG_RETENTION_DAYS = 14;
+
+// Days older than the retention window move from daily.json into per-month
+// archive objects instead of being dropped: mood + feeding history is the
+// raw material for future "he's seemed slow all week — what changed?"
+// reports, so nothing is ever thrown away. Archives are append-only and
+// nothing reads them yet.
+async function pruneDailyToArchive(
+  petPrefix: string,
+  file: DailyFile,
+  date: string,
+): Promise<void> {
+  const cutoff = addToDay(date, { days: -DAILY_LOG_RETENTION_DAYS });
+  const moved: Record<string, { checks?: Record<string, DailyCheck>; mood?: DailyMood }> = {};
+  for (const k of Object.keys(file.log)) {
+    if (k < cutoff) {
+      moved[k] = { ...(moved[k] ?? {}), checks: file.log[k] };
+      delete file.log[k];
+    }
+  }
+  for (const k of Object.keys(file.moods ?? {})) {
+    if (k < cutoff) {
+      moved[k] = { ...(moved[k] ?? {}), mood: file.moods![k] };
+      delete file.moods![k];
+    }
+  }
+  const days = Object.keys(moved);
+  if (days.length === 0) return;
+  const byMonth = new Map<string, string[]>();
+  for (const d of days) {
+    const m = d.slice(0, 7);
+    byMonth.set(m, [...(byMonth.get(m) ?? []), d]);
+  }
+  for (const [month, monthDays] of byMonth) {
+    const key = `${petPrefix}daily-archive/${month}.json`;
+    const existing = (await readJson<{ days: Record<string, unknown> }>(key)) ?? { days: {} };
+    for (const d of monthDays) existing.days[d] = moved[d];
+    await putJson(key, existing);
+  }
+}
+
+// Accept only a real calendar day within ±2 days of server time — enough for
+// any timezone, too tight to backfill or forge history.
+function isDailyDate(v: unknown): v is string {
+  if (!isStrictDay(v)) return false;
+  return Math.abs(Date.parse(`${v}T00:00:00Z`) - Date.now()) <= 2.5 * 86_400_000;
+}
+
+// Med items due on `date` (or already checked that day — a given med advances
+// nextDue past today and would otherwise vanish while checked).
+function dailyMedItems(
+  meds: Med[],
+  date: string,
+  checks: Record<string, DailyCheck>,
+): (DailyItem & { med: true })[] {
+  return meds
+    .filter(
+      (m) =>
+        m.dismissed !== true &&
+        ((m.nextDue && m.nextDue <= date) || checks[`med:${m.id}`] !== undefined),
+    )
+    .map((m) => ({ id: `med:${m.id}`, name: m.name, med: true as const }));
+}
+
 // Drop expired invites from a household file AND their bucket-root token
 // objects. Returns the pruned file; caller persists it if it changed.
 async function pruneInvites(h: HouseholdFile): Promise<{ h: HouseholdFile; changed: boolean }> {
@@ -1470,6 +1582,145 @@ export const handler = async (
           }),
         );
         return json(200, result);
+      }
+
+      // ---- daily care checklist (per pet) ----
+
+      case 'GET /pets/{petId}/daily': {
+        const date = event.queryStringParameters?.date;
+        if (!isDailyDate(date)) {
+          return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
+        }
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const [file, medsStored] = await Promise.all([
+          readJson<DailyFile>(`${petPrefix}daily.json`),
+          readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
+        ]);
+        const checks = file?.log?.[date] ?? {};
+        const items = [
+          ...(file?.items ?? DAILY_PRESETS),
+          ...dailyMedItems(medsStored?.meds ?? [], date, checks),
+        ];
+        return json(200, { date, items, checks, mood: file?.moods?.[date] ?? null });
+      }
+
+      case 'POST /pets/{petId}/daily/mood': {
+        const input = JSON.parse(event.body ?? '{}');
+        const date = input.date;
+        const value = input.value;
+        if (!isDailyDate(date)) {
+          return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
+        }
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 5) {
+          return json(400, { error: 'value must be 1-5' });
+        }
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const file: DailyFile = (await readJson<DailyFile>(`${petPrefix}daily.json`)) ?? {
+          items: null,
+          log: {},
+        };
+        const moods = file.moods ?? {};
+        const current = moods[date];
+        // Same value again = agreement, keep the first press's attribution.
+        // A different value overrides and re-attributes.
+        if (!current || current.value !== value) {
+          moods[date] = { value, by: await actorEmail(sub), at: new Date().toISOString() };
+        }
+        file.moods = moods;
+        await pruneDailyToArchive(petPrefix, file, date);
+        await putJson(`${petPrefix}daily.json`, file);
+        return json(200, { date, mood: moods[date] });
+      }
+
+      case 'POST /pets/{petId}/daily/check': {
+        const input = JSON.parse(event.body ?? '{}');
+        const date = input.date;
+        const itemId = String(input.itemId ?? '');
+        const checked = input.checked !== false;
+        if (!isDailyDate(date)) {
+          return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
+        }
+        if (!itemId || itemId.length > 80) return json(400, { error: 'itemId required' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+
+        const file: DailyFile = (await readJson<DailyFile>(`${petPrefix}daily.json`)) ?? {
+          items: null,
+          log: {},
+        };
+        const log = file.log ?? {};
+        const day = log[date] ?? {};
+
+        if (itemId.startsWith('med:')) {
+          // Checking a due med IS marking it given: advance the schedule and
+          // remember the prior state so unchecking restores it.
+          const medId = itemId.slice(4);
+          const medsStored = await readJson<{ meds: Med[] }>(`${petPrefix}meds.json`);
+          const med = medsStored?.meds.find((m) => m.id === medId);
+          if (!med) return json(404, { error: 'medication not found' });
+          if (checked && !day[itemId]) {
+            const prev = { lastGiven: med.lastGiven, nextDue: med.nextDue };
+            med.lastGiven = date;
+            med.nextDue = addToDay(
+              date,
+              med.unit === 'month'
+                ? { months: med.interval }
+                : { days: med.interval * (med.unit === 'week' ? 7 : 1) },
+            );
+            await putJson(`${petPrefix}meds.json`, medsStored);
+            day[itemId] = { by: await actorEmail(sub), at: new Date().toISOString(), prev };
+          } else if (!checked && day[itemId]) {
+            const prev = day[itemId].prev;
+            if (prev && medsStored) {
+              med.lastGiven = prev.lastGiven;
+              med.nextDue = prev.nextDue;
+              await putJson(`${petPrefix}meds.json`, medsStored);
+            }
+            delete day[itemId];
+          }
+        } else {
+          const items = file.items ?? DAILY_PRESETS;
+          if (!items.some((i) => i.id === itemId)) return json(404, { error: 'item not found' });
+          // First checker wins — re-checking never steals attribution.
+          if (checked && !day[itemId]) {
+            day[itemId] = { by: await actorEmail(sub), at: new Date().toISOString() };
+          } else if (!checked) {
+            delete day[itemId];
+          }
+        }
+
+        log[date] = day;
+        file.log = log;
+        await pruneDailyToArchive(petPrefix, file, date);
+        await putJson(`${petPrefix}daily.json`, file);
+        return json(200, { date, checks: day });
+      }
+
+      case 'PUT /pets/{petId}/daily/items': {
+        // Whole-list replace of the CUSTOM items (med rows derive from meds.json
+        // and can't be edited here). Same pattern as meds.
+        const input = JSON.parse(event.body ?? '{}');
+        if (!Array.isArray(input.items) || input.items.length > MAX_DAILY_ITEMS) {
+          return json(400, { error: `items must be an array of at most ${MAX_DAILY_ITEMS}` });
+        }
+        const seen = new Set<string>();
+        const items: DailyItem[] = [];
+        for (const raw of input.items) {
+          const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+          const name = String(r.name ?? '').trim().slice(0, 60);
+          if (!name) return json(400, { error: 'item name required' });
+          // Keep stable ids (incl. preset-*) so the day's attribution survives
+          // a rename; regenerate anything malformed or duplicated.
+          const id =
+            typeof r.id === 'string' && /^[\w-]{1,40}$/.test(r.id) && !seen.has(r.id)
+              ? r.id
+              : randomUUID();
+          seen.add(id);
+          items.push({ id, name });
+        }
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const file = await readJson<DailyFile>(`${petPrefix}daily.json`);
+        await putJson(`${petPrefix}daily.json`, { items, log: file?.log ?? {} });
+        return json(200, { items });
       }
 
       // ---- user settings ----

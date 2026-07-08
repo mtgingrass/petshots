@@ -2585,3 +2585,118 @@ a {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- daily care checklist ---- */
+
+.daily__mood {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.daily__mood-label {
+  font-weight: 600;
+}
+
+.daily__mood-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.daily__mood-btn {
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0.5rem;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  filter: grayscale(0.7);
+  transition: transform 0.1s ease, filter 0.1s ease;
+}
+
+.daily__mood-btn--active {
+  filter: none;
+  border-color: var(--accent, #6d5ef0);
+  background: color-mix(in srgb, var(--accent, #6d5ef0) 14%, transparent);
+  transform: scale(1.08);
+}
+
+.daily__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.daily__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.daily-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.daily-item:last-of-type {
+  border-bottom: none;
+}
+
+.daily-item__check {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: transparent;
+  color: var(--ok-text, #34d399);
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.daily-item--done .daily-item__check {
+  border-color: var(--ok-text, #34d399);
+}
+
+.daily-item__name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.daily-item--done .daily-item__name {
+  opacity: 0.75;
+}
+
+.daily-item__who {
+  font-size: 0.8rem;
+}
+
+.daily__add {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.daily__add input {
+  flex: 1;
+  min-width: 0;
+}
+
+.daily__hint {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}

@@ -30,6 +30,11 @@ import {
   revokeInvite,
   removeMember,
   leaveHousehold,
+  getDaily,
+  checkDaily,
+  setDailyMood,
+  saveDailyItems,
+  localToday,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -39,6 +44,8 @@ import {
   type MedUnit,
   type UserSettings,
   type Household,
+  type DailyState,
+  type DailyItem,
   type Extraction,
   type CommitRecord,
   type ProfilePatch,
@@ -209,7 +216,7 @@ function vaccineBlurb(label: string): string | null {
 
 type DashView =
   | { type: 'overview' }
-  | { type: 'detail'; petId: string; tab?: 'records' | 'meds' | 'profile' | 'passport' }
+  | { type: 'detail'; petId: string; tab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport' }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
@@ -1252,7 +1259,7 @@ function PetDetailScreen({
   onNotice,
 }: {
   pet: Pet;
-  initialTab?: 'records' | 'meds' | 'profile' | 'passport';
+  initialTab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport';
   docs: Doc[];
   meds: Med[] | undefined;
   onMedsChanged: (meds: Med[]) => void;
@@ -1275,7 +1282,7 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
+  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -1339,6 +1346,12 @@ function PetDetailScreen({
             Records
           </button>
           <button
+            className={`tab-bar__tab${tab === 'daily' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('daily')}
+          >
+            Daily
+          </button>
+          <button
             className={`tab-bar__tab${tab === 'meds' ? ' tab-bar__tab--active' : ''}`}
             onClick={() => setTab('meds')}
           >
@@ -1376,6 +1389,8 @@ function PetDetailScreen({
               onReviewExtraction={onReviewExtraction}
             />
           </>
+        ) : tab === 'daily' ? (
+          <DailySection petId={pet.id} onError={onError} onMedsChanged={onMedsChanged} />
         ) : tab === 'meds' ? (
           <MedsSection
             petId={pet.id}
@@ -1401,6 +1416,206 @@ function PetDetailScreen({
         <PhotoLightbox src={pet.avatarUrl} alt={pet.name} onClose={() => setShowPhoto(false)} />
       )}
     </div>
+  );
+}
+
+// ---- daily care checklist ----
+
+const MOODS: { value: number; emoji: string; label: string }[] = [
+  { value: 1, emoji: '😢', label: 'Rough' },
+  { value: 2, emoji: '😕', label: 'Off' },
+  { value: 3, emoji: '😐', label: 'Okay' },
+  { value: 4, emoji: '🙂', label: 'Good' },
+  { value: 5, emoji: '😄', label: 'Great' },
+];
+
+// "darya checked this at 8:31 AM" — email local-part + local time.
+function whoAndWhen(by: string, at: string): string {
+  const name = by.split('@')[0];
+  const time = new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `${name} · ${time}`;
+}
+
+function DailySection({
+  petId,
+  onError,
+  onMedsChanged,
+}: {
+  petId: string;
+  onError: (msg: string | null) => void;
+  onMedsChanged: (meds: Med[]) => void;
+}) {
+  const [state, setState] = useState<DailyState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [newItem, setNewItem] = useState('');
+  const [busy, setBusy] = useState(false);
+  const today = localToday();
+
+  const load = useCallback(() => {
+    getDaily(petId, localToday())
+      .then(setState)
+      .catch((err) => onError(err instanceof Error ? err.message : 'Could not load the daily list'))
+      .finally(() => setLoading(false));
+  }, [petId, onError]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Med check-offs change the med schedule — keep the rest of the app in sync.
+  const refreshMeds = useCallback(() => {
+    listMeds(petId)
+      .then((r) => onMedsChanged(r.meds))
+      .catch(() => {});
+  }, [petId, onMedsChanged]);
+
+  async function toggle(item: DailyItem) {
+    if (!state) return;
+    const wasChecked = state.checks[item.id] !== undefined;
+    onError(null);
+    try {
+      const res = await checkDaily(petId, today, item.id, !wasChecked);
+      setState((s) => (s ? { ...s, checks: res.checks } : s));
+      if (item.med) refreshMeds();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not update the list');
+      load();
+    }
+  }
+
+  async function pickMood(value: number) {
+    onError(null);
+    try {
+      const res = await setDailyMood(petId, today, value);
+      setState((s) => (s ? { ...s, mood: res.mood } : s));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not save the mood');
+    }
+  }
+
+  async function saveItems(items: { id?: string; name: string }[]) {
+    setBusy(true);
+    onError(null);
+    try {
+      await saveDailyItems(petId, items);
+      load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not save the list');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) return <p className="subtle">Loading…</p>;
+  if (!state) return null;
+
+  const customItems = state.items.filter((i) => !i.med);
+  const doneCount = state.items.filter((i) => state.checks[i.id]).length;
+
+  return (
+    <section className="card daily">
+      <div className="daily__mood">
+        <span className="daily__mood-label">How's your pet today?</span>
+        <div className="daily__mood-row" role="radiogroup" aria-label="Mood today">
+          {MOODS.map((m) => (
+            <button
+              key={m.value}
+              type="button"
+              role="radio"
+              aria-checked={state.mood?.value === m.value}
+              className={`daily__mood-btn${state.mood?.value === m.value ? ' daily__mood-btn--active' : ''}`}
+              title={m.label}
+              onClick={() => void pickMood(m.value)}
+            >
+              {m.emoji}
+            </button>
+          ))}
+        </div>
+        {state.mood && (
+          <span className="subtle daily__mood-who">
+            {MOODS.find((m) => m.value === state.mood!.value)?.label} —{' '}
+            {whoAndWhen(state.mood.by, state.mood.at)}
+          </span>
+        )}
+      </div>
+
+      <div className="daily__head">
+        <h3 className="daily__title">
+          Today's list
+          <span className="subtle"> · {doneCount}/{state.items.length} done</span>
+        </h3>
+        <button className="btn btn--link" type="button" onClick={() => setEditing((e) => !e)}>
+          {editing ? 'Done' : 'Edit list'}
+        </button>
+      </div>
+
+      {state.items.length === 0 && (
+        <p className="subtle">Nothing on the list — add feeding times, walks, or meds.</p>
+      )}
+
+      {state.items.map((item) => {
+        const checkInfo = state.checks[item.id];
+        return (
+          <div className={`daily-item${checkInfo ? ' daily-item--done' : ''}`} key={item.id}>
+            <button
+              type="button"
+              className="daily-item__check"
+              role="checkbox"
+              aria-checked={!!checkInfo}
+              aria-label={`${item.name}${checkInfo ? ' (done)' : ''}`}
+              onClick={() => void toggle(item)}
+            >
+              {checkInfo ? '✓' : ''}
+            </button>
+            <span className="daily-item__name">
+              {item.name}
+              {item.med ? ' 💊' : ''}
+              {checkInfo && (
+                <span className="subtle daily-item__who">{whoAndWhen(checkInfo.by, checkInfo.at)}</span>
+              )}
+            </span>
+            {editing && !item.med && (
+              <button
+                type="button"
+                className="btn btn--link btn--danger"
+                disabled={busy}
+                onClick={() => void saveItems(customItems.filter((c) => c.id !== item.id))}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        );
+      })}
+
+      {editing ? (
+        <form
+          className="daily__add"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const name = newItem.trim();
+            if (!name) return;
+            setNewItem('');
+            void saveItems([...customItems, { name }]);
+          }}
+        >
+          <input
+            value={newItem}
+            onChange={(e) => setNewItem(e.target.value)}
+            placeholder="Add to the list (e.g. Evening walk)"
+            maxLength={60}
+          />
+          <button className="btn btn--primary" type="submit" disabled={busy || !newItem.trim()}>
+            Add
+          </button>
+        </form>
+      ) : (
+        <p className="subtle daily__hint">
+          Everyone in your family sees this list — and who checked what. Meds due today
+          appear automatically; checking one marks it as given.
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -130,6 +130,66 @@ export interface Med {
   dismissed?: boolean;
 }
 
+// ---- daily care checklist ----
+
+export interface DailyItem {
+  id: string; // med rows use "med:{medId}" and derive from the Meds tab
+  name: string;
+  med?: boolean;
+}
+export interface DailyCheckInfo {
+  by: string; // email of whoever checked it, server-stamped
+  at: string; // ISO timestamp
+}
+export interface DailyMoodInfo {
+  value: number; // 1 (rough) .. 5 (great)
+  by: string;
+  at: string;
+}
+export interface DailyState {
+  date: string;
+  items: DailyItem[];
+  checks: Record<string, DailyCheckInfo>;
+  mood: DailyMoodInfo | null;
+}
+
+// The list is a LOCAL day (dinner at 8pm ET must not roll into tomorrow's UTC list).
+export function localToday(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export function getDaily(petId: string, date: string): Promise<DailyState> {
+  return request('GET', `/pets/${petId}/daily?date=${date}`);
+}
+
+// Checking a med row also marks it as given (and unchecking restores it).
+export function checkDaily(
+  petId: string,
+  date: string,
+  itemId: string,
+  checked: boolean,
+): Promise<{ date: string; checks: Record<string, DailyCheckInfo> }> {
+  return request('POST', `/pets/${petId}/daily/check`, { date, itemId, checked });
+}
+
+// First press wins the attribution; a different value overrides it.
+export function setDailyMood(
+  petId: string,
+  date: string,
+  value: number,
+): Promise<{ date: string; mood: DailyMoodInfo }> {
+  return request('POST', `/pets/${petId}/daily/mood`, { date, value });
+}
+
+export function saveDailyItems(
+  petId: string,
+  items: { id?: string; name: string }[],
+): Promise<{ items: DailyItem[] }> {
+  return request('PUT', `/pets/${petId}/daily/items`, { items });
+}
+
 // Per-user limits, resolved server-side from the user's plan and returned by
 // GET /pets. The defaults mirror the free tier and only cover the moment
 // before the first listPets response (or an older API without limits).

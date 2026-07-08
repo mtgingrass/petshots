@@ -1282,7 +1282,8 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
+  // Daily is the landing tab: it's the surface a household touches every day.
+  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'daily');
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -1294,7 +1295,7 @@ function PetDetailScreen({
       {/* Left slot: Present (records only). Right slot: Edit — always top-right,
           scoped to the active tab (records = pet, profile = health profile). */}
       <nav className="screen-nav">
-        {tab === 'records' && docs.length > 0 ? (
+        {(tab === 'records' || tab === 'daily') && docs.length > 0 ? (
           <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
             ▶ Present Rabies Shots
           </button>
@@ -1449,6 +1450,7 @@ function DailySection({
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [newItem, setNewItem] = useState('');
+  const [newIsCounter, setNewIsCounter] = useState(false);
   const [busy, setBusy] = useState(false);
   const today = localToday();
 
@@ -1469,12 +1471,13 @@ function DailySection({
       .catch(() => {});
   }, [petId, onMedsChanged]);
 
-  async function toggle(item: DailyItem) {
+  // Check rows toggle; counter rows pass an explicit +1 (true) / -1 (false).
+  async function toggle(item: DailyItem, value?: boolean) {
     if (!state) return;
-    const wasChecked = state.checks[item.id] !== undefined;
+    const next = value ?? state.checks[item.id] === undefined;
     onError(null);
     try {
-      const res = await checkDaily(petId, today, item.id, !wasChecked);
+      const res = await checkDaily(petId, today, item.id, next);
       setState((s) => (s ? { ...s, checks: res.checks } : s));
       if (item.med) refreshMeds();
     } catch (err) {
@@ -1555,6 +1558,55 @@ function DailySection({
 
       {state.items.map((item) => {
         const checkInfo = state.checks[item.id];
+        const removeBtn = editing && !item.med && (
+          <button
+            type="button"
+            className="btn btn--link btn--danger"
+            disabled={busy}
+            onClick={() => void saveItems(customItems.filter((c) => c.id !== item.id))}
+          >
+            Remove
+          </button>
+        );
+        if (item.kind === 'counter') {
+          const count = checkInfo?.count ?? 0;
+          return (
+            <div className={`daily-item${count > 0 ? ' daily-item--done' : ''}`} key={item.id}>
+              <span className="daily-item__countpill" aria-label={`${item.name}: ${count} today`}>
+                {count}
+              </span>
+              <span className="daily-item__name">
+                {item.name}
+                {checkInfo && (
+                  <span className="subtle daily-item__who">
+                    last: {whoAndWhen(checkInfo.by, checkInfo.at)}
+                  </span>
+                )}
+              </span>
+              {removeBtn || (
+                <span className="daily-item__counter-btns">
+                  <button
+                    type="button"
+                    className="btn daily-item__count-btn"
+                    aria-label={`Remove one ${item.name}`}
+                    disabled={count === 0}
+                    onClick={() => void toggle(item, false)}
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    className="btn daily-item__count-btn"
+                    aria-label={`Add one ${item.name}`}
+                    onClick={() => void toggle(item, true)}
+                  >
+                    +
+                  </button>
+                </span>
+              )}
+            </div>
+          );
+        }
         return (
           <div className={`daily-item${checkInfo ? ' daily-item--done' : ''}`} key={item.id}>
             <button
@@ -1574,16 +1626,7 @@ function DailySection({
                 <span className="subtle daily-item__who">{whoAndWhen(checkInfo.by, checkInfo.at)}</span>
               )}
             </span>
-            {editing && !item.med && (
-              <button
-                type="button"
-                className="btn btn--link btn--danger"
-                disabled={busy}
-                onClick={() => void saveItems(customItems.filter((c) => c.id !== item.id))}
-              >
-                Remove
-              </button>
-            )}
+            {removeBtn}
           </div>
         );
       })}
@@ -1596,18 +1639,32 @@ function DailySection({
             const name = newItem.trim();
             if (!name) return;
             setNewItem('');
-            void saveItems([...customItems, { name }]);
+            setNewIsCounter(false);
+            void saveItems([
+              ...customItems,
+              { name, ...(newIsCounter ? { kind: 'counter' as const } : {}) },
+            ]);
           }}
         >
-          <input
-            value={newItem}
-            onChange={(e) => setNewItem(e.target.value)}
-            placeholder="Add to the list (e.g. Evening walk)"
-            maxLength={60}
-          />
-          <button className="btn btn--primary" type="submit" disabled={busy || !newItem.trim()}>
-            Add
-          </button>
+          <div className="daily__add-row">
+            <input
+              value={newItem}
+              onChange={(e) => setNewItem(e.target.value)}
+              placeholder="Add to the list (e.g. Evening walk)"
+              maxLength={60}
+            />
+            <button className="btn btn--primary" type="submit" disabled={busy || !newItem.trim()}>
+              Add
+            </button>
+          </div>
+          <label className="daily__add-kind subtle">
+            <input
+              type="checkbox"
+              checked={newIsCounter}
+              onChange={(e) => setNewIsCounter(e.target.checked)}
+            />
+            Count it (can happen several times a day)
+          </label>
         </form>
       ) : (
         <p className="subtle daily__hint">

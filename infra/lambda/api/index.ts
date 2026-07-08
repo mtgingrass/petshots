@@ -187,6 +187,48 @@ async function readJson<T>(key: string): Promise<T | null> {
   }
 }
 
+// Optimistic-concurrency pair for objects that several people update at once
+// (the daily checklist): read captures the ETag, the guarded put only lands
+// if the object hasn't changed since (S3 conditional writes). A false return
+// means someone else wrote in between — re-read and re-apply.
+async function readJsonTagged<T>(key: string): Promise<{ value: T | null; etag: string | null }> {
+  try {
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    return {
+      value: JSON.parse(await obj.Body!.transformToString()) as T,
+      etag: obj.ETag ?? null,
+    };
+  } catch (e) {
+    if ((e as { name?: string }).name === 'NoSuchKey') return { value: null, etag: null };
+    throw e;
+  }
+}
+async function putJsonGuarded(key: string, body: unknown, etag: string | null): Promise<boolean> {
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: JSON.stringify(body),
+        ContentType: 'application/json',
+        ...(etag ? { IfMatch: etag } : { IfNoneMatch: '*' }),
+      }),
+    );
+    return true;
+  } catch (e) {
+    const err = e as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (
+      err.name === 'PreconditionFailed' ||
+      err.name === 'ConditionalRequestConflict' ||
+      err.$metadata?.httpStatusCode === 412 ||
+      err.$metadata?.httpStatusCode === 409
+    ) {
+      return false;
+    }
+    throw e;
+  }
+}
+
 // ---- plans / entitlements ----
 // Free-tier limits come from the env; a paid user has users/{sub}/plan.json,
 // written only by billing tooling or an operator — never by any user-writable
@@ -315,13 +357,19 @@ async function actorEmail(sub: string): Promise<string> {
 interface DailyItem {
   id: string;
   name: string;
+  // 'counter' rows tally repeatable events (poops, walks) instead of a
+  // single check-off; each increment is logged with who + when.
+  kind?: 'check' | 'counter';
 }
 interface DailyCheck {
-  by: string; // actor email, server-stamped
+  by: string; // actor email, server-stamped (counters: the LAST increment)
   at: string; // ISO timestamp
   // Med check-offs advance the med schedule; the prior state rides along so
   // unchecking can restore it exactly.
   prev?: { lastGiven?: string; nextDue: string };
+  // Counter rows only: running total + every increment (report material).
+  count?: number;
+  events?: { by: string; at: string }[];
 }
 // One mood reading per pet per day ("how does your pet feel and act today"),
 // 1 (rough) … 5 (great). First press wins and is attributed; pressing a
@@ -340,8 +388,11 @@ interface DailyFile {
 const DAILY_PRESETS: DailyItem[] = [
   { id: 'preset-breakfast', name: 'Breakfast' },
   { id: 'preset-dinner', name: 'Dinner' },
+  { id: 'preset-walk', name: 'Walk' },
+  { id: 'preset-poop', name: '💩 Poop', kind: 'counter' },
 ];
 const MAX_DAILY_ITEMS = 20;
+const MAX_COUNTER_PER_DAY = 30;
 const DAILY_LOG_RETENTION_DAYS = 14;
 
 // Days older than the retention window move from daily.json into per-month
@@ -1615,21 +1666,24 @@ export const handler = async (
           return json(400, { error: 'value must be 1-5' });
         }
         if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
-        const file: DailyFile = (await readJson<DailyFile>(`${petPrefix}daily.json`)) ?? {
-          items: null,
-          log: {},
-        };
-        const moods = file.moods ?? {};
-        const current = moods[date];
-        // Same value again = agreement, keep the first press's attribution.
-        // A different value overrides and re-attributes.
-        if (!current || current.value !== value) {
-          moods[date] = { value, by: await actorEmail(sub), at: new Date().toISOString() };
+        const who = await actorEmail(sub);
+        for (let attempt = 0; ; attempt++) {
+          const { value: stored, etag } = await readJsonTagged<DailyFile>(`${petPrefix}daily.json`);
+          const file: DailyFile = stored ?? { items: null, log: {} };
+          const moods = file.moods ?? {};
+          const current = moods[date];
+          // Same value again = agreement, keep the first press's attribution.
+          // A different value overrides and re-attributes.
+          if (!current || current.value !== value) {
+            moods[date] = { value, by: who, at: new Date().toISOString() };
+          }
+          file.moods = moods;
+          await pruneDailyToArchive(petPrefix, file, date);
+          if (await putJsonGuarded(`${petPrefix}daily.json`, file, etag)) {
+            return json(200, { date, mood: moods[date] });
+          }
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
         }
-        file.moods = moods;
-        await pruneDailyToArchive(petPrefix, file, date);
-        await putJson(`${petPrefix}daily.json`, file);
-        return json(200, { date, mood: moods[date] });
       }
 
       case 'POST /pets/{petId}/daily/check': {
@@ -1643,55 +1697,103 @@ export const handler = async (
         if (!itemId || itemId.length > 80) return json(400, { error: 'itemId required' });
         if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
 
-        const file: DailyFile = (await readJson<DailyFile>(`${petPrefix}daily.json`)) ?? {
-          items: null,
-          log: {},
-        };
-        const log = file.log ?? {};
-        const day = log[date] ?? {};
-
-        if (itemId.startsWith('med:')) {
-          // Checking a due med IS marking it given: advance the schedule and
-          // remember the prior state so unchecking restores it.
-          const medId = itemId.slice(4);
-          const medsStored = await readJson<{ meds: Med[] }>(`${petPrefix}meds.json`);
-          const med = medsStored?.meds.find((m) => m.id === medId);
+        // The med side-effect (mark-as-given / restore) is computed inside the
+        // retry loop but WRITTEN only after the daily write lands, so a retry
+        // can never apply it twice.
+        const isMed = itemId.startsWith('med:');
+        let medsStored: { meds: Med[] } | null = null;
+        let med: Med | undefined;
+        if (isMed) {
+          medsStored = await readJson<{ meds: Med[] }>(`${petPrefix}meds.json`);
+          med = medsStored?.meds.find((m) => m.id === itemId.slice(4));
           if (!med) return json(404, { error: 'medication not found' });
-          if (checked && !day[itemId]) {
-            const prev = { lastGiven: med.lastGiven, nextDue: med.nextDue };
-            med.lastGiven = date;
-            med.nextDue = addToDay(
-              date,
-              med.unit === 'month'
-                ? { months: med.interval }
-                : { days: med.interval * (med.unit === 'week' ? 7 : 1) },
-            );
-            await putJson(`${petPrefix}meds.json`, medsStored);
-            day[itemId] = { by: await actorEmail(sub), at: new Date().toISOString(), prev };
-          } else if (!checked && day[itemId]) {
-            const prev = day[itemId].prev;
-            if (prev && medsStored) {
-              med.lastGiven = prev.lastGiven;
-              med.nextDue = prev.nextDue;
-              await putJson(`${petPrefix}meds.json`, medsStored);
+        }
+        const who = await actorEmail(sub);
+
+        // Several family phones write daily.json at once — read-modify-write
+        // under an ETag guard, re-applying on conflict.
+        let day: Record<string, DailyCheck> = {};
+        let medUpdate: { lastGiven?: string; nextDue: string } | null = null;
+        for (let attempt = 0; ; attempt++) {
+          const { value, etag } = await readJsonTagged<DailyFile>(`${petPrefix}daily.json`);
+          const file: DailyFile = value ?? { items: null, log: {} };
+          const log = file.log ?? {};
+          day = log[date] ?? {};
+          medUpdate = null;
+
+          if (isMed) {
+            if (checked && !day[itemId]) {
+              medUpdate = {
+                lastGiven: date,
+                nextDue: addToDay(
+                  date,
+                  med!.unit === 'month'
+                    ? { months: med!.interval }
+                    : { days: med!.interval * (med!.unit === 'week' ? 7 : 1) },
+                ),
+              };
+              day[itemId] = {
+                by: who,
+                at: new Date().toISOString(),
+                prev: { lastGiven: med!.lastGiven, nextDue: med!.nextDue },
+              };
+            } else if (!checked && day[itemId]) {
+              const prev = day[itemId].prev;
+              if (prev) medUpdate = prev;
+              delete day[itemId];
             }
-            delete day[itemId];
+          } else {
+            const items = file.items ?? DAILY_PRESETS;
+            const item = items.find((i) => i.id === itemId);
+            if (!item) return json(404, { error: 'item not found' });
+            if (item.kind === 'counter') {
+              // Counters tally repeatable events; `checked` maps to +1/-1.
+              // Every increment is kept (who + when) for future reports.
+              const entry = day[itemId];
+              if (checked) {
+                const events = entry?.events ?? [];
+                if (events.length >= MAX_COUNTER_PER_DAY) {
+                  return json(400, { error: 'daily counter limit reached' });
+                }
+                events.push({ by: who, at: new Date().toISOString() });
+                const last = events[events.length - 1];
+                day[itemId] = { by: last.by, at: last.at, count: events.length, events };
+              } else if (entry?.events?.length) {
+                entry.events.pop();
+                if (entry.events.length === 0) {
+                  delete day[itemId];
+                } else {
+                  const last = entry.events[entry.events.length - 1];
+                  day[itemId] = {
+                    by: last.by,
+                    at: last.at,
+                    count: entry.events.length,
+                    events: entry.events,
+                  };
+                }
+              }
+            } else {
+              // First checker wins — re-checking never steals attribution.
+              if (checked && !day[itemId]) {
+                day[itemId] = { by: who, at: new Date().toISOString() };
+              } else if (!checked) {
+                delete day[itemId];
+              }
+            }
           }
-        } else {
-          const items = file.items ?? DAILY_PRESETS;
-          if (!items.some((i) => i.id === itemId)) return json(404, { error: 'item not found' });
-          // First checker wins — re-checking never steals attribution.
-          if (checked && !day[itemId]) {
-            day[itemId] = { by: await actorEmail(sub), at: new Date().toISOString() };
-          } else if (!checked) {
-            delete day[itemId];
-          }
+
+          log[date] = day;
+          file.log = log;
+          await pruneDailyToArchive(petPrefix, file, date);
+          if (await putJsonGuarded(`${petPrefix}daily.json`, file, etag)) break;
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
         }
 
-        log[date] = day;
-        file.log = log;
-        await pruneDailyToArchive(petPrefix, file, date);
-        await putJson(`${petPrefix}daily.json`, file);
+        if (medUpdate && medsStored && med) {
+          med.lastGiven = medUpdate.lastGiven;
+          med.nextDue = medUpdate.nextDue;
+          await putJson(`${petPrefix}meds.json`, medsStored);
+        }
         return json(200, { date, checks: day });
       }
 
@@ -1715,12 +1817,17 @@ export const handler = async (
               ? r.id
               : randomUUID();
           seen.add(id);
-          items.push({ id, name });
+          items.push({ id, name, ...(r.kind === 'counter' ? { kind: 'counter' as const } : {}) });
         }
         if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
-        const file = await readJson<DailyFile>(`${petPrefix}daily.json`);
-        await putJson(`${petPrefix}daily.json`, { items, log: file?.log ?? {} });
-        return json(200, { items });
+        for (let attempt = 0; ; attempt++) {
+          const { value: file, etag } = await readJsonTagged<DailyFile>(`${petPrefix}daily.json`);
+          const next = { items, log: file?.log ?? {}, moods: file?.moods ?? {} };
+          if (await putJsonGuarded(`${petPrefix}daily.json`, next, etag)) {
+            return json(200, { items });
+          }
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
+        }
       }
 
       // ---- user settings ----

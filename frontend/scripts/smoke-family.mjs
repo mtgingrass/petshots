@@ -227,9 +227,11 @@ async function main() {
   check(daily.status === 200, 'GET daily works');
   const names = daily.body.items.map((i) => i.name);
   check(
-    names.includes('Breakfast') && names.includes('Dinner'),
-    'preset items present (Breakfast, Dinner)',
+    names.includes('Breakfast') && names.includes('Dinner') && names.includes('Walk'),
+    'preset items present (Breakfast, Dinner, Walk)',
   );
+  const poop = daily.body.items.find((i) => i.kind === 'counter');
+  check(!!poop && /Poop/.test(poop.name), 'poop counter preset present');
   const medItem = daily.body.items.find((i) => i.id.startsWith('med:'));
   check(!!medItem && medItem.name === 'Heartworm prevention', 'due med appears on the daily list');
   const badDate = await api(owner, 'GET', `/pets/${pet.id}/daily?date=1999-01-01`);
@@ -271,10 +273,22 @@ async function main() {
   const hw2 = medsNow.body.meds.find((m) => `med:${m.id}` === medItem.id);
   check(hw2.nextDue === today, 'med uncheck restores the prior schedule');
 
+  // Counter semantics: increments tally with last-actor attribution; a
+  // decrement restores the previous increment's attribution.
+  const c1 = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: poop.id, checked: true });
+  check(c1.body.checks[poop.id]?.count === 1 && c1.body.checks[poop.id]?.by === ownerEmail,
+    'counter +1 by owner (count 1)');
+  const c2 = await api(member, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: poop.id, checked: true });
+  check(c2.body.checks[poop.id]?.count === 2 && c2.body.checks[poop.id]?.by === memberEmail,
+    'counter +1 by member (count 2, last actor shown)');
+  const c3 = await api(member, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: poop.id, checked: false });
+  check(c3.body.checks[poop.id]?.count === 1 && c3.body.checks[poop.id]?.by === ownerEmail,
+    'counter -1 restores prior count + attribution');
+
   const putItems = await api(owner, 'PUT', `/pets/${pet.id}/daily/items`, {
     items: [...daily.body.items.filter((i) => !i.id.startsWith('med:')), { name: 'Evening walk' }],
   });
-  check(putItems.status === 200 && putItems.body.items.length === 3, 'owner adds a custom item');
+  check(putItems.status === 200 && putItems.body.items.length === 5, 'owner adds a custom item');
   daily = await api(member, 'GET', `/pets/${pet.id}/daily?date=${today}`);
   check(daily.body.items.some((i) => i.name === 'Evening walk'), 'member sees the new item');
   check(daily.body.checks[breakfast.id]?.by === ownerEmail, 'attribution survives the items edit');

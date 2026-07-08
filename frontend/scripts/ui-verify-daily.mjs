@@ -57,16 +57,30 @@ async function main() {
   await page.waitForURL('**/dashboard', { timeout: 20000 });
   await page.waitForTimeout(1200);
 
-  await page.click('text=Clover');
-  await page.waitForSelector('.tab-bar', { timeout: 15000 });
-  await page.click('.tab-bar__tab:has-text("Daily")');
+  // Click the pet PIN, not `text=Clover` — the med-due notice strip also
+  // contains the pet name and deep-links to the Meds tab.
+  await page.click('.pet-pin:has-text("Clover")');
+  // Daily is the DEFAULT tab — no tab click needed.
   await page.waitForSelector('.daily', { timeout: 15000 });
+  check(true, 'pet detail lands on the Daily tab');
   check(await page.locator('.daily-item__name', { hasText: 'Breakfast' }).isVisible(), 'Breakfast preset renders');
+  check(await page.locator('.daily-item__name', { hasText: 'Walk' }).first().isVisible(), 'Walk preset renders');
   check(await page.locator('.daily-item__name', { hasText: 'Heartworm' }).isVisible(), 'due med appears on the list');
 
+  const poopRow = page.locator('.daily-item', { hasText: 'Poop' });
+  check(await poopRow.locator('.daily-item__countpill').isVisible(), 'poop counter row renders');
+  await poopRow.locator('button:has-text("+")').click();
+  await page.waitForFunction(
+    () => document.querySelector('.daily-item__countpill')?.textContent === '1',
+    { timeout: 10000 },
+  );
+  check(true, 'counter increments to 1');
+  check(await poopRow.locator('.daily-item__who').isVisible(), 'counter shows last actor');
+
   await page.locator('.daily-item', { hasText: 'Breakfast' }).locator('.daily-item__check').click();
-  await page.waitForSelector('.daily-item--done', { timeout: 10000 });
-  check(await page.locator('.daily-item--done .daily-item__who').first().isVisible(), 'check-off shows who + when');
+  const breakfastDone = page.locator('.daily-item--done', { hasText: 'Breakfast' });
+  await breakfastDone.waitFor({ timeout: 10000 });
+  check(await breakfastDone.locator('.daily-item__who').isVisible(), 'check-off shows who + when');
 
   await page.click('.daily__mood-btn[title="Good"]');
   await page.waitForSelector('.daily__mood-btn--active', { timeout: 10000 });
@@ -75,8 +89,7 @@ async function main() {
 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
-  await page.click('text=Clover');
-  await page.click('.tab-bar__tab:has-text("Daily")');
+  await page.click('.pet-pin:has-text("Clover")');
   await page.waitForSelector('.daily', { timeout: 15000 });
   check(await page.locator('.daily-item--done', { hasText: 'Breakfast' }).isVisible().catch(() => false), 'check persists across reload');
   check(await page.locator('.daily__mood-btn--active').isVisible().catch(() => false), 'mood persists across reload');

@@ -136,10 +136,12 @@ export interface DailyItem {
   id: string; // med rows use "med:{medId}" and derive from the Meds tab
   name: string;
   med?: boolean;
+  kind?: 'check' | 'counter'; // counters tally repeatable events (poops, walks)
 }
 export interface DailyCheckInfo {
-  by: string; // email of whoever checked it, server-stamped
+  by: string; // email of whoever checked it, server-stamped (counters: last increment)
   at: string; // ISO timestamp
+  count?: number; // counter rows only
 }
 export interface DailyMoodInfo {
   value: number; // 1 (rough) .. 5 (great)
@@ -185,7 +187,7 @@ export function setDailyMood(
 
 export function saveDailyItems(
   petId: string,
-  items: { id?: string; name: string }[],
+  items: { id?: string; name: string; kind?: 'check' | 'counter' }[],
 ): Promise<{ items: DailyItem[] }> {
   return request('PUT', `/pets/${petId}/daily/items`, { items });
 }

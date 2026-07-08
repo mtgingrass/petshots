@@ -15,6 +15,7 @@ import {
   uploadForAnalysis,
   analyzeUpload,
   commitUpload,
+  createManualRecords,
   listMeds,
   saveMeds,
   createPassport,
@@ -34,6 +35,7 @@ import {
   type Extraction,
   type CommitRecord,
   type ProfilePatch,
+  type DuplicateInfo,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import {
@@ -48,6 +50,10 @@ import { SiteFooter } from '../components/SiteFooter';
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 const ALLOWED_EXTS = ['pdf', ...IMAGE_EXTS];
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+// Mirror the server's paid-tier caps for fine-print disclosure.
+// Update if PAID_MAX_* env vars change in api-stack.ts.
+const PAID_PLAN_LIMITS = { maxPets: 10, maxDocs: 999, maxMeds: 20 };
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024; // 5 MB
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const DUE_SOON_DAYS = 30;
@@ -135,20 +141,35 @@ function speciesEmoji(species: string): string {
   return '🐾';
 }
 
-// Worst-case status across a pet's full doc list — for the overview summary card.
-function petOverallStatus(docs: Doc[]): Status {
-  return docs.reduce<Status>((worst, doc) => {
+// Meds a pet is actively tracking (dismissed = kept on record, never "due").
+function trackedMeds(meds: Med[] | undefined): Med[] {
+  return (meds ?? []).filter((m) => m.dismissed !== true);
+}
+
+// Worst-case status across a pet's docs AND meds — drives the overview pin ring.
+function petOverallStatus(docs: Doc[], meds?: Med[]): Status {
+  let worst = docs.reduce<Status>((w, doc) => {
     const s = statusOf(doc.expiry);
-    return STATUS_RANK[s] < STATUS_RANK[worst] ? s : worst;
+    return STATUS_RANK[s] < STATUS_RANK[w] ? s : w;
   }, 'none');
+  for (const med of trackedMeds(meds)) {
+    const s = medStatus(med.nextDue).status;
+    if (STATUS_RANK[s] < STATUS_RANK[worst]) worst = s;
+  }
+  return worst;
 }
 
 // Compact status that fits under a pet pin without truncating.
-function petPinStatus(docs: Doc[]): string {
-  if (docs.length === 0) return 'No records yet';
-  const overdue = docs.filter((d) => statusOf(d.expiry) === 'overdue').length;
+function petPinStatus(docs: Doc[], meds?: Med[]): string {
+  const tracked = trackedMeds(meds);
+  if (docs.length === 0 && tracked.length === 0) return 'No records yet';
+  const overdue =
+    docs.filter((d) => statusOf(d.expiry) === 'overdue').length +
+    tracked.filter((m) => medStatus(m.nextDue).status === 'overdue').length;
   if (overdue > 0) return `${overdue} overdue`;
-  const dueSoon = docs.filter((d) => statusOf(d.expiry) === 'due-soon').length;
+  const dueSoon =
+    docs.filter((d) => statusOf(d.expiry) === 'due-soon').length +
+    tracked.filter((m) => medStatus(m.nextDue).status === 'due-soon').length;
   if (dueSoon > 0) return `${dueSoon} due soon`;
   return 'All current';
 }
@@ -195,10 +216,11 @@ type EditView =
   | {
       type: 'review-extraction';
       petId: string;
-      uploadId: string;
+      uploadId: string | null; // null for manual entry (no file)
       fileName: string;
       extraction: Extraction | null;
       aiNote?: string;
+      duplicateOf?: DuplicateInfo; // byte-identical to this existing record
     };
 
 // ---- main component ----
@@ -213,6 +235,7 @@ export function Dashboard() {
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
   const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
+  const [allMeds, setAllMeds] = useState<Record<string, Med[]>>({});
   const [allDocsLoading, setAllDocsLoading] = useState(false);
   const [editView, setEditView] = useState<EditView>({ type: 'list' });
   const [error, setError] = useState<string | null>(null);
@@ -272,14 +295,22 @@ export function Dashboard() {
   const loadAllDocs = useCallback(async (petList: Pet[]) => {
     if (petList.length === 0) {
       setAllDocs({});
+      setAllMeds({});
       return;
     }
     setAllDocsLoading(true);
     try {
-      const pairs = await Promise.all(
-        petList.map((p) => listDocs(p.id).then((r) => [p.id, sortDocs(r.docs)] as const)),
-      );
-      setAllDocs(Object.fromEntries(pairs));
+      // Meds ride along so the overview pins/notices can reflect med status too.
+      const [docPairs, medPairs] = await Promise.all([
+        Promise.all(
+          petList.map((p) => listDocs(p.id).then((r) => [p.id, sortDocs(r.docs)] as const)),
+        ),
+        Promise.all(
+          petList.map((p) => listMeds(p.id).then((r) => [p.id, r.meds] as const).catch(() => [p.id, []] as const)),
+        ),
+      ]);
+      setAllDocs(Object.fromEntries(docPairs));
+      setAllMeds(Object.fromEntries(medPairs));
     } catch {
       // non-fatal — overview cards show without status
     } finally {
@@ -398,12 +429,25 @@ export function Dashboard() {
               ← Dashboard
             </button>
           )}
-          <ProfileMenu
-            email={email ?? ''}
-            onSettings={() => setDashView({ type: 'settings' })}
-            onChangePassword={() => setDashView({ type: 'change-password' })}
-            onLogout={handleLogout}
-          />
+          <div className="dashboard-header__right">
+            <button
+              className="btn btn--icon theme-btn"
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              onClick={() => {
+                const next: Theme = theme === 'dark' ? 'light' : 'dark';
+                applyTheme(next);
+                setTheme(next);
+              }}
+            >
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
+            <ProfileMenu
+              email={email ?? ''}
+              onSettings={() => setDashView({ type: 'settings' })}
+              onChangePassword={() => setDashView({ type: 'change-password' })}
+              onLogout={handleLogout}
+            />
+          </div>
         </header>
 
         {pendingDelete && (
@@ -525,6 +569,7 @@ export function Dashboard() {
               fileName={editView.fileName}
               extraction={editView.extraction}
               aiNote={editView.aiNote}
+              duplicateOf={editView.duplicateOf}
               onDone={async (message, profileApplied) => {
                 setEditView({ type: 'list' });
                 await loadPetDocs(detailPet.id);
@@ -538,13 +583,17 @@ export function Dashboard() {
             <PetDetailScreen
               pet={detailPet}
               docs={detailDocs}
+              meds={allMeds[detailPet.id]}
+              onMedsChanged={(meds) =>
+                setAllMeds((prev) => ({ ...prev, [detailPet.id]: meds }))
+              }
               limits={limits}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPresent={() => setPresenting(true)}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
-              onReviewExtraction={(uploadId, fileName, extraction, aiNote) =>
+              onReviewExtraction={(uploadId, fileName, extraction, aiNote, duplicateOf) =>
                 setEditView({
                   type: 'review-extraction',
                   petId: detailPet.id,
@@ -552,6 +601,7 @@ export function Dashboard() {
                   fileName,
                   extraction,
                   aiNote,
+                  duplicateOf,
                 })
               }
               onDocsChanged={() => loadPetDocs(detailPet.id)}
@@ -577,6 +627,7 @@ export function Dashboard() {
             <NoticeStrip
               pets={pets}
               allDocs={allDocs}
+              allMeds={allMeds}
               onNavigateToPet={(petId) => setDashView({ type: 'detail', petId })}
             />
             <h2 className="section-title">Your Pets</h2>
@@ -586,6 +637,7 @@ export function Dashboard() {
                   key={pet.id}
                   pet={pet}
                   docs={allDocs[pet.id]}
+                  meds={allMeds[pet.id]}
                   docsLoading={allDocsLoading}
                   onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
                 />
@@ -600,7 +652,23 @@ export function Dashboard() {
                 </button>
               )}
             </div>
-            {pets.length >= limits.maxPets && (
+            {pets.length > limits.maxPets ? (
+              // Over the cap (downgraded/lapsed plan): softer framing — their
+              // data is intact, some pets just stopped accepting new records.
+              <p className="pet-pins__limit">
+                Your plan includes {limits.maxPets} pets, so{' '}
+                {pets.length - limits.maxPets === 1
+                  ? 'one of your pets is'
+                  : `${pets.length - limits.maxPets} of your pets are`}{' '}
+                read-only — everything stays viewable.{' '}
+                <button
+                  className="btn btn--link"
+                  onClick={() => setDashView({ type: 'settings' })}
+                >
+                  Upgrade to unlock →
+                </button>
+              </p>
+            ) : pets.length === limits.maxPets ? (
               <p className="pet-pins__limit">
                 You're at the {limits.maxPets}-pet limit.{' '}
                 {limits.plan === 'free' ? (
@@ -614,7 +682,16 @@ export function Dashboard() {
                   'Remove a pet to add another.'
                 )}
               </p>
-            )}
+            ) : null}
+            <OnboardingChecklist
+              pets={pets}
+              allDocs={allDocs}
+              onAddPet={() => setDashView({ type: 'add-pet' })}
+              onScanRecord={() =>
+                setDashView({ type: 'detail', petId: pets[0].id })
+              }
+              onReminders={() => setDashView({ type: 'settings' })}
+            />
           </>
         )}
       </main>
@@ -708,15 +785,17 @@ function ProfileMenu({
 function NoticeStrip({
   pets,
   allDocs,
+  allMeds,
   onNavigateToPet,
 }: {
   pets: Pet[];
   allDocs: Record<string, Doc[]>;
+  allMeds: Record<string, Med[]>;
   onNavigateToPet: (petId: string) => void;
 }) {
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
 
-  const visible = computeNotices(pets, allDocs)
+  const visible = computeNotices(pets, allDocs, allMeds)
     .filter((n) => !isDismissed(n) && !dismissedIds.has(n.id))
     .slice(0, MAX_NOTICES);
 
@@ -752,9 +831,9 @@ function NoticeCard({
 }) {
   const typeClass = notice.type.startsWith('birthday')
     ? 'birthday'
-    : notice.type === 'overdue'
+    : notice.type === 'overdue' || notice.type === 'med-overdue'
       ? 'overdue'
-      : notice.type === 'duesoon-critical'
+      : notice.type === 'duesoon-critical' || notice.type === 'med-due'
         ? 'critical'
         : notice.type === 'duesoon-warning'
           ? 'warning'
@@ -782,6 +861,135 @@ function NoticeCard({
   );
 }
 
+// ---- onboarding checklist ----
+
+// Dismissible "Get set up" card for new accounts. Items tick automatically
+// from real state (except Add-to-Home-Screen, which iOS can't report — that
+// one checks off when tapped). Hidden forever once dismissed or complete.
+const ONBOARDING_DISMISSED_KEY = 'petshots.onboarding.dismissed';
+const ONBOARDING_HOMESCREEN_KEY = 'petshots.onboarding.homescreen';
+
+function isStandaloneDisplay(): boolean {
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (navigator as { standalone?: boolean }).standalone === true
+  );
+}
+
+function OnboardingChecklist({
+  pets,
+  allDocs,
+  onAddPet,
+  onScanRecord,
+  onReminders,
+}: {
+  pets: Pet[];
+  allDocs: Record<string, Doc[]>;
+  onAddPet: () => void;
+  onScanRecord: () => void;
+  onReminders: () => void;
+}) {
+  const [dismissed, setDismissed] = useState(
+    () => localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1',
+  );
+  const [homeScreenSeen, setHomeScreenSeen] = useState(
+    () => localStorage.getItem(ONBOARDING_HOMESCREEN_KEY) === '1',
+  );
+  const [showHomeSteps, setShowHomeSteps] = useState(false);
+  const [remindersOn, setRemindersOn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (dismissed) return;
+    let live = true;
+    getSettings()
+      .then((s) => { if (live) setRemindersOn(s.remindersEnabled === true); })
+      .catch(() => { if (live) setRemindersOn(false); });
+    return () => { live = false; };
+  }, [dismissed]);
+
+  if (dismissed) return null;
+
+  const isMobile = /iphone|ipad|ipod|android/i.test(navigator.userAgent);
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const showHomeItem = isMobile && !isStandaloneDisplay();
+
+  const items: {
+    key: string;
+    label: string;
+    done: boolean;
+    onGo: () => void;
+  }[] = [
+    { key: 'pet', label: 'Add your pet', done: pets.length > 0, onGo: onAddPet },
+    {
+      key: 'record',
+      label: 'Scan your first record',
+      done: Object.values(allDocs).some((docs) => docs.length > 0),
+      onGo: onScanRecord,
+    },
+    {
+      key: 'reminders',
+      label: 'Turn on vaccine reminders',
+      done: remindersOn === true,
+      onGo: onReminders,
+    },
+    ...(showHomeItem
+      ? [{
+          key: 'homescreen',
+          label: 'Add Petshots to your home screen',
+          done: homeScreenSeen,
+          onGo: () => {
+            setShowHomeSteps((v) => !v);
+            localStorage.setItem(ONBOARDING_HOMESCREEN_KEY, '1');
+            setHomeScreenSeen(true);
+          },
+        }]
+      : []),
+  ];
+
+  // Everything done (and the settings fetch has resolved) -> nothing to teach.
+  if (remindersOn !== null && items.every((i) => i.done)) return null;
+
+  function handleDismiss() {
+    localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
+    setDismissed(true);
+  }
+
+  return (
+    <section className="card onboarding" aria-label="Getting started checklist">
+      <div className="onboarding__header">
+        <h2 className="card__title">Get set up</h2>
+        <button className="notice-card__dismiss" onClick={handleDismiss} aria-label="Dismiss checklist">
+          ✕
+        </button>
+      </div>
+      <ul className="onboarding__list">
+        {items.map((item) => (
+          <li key={item.key}>
+            <button
+              className={`onboarding__item${item.done ? ' onboarding__item--done' : ''}`}
+              onClick={item.onGo}
+              disabled={item.done && item.key !== 'homescreen'}
+            >
+              <span className="onboarding__check" aria-hidden="true">
+                {item.done ? '✓' : '○'}
+              </span>
+              <span>{item.label}</span>
+            </button>
+            {item.key === 'homescreen' && showHomeSteps && (
+              <p className="subtle onboarding__steps">
+                {isIos
+                  ? 'In Safari: tap the Share button, scroll down, then tap "Add to Home Screen".'
+                  : 'In Chrome: tap the ⋮ menu, then "Add to Home screen".'}{' '}
+                Petshots opens like an app — records ready at the door.
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // ---- pet avatar ----
 
 function PetAvatar({ pet, size = 36 }: { pet: Pet; size?: number }) {
@@ -801,16 +1009,18 @@ function PetAvatar({ pet, size = 36 }: { pet: Pet; size?: number }) {
 function PetPin({
   pet,
   docs,
+  meds,
   docsLoading,
   onSelect,
 }: {
   pet: Pet;
   docs: Doc[] | undefined;
+  meds: Med[] | undefined;
   docsLoading: boolean;
   onSelect: () => void;
 }) {
-  const status = docs ? petOverallStatus(docs) : 'none';
-  const subLine = docsLoading && !docs ? 'Loading…' : petPinStatus(docs ?? []);
+  const status = docs ? petOverallStatus(docs, meds) : 'none';
+  const subLine = docsLoading && !docs ? 'Loading…' : petPinStatus(docs ?? [], meds);
 
   return (
     <button
@@ -992,6 +1202,8 @@ function DashboardSkeleton() {
 function PetDetailScreen({
   pet,
   docs,
+  meds,
+  onMedsChanged,
   limits,
   onEditPet,
   onPresent,
@@ -1007,6 +1219,8 @@ function PetDetailScreen({
 }: {
   pet: Pet;
   docs: Doc[];
+  meds: Med[] | undefined;
+  onMedsChanged: (meds: Med[]) => void;
   limits: Limits;
   onEditPet: () => void;
   onPresent: () => void;
@@ -1014,10 +1228,11 @@ function PetDetailScreen({
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onReviewExtraction: (
-    uploadId: string,
+    uploadId: string | null,
     fileName: string,
     extraction: Extraction | null,
     aiNote?: string,
+    duplicateOf?: DuplicateInfo,
   ) => void;
   onDocsChanged: () => Promise<void>;
   onPassportChanged: () => void;
@@ -1025,8 +1240,12 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'share'>('records');
+  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'passport'>('records');
   const [showPhoto, setShowPhoto] = useState(false);
+  // Count on the Meds tab: meds needing action right now (due/overdue).
+  const medsDue = trackedMeds(meds).filter(
+    (m) => medStatus(m.nextDue).status !== 'current',
+  ).length;
 
   return (
     <div className="screen-view">
@@ -1035,7 +1254,7 @@ function PetDetailScreen({
       <nav className="screen-nav">
         {tab === 'records' && docs.length > 0 ? (
           <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
-            ▶ Present
+            ▶ Present Rabies Shots
           </button>
         ) : (
           <span />
@@ -1089,6 +1308,7 @@ function PetDetailScreen({
             onClick={() => setTab('meds')}
           >
             Meds
+            {medsDue > 0 && <span className="tab-badge">{medsDue}</span>}
           </button>
           <button
             className={`tab-bar__tab${tab === 'profile' ? ' tab-bar__tab--active' : ''}`}
@@ -1097,10 +1317,10 @@ function PetDetailScreen({
             Profile
           </button>
           <button
-            className={`tab-bar__tab${tab === 'share' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('share')}
+            className={`tab-bar__tab${tab === 'passport' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => setTab('passport')}
           >
-            Share{pet.passportToken ? ' ✓' : ''}
+            Passport{pet.passportToken ? ' ✓' : ''}
           </button>
         </div>
 
@@ -1129,11 +1349,12 @@ function PetDetailScreen({
             onUpgrade={onUpgrade}
             onError={onError}
             onNotice={onNotice}
+            onMedsChanged={onMedsChanged}
           />
         ) : tab === 'profile' ? (
           <ProfileSection pet={pet} onEdit={onEditProfile} />
         ) : (
-          <ShareTabSection
+          <PassportTabSection
             pet={pet}
             onPassportChanged={onPassportChanged}
             onNotice={onNotice}
@@ -1207,10 +1428,11 @@ function DocsSection({
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onReviewExtraction: (
-    uploadId: string,
+    uploadId: string | null,
     fileName: string,
     extraction: Extraction | null,
     aiNote?: string,
+    duplicateOf?: DuplicateInfo,
   ) => void;
 }) {
   // Upload flow: pick file -> temp upload -> Claude reads it -> review screen.
@@ -1252,11 +1474,17 @@ function DocsSection({
     setUploadId(id);
     setPhase('analyzing');
     try {
-      const { extraction } = await analyzeUpload(petId, id);
+      const { extraction, duplicate } = await analyzeUpload(petId, id);
       if (handedOffRef.current) return; // user already chose manual entry
       handedOffRef.current = true;
       setPhase('idle');
-      onReviewExtraction(id, file.name, extraction);
+      if (duplicate) {
+        // Byte-identical to an existing record — no extraction was run. The
+        // review screen leads with the warning and a prominent Cancel.
+        onReviewExtraction(id, file.name, null, undefined, duplicate);
+        return;
+      }
+      onReviewExtraction(id, file.name, extraction ?? null);
     } catch (err) {
       if (handedOffRef.current) return;
       handedOffRef.current = true;
@@ -1352,6 +1580,13 @@ function DocsSection({
           />
           <button className="btn btn--add" onClick={() => fileRef.current?.click()}>
             + Add record
+          </button>
+          <button
+            className="btn btn--link"
+            type="button"
+            onClick={() => onReviewExtraction(null, '', null)}
+          >
+            or add manually
           </button>
           <p className="subtle ai-hint">
             Pick a photo or PDF — we'll read the vaccine names and dates for you.
@@ -1537,14 +1772,16 @@ function DocDetailScreen({
           </div>
         )}
 
-        <a
-          className="btn btn--primary btn--lg doc-detail__open"
-          href={doc.url}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open certificate ↗
-        </a>
+        {doc.filename !== '_manual' && (
+          <a
+            className="btn btn--primary btn--lg doc-detail__open"
+            href={doc.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open certificate ↗
+          </a>
+        )}
 
       </div>
     </div>
@@ -1661,16 +1898,22 @@ const VACCINE_CADENCES: { match: RegExp; label: string; options: { text: string;
   { match: /felv|feline.?leukemia/i, label: 'FeLV', options: [{ text: '1 year', months: 12 }] },
 ];
 
-interface ReviewRow {
+// Vaccines are grouped by shared expiry date on the review screen.
+// Group-level fields (expiry, given, reminder) apply to all rows in the group.
+interface ReviewGroupRow {
   key: string;
   include: boolean;
   label: string;
-  given: string;
+}
+
+interface ReviewGroup {
+  id: string;
   expiry: string;
+  given: string;
   remindersEnabled: boolean;
-  // Why the expiry field was pre-filled without a printed date, e.g. "1 year"
-  // from the document — shown as a note under the field.
-  expiryFrom?: string;
+  validityHint: string;   // e.g. "1 year" or "3 months", from printed duration
+  expiryFrom?: string;    // "Calculated from..." note for suggested expiry
+  rows: ReviewGroupRow[];
 }
 
 interface ProfileCandidate {
@@ -1711,6 +1954,7 @@ function ReviewExtractionScreen({
   fileName,
   extraction,
   aiNote,
+  duplicateOf,
   onDone,
   onCancel,
   onError,
@@ -1718,10 +1962,11 @@ function ReviewExtractionScreen({
   pet: Pet;
   docs: Doc[];
   maxDocs: number;
-  uploadId: string;
+  uploadId: string | null; // null for manual entry (no file uploaded)
   fileName: string;
   extraction: Extraction | null;
   aiNote?: string;
+  duplicateOf?: DuplicateInfo;
   onDone: (message: string, profileApplied: boolean) => Promise<void>;
   onCancel: () => void;
   onError: (msg: string | null) => void;
@@ -1729,35 +1974,63 @@ function ReviewExtractionScreen({
   const remaining = Math.max(0, maxDocs - docs.length);
   const vaccines = extraction?.vaccines ?? [];
 
-  const [rows, setRows] = useState<ReviewRow[]>(() =>
-    vaccines.length === 0
-      ? [{ key: 'r0', include: true, label: '', given: '', expiry: '', remindersEnabled: true }]
-      : vaccines.map((v, i) => ({
-          key: `r${i}`,
-          // Rows past the plan's remaining slots start deselected, never dropped.
-          include: i < remaining,
-          label: v.name,
-          given: v.dateGiven ?? '',
-          // A printed duration ("1 year") + given date is grounded in the
-          // document, so pre-fill the computed expiry with a note; a bare
-          // known-cadence guess is only offered as chips below.
-          expiry: v.expiry ?? v.suggestedExpiry ?? '',
-          expiryFrom:
-            !v.expiry && v.suggestedExpiry && v.validityText
-              ? `Calculated from “${v.validityText.trim()}” printed on the document — double-check it.`
-              : undefined,
-          remindersEnabled: true,
-        })),
-  );
+  // Build groups: vaccines sharing the same expiry date are grouped together
+  // so they share one date pair, one reminder toggle, and one "Skip" per row.
+  const [groups, setGroups] = useState<ReviewGroup[]>(() => {
+    if (vaccines.length === 0) {
+      // Manual entry: single flat group, no header shown
+      return [{
+        id: 'g0', expiry: '', given: '', remindersEnabled: true,
+        validityHint: '', rows: [{ key: 'r0', include: true, label: '' }],
+      }];
+    }
+
+    // Cluster by the expiry date (suggestedExpiry if no printed expiry)
+    const buckets = new Map<string, typeof vaccines>();
+    vaccines.forEach(v => {
+      const k = v.expiry ?? v.suggestedExpiry ?? '';
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k)!.push(v);
+    });
+
+    let ri = 0;
+    const gs: ReviewGroup[] = [];
+    let gi = 0;
+    for (const [expiryKey, vax] of buckets) {
+      const vt = vax[0].validityText?.trim() ?? '';
+      const allSameVt = vax.every(v => (v.validityText?.trim() ?? '') === vt);
+      gs.push({
+        id: `g${gi++}`,
+        expiry: expiryKey,
+        given: vax[0].dateGiven ?? '',
+        remindersEnabled: true,
+        validityHint: allSameVt ? vt : '',
+        expiryFrom: !vax[0].expiry && vax[0].suggestedExpiry && vax[0].validityText
+          ? `Calculated from "${vax[0].validityText.trim()}" printed on the document — double-check it.`
+          : undefined,
+        rows: vax.map(v => ({ key: `r${ri++}`, include: ri - 1 < remaining, label: v.name })),
+      });
+    }
+
+    // Sort: dated groups ascending, no-expiry at end
+    gs.sort((a, b) => {
+      if (!a.expiry) return 1;
+      if (!b.expiry) return -1;
+      return a.expiry.localeCompare(b.expiry);
+    });
+    return gs;
+  });
+
   const [candidates] = useState<ProfileCandidate[]>(() => profileCandidates(pet, extraction));
   const [applyProfile, setApplyProfile] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(candidates.map((c) => [c.field, !c.current])),
   );
   const [busy, setBusy] = useState(false);
 
-  const included = rows.filter((r) => r.include);
+  const allRows = groups.flatMap(g => g.rows);
+  const included = allRows.filter(r => r.include);
   const overBudget = included.length > remaining;
-  const missingLabel = included.some((r) => !r.label.trim());
+  const missingLabel = included.some(r => !r.label.trim());
 
   const cadenceFor = (label: string) => VACCINE_CADENCES.find((c) => c.match.test(label));
 
@@ -1768,17 +2041,24 @@ function ReviewExtractionScreen({
     return existingLabels.some((e) => e === l || e.includes(l) || l.includes(e));
   };
 
-  const setRow = (key: string, patch: Partial<ReviewRow>) =>
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const setGroup = (id: string, patch: Partial<ReviewGroup>) =>
+    setGroups(prev => prev.map(g => g.id === id ? { ...g, ...patch } : g));
+
+  const setGroupRow = (groupId: string, rowKey: string, patch: Partial<ReviewGroupRow>) =>
+    setGroups(prev => prev.map(g => g.id === groupId ? {
+      ...g, rows: g.rows.map(r => r.key === rowKey ? { ...r, ...patch } : r),
+    } : g));
 
   async function handleSave() {
     if (included.length === 0 || overBudget || missingLabel) return;
-    const records: CommitRecord[] = included.map((r) => ({
-      label: r.label.trim(),
-      given: r.given || undefined,
-      expiry: r.expiry || undefined,
-      remindersEnabled: r.remindersEnabled,
-    }));
+    const records: CommitRecord[] = groups.flatMap(g =>
+      g.rows.filter(r => r.include).map(r => ({
+        label: r.label.trim(),
+        given: g.given || undefined,
+        expiry: g.expiry || undefined,
+        remindersEnabled: g.remindersEnabled,
+      })),
+    );
     const profile: ProfilePatch = {};
     for (const c of candidates) {
       if (applyProfile[c.field]) profile[c.field] = c.value;
@@ -1788,7 +2068,11 @@ function ReviewExtractionScreen({
     setBusy(true);
     onError(null);
     try {
-      await commitUpload(pet.id, uploadId, records, profileApplied ? profile : undefined);
+      if (uploadId) {
+        await commitUpload(pet.id, uploadId, records, profileApplied ? profile : undefined);
+      } else {
+        await createManualRecords(pet.id, records);
+      }
       const noun = records.length === 1 ? 'Record added' : `${records.length} records added`;
       await onDone(profileApplied ? `${noun} · profile updated` : noun, profileApplied);
     } catch (err) {
@@ -1797,7 +2081,14 @@ function ReviewExtractionScreen({
     }
   }
 
-  const intro = aiNote
+  const intro = duplicateOf
+    ? {
+        tone: 'warn' as const,
+        text: `⚠️ This is the exact same file as ${pet.name}'s existing "${duplicateOf.label}" record${
+          duplicateOf.expiry ? ` (expires ${formatDate(duplicateOf.expiry)})` : ''
+        }. You probably don't need to save it again.`,
+      }
+    : aiNote
     ? { tone: 'warn' as const, text: aiNote }
     : extraction && vaccines.length > 0
       ? {
@@ -1815,6 +2106,8 @@ function ReviewExtractionScreen({
               text: "We couldn't find vaccine entries in this document — fill in the details below.",
             }
           : null;
+
+  const isManual = vaccines.length === 0;
 
   return (
     <div className="screen-view">
@@ -1836,112 +2129,143 @@ function ReviewExtractionScreen({
             {vaccines.length > 0 ? `Vaccines found · ${vaccines.length}` : 'New record'}
           </h2>
 
-          {rows.map((row) => (
-            <div className={`review-row${row.include ? '' : ' review-row--off'}`} key={row.key}>
-              {rows.length > 1 && (
-                <label className="checkbox-label review-row__toggle">
-                  <input
-                    type="checkbox"
-                    checked={row.include}
-                    onChange={(e) => setRow(row.key, { include: e.target.checked })}
-                  />
-                  <span>{row.include ? 'Save this record' : 'Skipped'}</span>
+          {isManual ? (
+            // Manual entry: flat form with no group container
+            <div className="review-row">
+              <label>
+                Label
+                <input
+                  value={groups[0].rows[0].label}
+                  onChange={(e) => setGroupRow('g0', 'r0', { label: e.target.value })}
+                  placeholder="e.g. Rabies"
+                />
+              </label>
+              <div className="review-row__dates">
+                <label>
+                  Date given (optional)
+                  <input type="date" value={groups[0].given}
+                    onChange={(e) => setGroup('g0', { given: e.target.value })} />
                 </label>
-              )}
-              {row.include && (
-                <>
-                  <label>
-                    Label
-                    <input
-                      value={row.label}
-                      onChange={(e) => setRow(row.key, { label: e.target.value })}
-                      placeholder="e.g. Rabies"
-                    />
-                  </label>
-                  {isDupe(row.label) && (
-                    <p className="subtle review-row__dupe">
-                      ⚠️ {pet.name} already has a record like this.
-                    </p>
-                  )}
-                  <div className="review-row__dates">
-                    <label>
-                      Date given (optional)
-                      <input
-                        type="date"
-                        value={row.given}
-                        onChange={(e) => setRow(row.key, { given: e.target.value })}
-                      />
-                    </label>
-                    <label>
-                      Expiration date (optional)
-                      <input
-                        type="date"
-                        value={row.expiry}
-                        onChange={(e) => setRow(row.key, { expiry: e.target.value, expiryFrom: undefined })}
-                      />
+                <label>
+                  Expiration date (optional)
+                  <input type="date" value={groups[0].expiry}
+                    onChange={(e) => setGroup('g0', { expiry: e.target.value, expiryFrom: undefined })} />
+                </label>
+              </div>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={groups[0].remindersEnabled}
+                  onChange={(e) => setGroup('g0', { remindersEnabled: e.target.checked })} />
+                <span>Send reminders before this expires</span>
+              </label>
+            </div>
+          ) : (
+            // Grouped form: each card groups vaccines that share an expiry date
+            groups.map(group => {
+              const activeRows = group.rows.filter(r => r.include);
+              const firstActiveLabel = activeRows[0]?.label ?? '';
+              const cadence = !group.expiry && group.given ? cadenceFor(firstActiveLabel) : null;
+
+              return (
+                <div className="review-group" key={group.id}>
+                  <div className="review-group__header">
+                    <div className="review-group__meta">
+                      <div className="review-group__dates">
+                        <label>
+                          {group.expiry ? 'Expires' : 'Expiration date'}
+                          <input type="date" value={group.expiry}
+                            onChange={(e) => setGroup(group.id, { expiry: e.target.value, expiryFrom: undefined })} />
+                        </label>
+                        <label>
+                          Date given
+                          <input type="date" value={group.given}
+                            onChange={(e) => setGroup(group.id, { given: e.target.value })} />
+                        </label>
+                      </div>
+                      {group.validityHint && (
+                        <span className="review-group__hint">{group.validityHint}</span>
+                      )}
+                      {group.expiry && group.expiryFrom && (
+                        <p className="subtle review-row__suggest-note">💡 {group.expiryFrom}</p>
+                      )}
+                      {cadence && activeRows.length === 1 && (
+                        <div className="review-row__chips">
+                          <span className="subtle">
+                            No expiry printed — typical {cadence.label} boosters:
+                          </span>
+                          {cadence.options.map((o) => (
+                            <button key={o.months} type="button" className="preset-chip"
+                              onClick={() => setGroup(group.id, {
+                                expiry: addInterval(group.given, o.months, 'month'),
+                                expiryFrom: `Suggested from a typical ${o.text} booster schedule — not printed on the document.`,
+                              })}
+                            >
+                              + {o.text}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <label className="toggle review-group__reminder" aria-label="Send reminders before this group expires">
+                      <input type="checkbox" checked={group.remindersEnabled}
+                        onChange={(e) => setGroup(group.id, { remindersEnabled: e.target.checked })} />
+                      <span className="toggle__track" />
                     </label>
                   </div>
-                  {row.expiry && row.expiryFrom && (
-                    <p className="subtle review-row__suggest-note">💡 {row.expiryFrom}</p>
-                  )}
-                  {!row.expiry && row.given && cadenceFor(row.label) && (
-                    <div className="review-row__chips">
-                      <span className="subtle">
-                        No expiry on the document — typical {cadenceFor(row.label)!.label} boosters:
-                      </span>
-                      {cadenceFor(row.label)!.options.map((o) => (
-                        <button
-                          key={o.months}
-                          type="button"
-                          className="preset-chip"
-                          onClick={() =>
-                            setRow(row.key, {
-                              expiry: addInterval(row.given, o.months, 'month'),
-                              expiryFrom: `Suggested from a typical ${o.text} booster schedule — not printed on the document.`,
-                            })
-                          }
-                        >
-                          + {o.text}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  <label className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={row.remindersEnabled}
-                      onChange={(e) => setRow(row.key, { remindersEnabled: e.target.checked })}
-                    />
-                    <span>Send reminders before this expires</span>
-                  </label>
-                </>
-              )}
-            </div>
-          ))}
 
-          {rows.length > remaining && (
-            <p className="subtle">
+                  <div className="review-group__rows">
+                    {group.rows.map(row => (
+                      <div className={`review-group__row${row.include ? '' : ' review-group__row--skip'}`} key={row.key}>
+                        {row.include ? (
+                          <>
+                            <input
+                              className="review-group__label-input"
+                              value={row.label}
+                              onChange={(e) => setGroupRow(group.id, row.key, { label: e.target.value })}
+                              placeholder="Vaccine name"
+                            />
+                            {isDupe(row.label) && (
+                              <span className="review-group__dupe">⚠️ already saved</span>
+                            )}
+                            <button type="button" className="review-group__skip btn btn--link"
+                              onClick={() => setGroupRow(group.id, row.key, { include: false })}>
+                              Skip
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="review-group__skipped-label">{row.label || '(unnamed)'}</span>
+                            <button type="button" className="review-group__skip btn btn--link"
+                              onClick={() => setGroupRow(group.id, row.key, { include: true })}>
+                              Undo
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })
+          )}
+
+          {allRows.length > remaining && (
+            <p className="subtle" style={{ marginTop: '0.75rem' }}>
               Your plan has {remaining} record slot{remaining === 1 ? '' : 's'} left for {pet.name}
-              {overBudget ? ` — deselect ${included.length - remaining} to save.` : '.'}
+              {overBudget ? ` — skip ${included.length - remaining} to save.` : '.'}
             </p>
           )}
 
           <button
             type="button"
             className="btn btn--link"
-            onClick={() =>
-              setRows((prev) => [
-                ...prev,
-                {
-                  key: `r${prev.length}-extra`,
-                  include: true,
-                  label: '',
-                  given: '',
-                  expiry: '',
-                  remindersEnabled: true,
-                },
-              ])
-            }
+            onClick={() => {
+              const id = `g-x${Date.now()}`;
+              const key = `r-x${Date.now()}`;
+              setGroups(prev => [...prev, {
+                id, expiry: '', given: '', remindersEnabled: true,
+                validityHint: '', rows: [{ key, include: true, label: '' }],
+              }]);
+            }}
           >
             + Add another record from this document
           </button>
@@ -1961,7 +2285,7 @@ function ReviewExtractionScreen({
                 />
                 <span>
                   <strong>{c.title}:</strong> {c.value}
-                  {c.current && <span className="subtle"> · currently “{c.current}”</span>}
+                  {c.current && <span className="subtle"> · currently "{c.current}"</span>}
                 </span>
               </label>
             ))}
@@ -1969,19 +2293,27 @@ function ReviewExtractionScreen({
         )}
 
         <div className="actions">
+          {/* Duplicate upload: Cancel is the sane choice, so it gets the emphasis. */}
           <button
-            className="btn btn--primary btn--lg"
+            className={`btn btn--lg${duplicateOf ? '' : ' btn--primary'}`}
             type="button"
             onClick={() => void handleSave()}
             disabled={busy || included.length === 0 || overBudget || missingLabel}
           >
             {busy
               ? 'Saving…'
-              : included.length > 1
-                ? `Save ${included.length} records`
-                : 'Save record'}
+              : duplicateOf
+                ? 'Save anyway'
+                : included.length > 1
+                  ? `Save ${included.length} records`
+                  : 'Save record'}
           </button>
-          <button className="btn" type="button" onClick={onCancel} disabled={busy}>
+          <button
+            className={`btn${duplicateOf ? ' btn--primary btn--lg' : ''}`}
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+          >
             Cancel
           </button>
         </div>
@@ -2049,7 +2381,8 @@ async function ensureReminderEmail(email: string) {
   }
 }
 
-function MedsSummary({ meds }: { meds: Med[] }) {
+function MedsSummary({ meds: allMeds }: { meds: Med[] }) {
+  const meds = trackedMeds(allMeds); // dismissed meds are never "due"
   if (meds.length === 0) return null;
   const overdue = meds.filter((m) => daysUntil(m.nextDue) < 0);
   const dueToday = meds.filter((m) => daysUntil(m.nextDue) === 0);
@@ -2078,6 +2411,7 @@ function MedsSection({
   onUpgrade,
   onError,
   onNotice,
+  onMedsChanged,
 }: {
   petId: string;
   maxMeds: number;
@@ -2085,6 +2419,8 @@ function MedsSection({
   onUpgrade: () => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
+  // Keeps the dashboard-level med cache (overview pins, tab badge) in sync.
+  onMedsChanged?: (meds: Med[]) => void;
 }) {
   const { email } = useAuth();
   const [meds, setMeds] = useState<Med[] | null>(null); // null = loading
@@ -2100,7 +2436,7 @@ function MedsSection({
     setMeds(null);
     setForm({ mode: 'closed' });
     listMeds(petId)
-      .then((r) => { if (live) setMeds(r.meds); })
+      .then((r) => { if (live) { setMeds(r.meds); onMedsChanged?.(r.meds); } })
       .catch((err) => {
         if (live) {
           setMeds([]);
@@ -2120,6 +2456,7 @@ function MedsSection({
     try {
       const res = await saveMeds(petId, next);
       setMeds(res.meds);
+      onMedsChanged?.(res.meds);
       if (next.some((m) => m.remindersEnabled)) void ensureReminderEmail(email ?? '');
       if (successNotice) onNotice(successNotice);
       return true;
@@ -2150,6 +2487,23 @@ function MedsSection({
 
   function handleDelete(med: Med) {
     void persist((meds ?? []).filter((m) => m.id !== med.id), `${med.name} removed`);
+  }
+
+  // "Stop tracking" keeps the med on record but ends all due-date nagging
+  // (banners, overview status, passport, email). Resuming leaves reminders
+  // off so the user re-opts-in deliberately.
+  function handleDismiss(med: Med, dismissed: boolean) {
+    const next = (meds ?? []).map((m) =>
+      m.id === med.id
+        ? { ...m, dismissed: dismissed || undefined, remindersEnabled: dismissed ? false : m.remindersEnabled }
+        : m,
+    );
+    void persist(
+      next,
+      dismissed
+        ? `${med.name} is no longer tracked — it stays on record`
+        : `Tracking resumed for ${med.name}`,
+    );
   }
 
   async function handleFormSave(med: Med) {
@@ -2200,6 +2554,7 @@ function MedsSection({
                 onToggleReminders={(enabled) => handleToggleReminders(med, enabled)}
                 onEdit={() => setForm({ mode: 'edit', med })}
                 onDelete={() => handleDelete(med)}
+                onDismiss={(dismissed) => handleDismiss(med, dismissed)}
               />
             ))}
           </ul>
@@ -2258,6 +2613,7 @@ function MedItem({
   onToggleReminders,
   onEdit,
   onDelete,
+  onDismiss,
 }: {
   med: Med;
   busy: boolean;
@@ -2265,11 +2621,15 @@ function MedItem({
   onToggleReminders: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
+  onDismiss: (dismissed: boolean) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const { status, pill } = medStatus(med.nextDue);
+  const dismissed = med.dismissed === true;
+  const { status, pill } = dismissed
+    ? { status: 'none' as Status, pill: 'Not tracked' }
+    : medStatus(med.nextDue);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -2296,7 +2656,7 @@ function MedItem({
   }, [menuOpen]);
 
   return (
-    <li className="med-item">
+    <li className={`med-item${dismissed ? ' med-item--dismissed' : ''}`}>
       <div className="med-item__row">
         <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
         <span className="doc-meta">
@@ -2305,8 +2665,11 @@ function MedItem({
             {pill && <span className={`status status--${status}`}>{pill}</span>}
           </span>
           <span className="subtle">
-            {cadenceLabel(med.interval, med.unit)} · Next due {formatDate(med.nextDue)}
-            {med.lastGiven ? ` · Last given ${formatDate(med.lastGiven)}` : ''}
+            {dismissed
+              ? 'Kept for your records — no due-date tracking'
+              : `${cadenceLabel(med.interval, med.unit)} · Next due ${formatDate(med.nextDue)}${
+                  med.lastGiven ? ` · Last given ${formatDate(med.lastGiven)}` : ''
+                }`}
           </span>
         </span>
         <div className="doc-menu-wrap" ref={menuRef}>
@@ -2323,6 +2686,12 @@ function MedItem({
             <div className="doc-menu" role="menu">
               <button role="menuitem" onClick={() => { setMenuOpen(false); onEdit(); }}>
                 Edit
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => { setMenuOpen(false); onDismiss(!dismissed); }}
+              >
+                {dismissed ? 'Resume tracking' : 'Stop tracking'}
               </button>
               {confirming ? (
                 <button
@@ -2345,25 +2714,27 @@ function MedItem({
           )}
         </div>
       </div>
-      <div className="med-item__actions">
-        <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
-          ✓ Mark as given
-        </button>
-        <label className="med-remind">
-          <span className="med-remind__label subtle">
-            {med.remindersEnabled ? '🔔 Reminders' : '🔕 Reminders'}
-          </span>
-          <span className="toggle toggle--sm" aria-label={`Toggle reminders for ${med.name}`}>
-            <input
-              type="checkbox"
-              checked={med.remindersEnabled}
-              onChange={(e) => onToggleReminders(e.target.checked)}
-              disabled={busy}
-            />
-            <span className="toggle__track" />
-          </span>
-        </label>
-      </div>
+      {!dismissed && (
+        <div className="med-item__actions">
+          <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
+            ✓ Mark as given
+          </button>
+          <label className="med-remind">
+            <span className="med-remind__label subtle">
+              {med.remindersEnabled ? '🔔 Reminders' : '🔕 Reminders'}
+            </span>
+            <span className="toggle toggle--sm" aria-label={`Toggle reminders for ${med.name}`}>
+              <input
+                type="checkbox"
+                checked={med.remindersEnabled}
+                onChange={(e) => onToggleReminders(e.target.checked)}
+                disabled={busy}
+              />
+              <span className="toggle__track" />
+            </span>
+          </label>
+        </div>
+      )}
     </li>
   );
 }
@@ -2556,9 +2927,9 @@ function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
   );
 }
 
-// ---- share / passport tab ----
+// ---- passport tab ----
 
-function ShareTabSection({
+function PassportTabSection({
   pet,
   onPassportChanged,
   onNotice,
@@ -2636,8 +3007,8 @@ function ShareTabSection({
   async function handleShare() {
     if (!passportUrl) return;
     const shareData = {
-      title: `${pet.name}'s vaccine records`,
-      text: `Here are ${pet.name}'s vaccine records from Petshots.`,
+      title: `${pet.name}'s vaccination records`,
+      text: `${pet.name}'s shot records are always up to date — view them anytime with Petshots 🐾`,
       url: passportUrl,
     };
     if (typeof navigator.share === 'function') {
@@ -2685,7 +3056,7 @@ function ShareTabSection({
 
       <div className="share-tab__actions">
         <button className="btn btn--primary" onClick={handleShare}>
-          Share ↗
+          Share passport ↗
         </button>
         <button className="btn" onClick={handleCopy}>
           {copied ? 'Copied!' : 'Copy link'}
@@ -3057,8 +3428,9 @@ function SettingsScreen({
                 <span className="settings-row__label">
                   {limits.plan === 'paid' ? 'Petshots Paid' : 'Free plan'}
                   <span className="subtle settings-row__sub">
-                    {limits.maxPets} pets · {limits.maxDocs} records &amp; {limits.maxMeds} meds
-                    per pet
+                    {limits.maxPets} pets &middot;{' '}
+                    {limits.maxDocs >= 999 ? 'Unlimited*' : limits.maxDocs} records &amp;{' '}
+                    {limits.maxMeds} meds per pet
                   </span>
                 </span>
               </div>
@@ -3081,6 +3453,10 @@ function SettingsScreen({
                     >
                       $49/yr · 2 months free
                     </button>
+                    <p className="subtle plan-fine-print">
+                      Paid plan: {PAID_PLAN_LIMITS.maxPets} pets, up to {PAID_PLAN_LIMITS.maxDocs} records per pet,{' '}
+                      {PAID_PLAN_LIMITS.maxMeds} medications per pet.
+                    </p>
                   </>
                 ) : (
                   <button

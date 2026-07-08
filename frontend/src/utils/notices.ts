@@ -1,4 +1,4 @@
-import type { Pet, Doc } from '../api';
+import type { Pet, Doc, Med } from '../api';
 
 // ---- types ----
 
@@ -7,6 +7,8 @@ export type NoticeType =
   | 'duesoon-critical'
   | 'duesoon-warning'
   | 'duesoon-headsup'
+  | 'med-overdue'
+  | 'med-due'
   | 'birthday-today'
   | 'birthday-soon'
   | 'dob-nudge';
@@ -85,13 +87,45 @@ export function dismissNotice(notice: Notice): void {
 
 // ---- compute ----
 
-export function computeNotices(pets: Pet[], allDocs: Record<string, Doc[]>): Notice[] {
+export function computeNotices(
+  pets: Pet[],
+  allDocs: Record<string, Doc[]>,
+  allMeds: Record<string, Med[]> = {},
+): Notice[] {
   const notices: Notice[] = [];
   const year = new Date().getFullYear();
   let dobNudgeCount = 0; // at most one dob-nudge shown at a time
 
   for (const pet of pets) {
     const docs = allDocs[pet.id] ?? [];
+
+    // --- medications (dismissed = "stop tracking", never surfaces) ---
+    for (const med of allMeds[pet.id] ?? []) {
+      if (med.dismissed === true || !med.nextDue) continue;
+      const days = daysUntil(med.nextDue);
+      if (days < 0) {
+        const when = days === -1 ? 'yesterday' : `${Math.abs(days)} days ago`;
+        notices.push({
+          id: `med-overdue-${med.id}-${med.nextDue}`,
+          type: 'med-overdue',
+          petId: pet.id,
+          petName: pet.name,
+          message: `💊 ${pet.name}'s ${med.name} was due ${when}.`,
+          priority: 0,
+          resetAfterDays: 1,
+        });
+      } else if (days === 0) {
+        notices.push({
+          id: `med-due-${med.id}-${med.nextDue}`,
+          type: 'med-due',
+          petId: pet.id,
+          petName: pet.name,
+          message: `💊 ${pet.name}'s ${med.name} is due today.`,
+          priority: 1,
+          resetAfterDays: 1,
+        });
+      }
+    }
 
     // --- vaccine / record expiry ---
     for (const doc of docs) {

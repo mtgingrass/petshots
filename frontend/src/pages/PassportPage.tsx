@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { fetchPassport, type PassportData } from '../api';
+import { fetchPassport, type PassportData, type PassportMed } from '../api';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 
@@ -65,6 +65,13 @@ function speciesEmoji(species: string): string {
   if (species === 'dog') return '🐶';
   if (species === 'cat') return '🐱';
   return '🐾';
+}
+
+function medCadence(med: PassportMed): string {
+  if (med.interval === 1 && med.unit === 'day') return 'Daily';
+  if (med.interval === 1 && med.unit === 'week') return 'Weekly';
+  if (med.interval === 1 && med.unit === 'month') return 'Monthly';
+  return `Every ${med.interval} ${med.unit}${med.interval !== 1 ? 's' : ''}`;
 }
 
 function profileAge(dob?: string): string | null {
@@ -134,7 +141,7 @@ export function PassportPage() {
     );
   }
 
-  const { pet, docs, expiresAt } = data;
+  const { pet, docs, meds = [], expiresAt } = data;
   const hasProfile = pet.breed || pet.dob || pet.weight || pet.allergies || pet.behavior ||
     pet.vetName || pet.emergencyContact || pet.microchip || pet.fixed !== undefined || pet.notes;
 
@@ -180,6 +187,7 @@ export function PassportPage() {
                         {doc.label} <StatusBadge expiry={doc.expiry} />
                       </span>
                       <span className="subtle">
+                        {doc.given ? `Given ${formatDate(doc.given)} · ` : ''}
                         {doc.expiry
                           ? `${status === 'overdue' ? 'Expired' : 'Expires'} ${formatDate(doc.expiry)}`
                           : 'No expiry date'}
@@ -200,6 +208,27 @@ export function PassportPage() {
           </ul>
         )}
       </section>
+
+      {meds.length > 0 && (
+        <section className="card">
+          <h2 className="card__title">Medications · {meds.length}</h2>
+          <ul className="doc-list">
+            {meds.map((med, i) => (
+              <li key={i} className="doc-item passport-doc-item">
+                <div className="passport-doc-info">
+                  <span className="doc-meta">
+                    <span className="doc-label">💊 {med.name}</span>
+                    <span className="subtle">
+                      {medCadence(med)} · Next due {formatDate(med.nextDue)}
+                      {med.lastGiven ? ` · Last given ${formatDate(med.lastGiven)}` : ''}
+                    </span>
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {hasProfile && (
         <section className="card">

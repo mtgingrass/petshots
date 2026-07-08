@@ -1020,6 +1020,22 @@ a {
   padding: 0;
 }
 
+.dashboard-header__right {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.theme-btn {
+  font-size: 1.1rem;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+
+.theme-btn:hover {
+  opacity: 1;
+}
+
 .profile-menu {
   position: relative;
 }
@@ -1869,6 +1885,12 @@ a {
   padding-top: 0.8rem;
 }
 
+.plan-fine-print {
+  width: 100%;
+  font-size: 0.78rem;
+  margin: 0.1rem 0 0;
+}
+
 .settings-row__label {
   font-size: 0.95rem;
   font-weight: 500;
@@ -2209,17 +2231,12 @@ a {
   border-color: var(--primary);
 }
 
-/* One editable record row on the review screen */
+/* Manual-entry flat row (single record, no AI extraction) */
 .review-row {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.85rem 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.review-row:last-of-type {
-  border-bottom: none;
 }
 
 .review-row label:not(.checkbox-label) {
@@ -2231,22 +2248,14 @@ a {
 }
 
 .review-row input[type='text'],
-.review-row input:not([type]) ,
+.review-row input:not([type]),
 .review-row input[type='date'] {
-  font-size: 16px; /* kills iOS focus-zoom, same as .form inputs */
+  font-size: 16px;
   padding: 0.6rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--input-bg, transparent);
   color: inherit;
-}
-
-.review-row--off {
-  opacity: 0.6;
-}
-
-.review-row__toggle {
-  font-weight: 600;
 }
 
 .review-row__dates {
@@ -2261,9 +2270,129 @@ a {
   }
 }
 
-.review-row__dupe {
-  margin: -0.2rem 0 0;
+/* Grouped review layout — one card per expiry date cluster */
+.review-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+}
+
+.review-group:last-of-type {
+  margin-bottom: 0;
+}
+
+.review-group__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface2, var(--card-bg));
+  border-bottom: 1px solid var(--border);
+}
+
+.review-group__meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.review-group__dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+@media (max-width: 420px) {
+  .review-group__dates {
+    grid-template-columns: 1fr;
+  }
+}
+
+.review-group__dates label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
   font-size: 0.85rem;
+  color: var(--subtle);
+}
+
+.review-group__dates input[type='date'] {
+  font-size: 16px;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg, transparent);
+  color: inherit;
+}
+
+.review-group__hint {
+  font-size: 0.8rem;
+  color: var(--subtle);
+  font-style: italic;
+}
+
+.review-group__reminder {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
+/* Individual label rows inside a group */
+.review-group__rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.review-group__row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-group__row:last-child {
+  border-bottom: none;
+}
+
+.review-group__row--skip {
+  opacity: 0.5;
+}
+
+.review-group__label-input {
+  flex: 1;
+  font-size: 16px;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg, transparent);
+  color: inherit;
+  min-width: 0;
+}
+
+.review-group__skipped-label {
+  flex: 1;
+  font-size: 0.9rem;
+  text-decoration: line-through;
+  color: var(--subtle);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-group__dupe {
+  font-size: 0.8rem;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+.review-group__skip {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding: 0.2rem 0.4rem;
 }
 
 .review-profile__item {
@@ -2285,5 +2414,92 @@ a {
 
 .review-row__suggest-note {
   margin: -0.2rem 0 0;
+  font-size: 0.85rem;
+}
+
+/* ---------- Session 17 additions ---------- */
+
+/* Count badge on the Meds tab: meds due or overdue right now. */
+.tab-badge {
+  display: inline-block;
+  min-width: 1.15rem;
+  margin-left: 0.3rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--overdue);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.15rem;
+  text-align: center;
+  vertical-align: middle;
+}
+
+/* A dismissed ("stop tracking") med stays listed but visually recedes. */
+.med-item--dismissed .doc-label,
+.med-item--dismissed .doc-meta .subtle {
+  opacity: 0.6;
+}
+
+/* Onboarding "Get set up" checklist card */
+.onboarding__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.onboarding__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.onboarding__item {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 0.6rem 0.25rem;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.95rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.onboarding__list li:last-child .onboarding__item {
+  border-bottom: none;
+}
+
+.onboarding__item--done {
+  color: var(--subtle);
+  text-decoration: line-through;
+  cursor: default;
+}
+
+.onboarding__check {
+  flex-shrink: 0;
+  width: 1.3rem;
+  height: 1.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ok-text);
+}
+
+.onboarding__item:not(.onboarding__item--done) .onboarding__check {
+  color: var(--subtle);
+}
+
+.onboarding__steps {
+  margin: 0.15rem 0 0.5rem calc(1.3rem + 0.65rem);
   font-size: 0.85rem;
 }

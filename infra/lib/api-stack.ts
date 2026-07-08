@@ -81,18 +81,18 @@ export class ApiStack extends cdk.Stack {
         // Free-tier caps. A user is paid when users/{sub}/plan.json says so
         // (written by billing tooling/operator only); paid users get PAID_*.
         MAX_PETS: '2',
-        MAX_DOCS: '4',
+        MAX_DOCS: '8',
         MAX_MEDS: '4', // medications per pet
         PAID_MAX_PETS: '10',
-        PAID_MAX_DOCS: '20',
+        PAID_MAX_DOCS: '999',
         PAID_MAX_MEDS: '20',
 
         MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
 
-        // AI document extraction (Bedrock, Claude Haiku). Daily per-user scan
-        // caps bound worst-case model spend to pennies per user. Cross-region
-        // inference-profile id (the bare Mantle alias 403'd for this account).
-        BEDROCK_MODEL_ID: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        // AI document extraction (Bedrock, Claude Sonnet 4.6). Daily per-user
+        // scan caps bound worst-case model spend to pennies per user.
+        // Cross-region inference-profile id (bare Mantle alias 403'd).
+        BEDROCK_MODEL_ID: 'us.anthropic.claude-sonnet-4-6',
         MAX_AI_SCANS: '10',
         PAID_MAX_AI_SCANS: '50',
 
@@ -124,15 +124,15 @@ export class ApiStack extends cdk.Stack {
       }),
     );
 
-    // Claude on Bedrock for document extraction. Scoped to the Haiku model;
+    // Claude on Bedrock for document extraction. Scoped to Sonnet 4.6;
     // the inference-profile ARN covers the cross-region routing variant.
     // (Model access must also be enabled once in the Bedrock console.)
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
         resources: [
-          'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5*',
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*anthropic.claude-haiku-4-5*`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*',
+          `arn:aws:bedrock:*:${this.account}:inference-profile/*anthropic.claude-sonnet-4-6*`,
         ],
       }),
     );
@@ -203,8 +203,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.POST, '/pets/{petId}/docs/analyze-upload-url'],
       [HttpMethod.POST, '/pets/{petId}/docs/analyze'],
       [HttpMethod.POST, '/pets/{petId}/docs/commit'],
+      [HttpMethod.POST, '/pets/{petId}/docs/create-record'],
       [HttpMethod.PATCH, '/pets/{petId}/docs/{id}'],
-      [HttpMethod.POST, '/pets/{petId}/docs/{id}/update-url'],
       [HttpMethod.DELETE, '/pets/{petId}/docs/{id}'],
       [HttpMethod.GET, '/pets/{petId}/meds'],
       [HttpMethod.PUT, '/pets/{petId}/meds'],

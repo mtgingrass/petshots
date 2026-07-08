@@ -113,7 +113,14 @@ async function main() {
     r.body.limits?.plan === 'free' && r.body.limits?.maxPets === MAX_PETS,
     `limits returned (plan=${r.body.limits?.plan}, maxPets=${r.body.limits?.maxPets})`,
   );
-  check(r.body.limits?.maxDocs === 4 && r.body.limits?.maxMeds === 4, 'free maxDocs=4, maxMeds=4');
+  // Caps move with the env vars in api-stack.ts — the tests below fill to
+  // whatever the server reports rather than hardcoding a number.
+  const MAX_DOCS = r.body.limits?.maxDocs;
+  const MAX_MEDS = r.body.limits?.maxMeds;
+  check(
+    Number.isInteger(MAX_DOCS) && MAX_DOCS >= 1 && Number.isInteger(MAX_MEDS) && MAX_MEDS >= 1,
+    `free maxDocs=${MAX_DOCS}, maxMeds=${MAX_MEDS}`,
+  );
 
   console.log('\n[3] POST /pets then GET /pets');
   r = await api(token, 'POST', '/pets', { name: 'Rex', species: 'dog' });
@@ -171,32 +178,22 @@ async function main() {
   let renGet = renamed ? (await fetch(renamed.url)).status : 0;
   check(renGet === 200, `renamed doc still downloads (${renGet})`);
 
-  console.log('\n[5c] POST /docs/{id}/update-url archives current + presigns new version');
+  console.log('\n[5c] removed update-url route stays gone');
   let upd = await api(token, 'POST', `/pets/${petId}/docs/${renamed.id}/update-url`, {
     filename: 'Rabies_2028.pdf',
     label: 'Rabies 2028',
     contentType: 'application/pdf',
   });
-  check(upd.status === 200, `update-url returns 200 (got ${upd.status})`);
-  const updPut = await postPolicy(upd.body, PDF, 'application/pdf');
-  check(updPut === 204, `new version S3 POST 204 (got ${updPut})`);
-  r = await api(token, 'GET', `/pets/${petId}/docs`);
-  const updDoc = r.body.docs?.[0];
-  check(r.body.docs.length === 1, 'still one doc after update (archive not counted)');
-  check(updDoc?.label === 'Rabies 2028', 'label updated to new version');
-  let updGet = updDoc ? (await fetch(updDoc.url)).status : 0;
-  check(updGet === 200, `new version downloads (${updGet})`);
+  check(upd.status === 404, `update-url returns 404 (got ${upd.status})`);
 
-  console.log('\n[6] fill to doc limit (4) then expect 409 on the 5th');
-  await uploadDoc(token, petId, 'Doc 2');
-  await uploadDoc(token, petId, 'Doc 3');
-  await uploadDoc(token, petId, 'Doc 4');
+  console.log(`\n[6] fill to doc limit (${MAX_DOCS}) then expect 409 on the next`);
+  for (let i = 2; i <= MAX_DOCS; i++) await uploadDoc(token, petId, `Doc ${i}`);
   let over = await api(token, 'POST', `/pets/${petId}/docs/upload-url`, {
     filename: 'x.pdf',
     label: 'over',
     contentType: 'application/pdf',
   });
-  check(over.status === 409, `5th doc rejected with 409 (got ${over.status})`);
+  check(over.status === 409, `doc #${MAX_DOCS + 1} rejected with 409 (got ${over.status})`);
 
   console.log('\n[7] DELETE one doc -> back under limit');
   r = await api(token, 'GET', `/pets/${petId}/docs`);
@@ -228,16 +225,22 @@ async function main() {
   const goodMeds = [
     { id: medId, name: 'Heartworm prevention', interval: 1, unit: 'month', nextDue: '2027-01-15', remindersEnabled: true, lastGiven: '2026-12-15' },
     { name: '  Bravecto  ', interval: 12, unit: 'week', nextDue: '2026-01-01' }, // no id, no remindersEnabled, untrimmed name
+    { name: 'Old antibiotic', interval: 1, unit: 'day', nextDue: '2026-01-01', dismissed: true }, // "stop tracking"
   ];
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: goodMeds });
-  check(r.status === 200 && r.body.meds.length === 2, `PUT meds 200 (got ${r.status})`);
+  check(r.status === 200 && r.body.meds.length === 3, `PUT meds 200 (got ${r.status})`);
   check(r.body.meds[0].id === medId, 'client-supplied uuid preserved');
   check(/^[0-9a-f-]{36}$/.test(r.body.meds[1].id ?? ''), 'missing id generated server-side');
   check(r.body.meds[1].remindersEnabled === true, 'remindersEnabled defaults to true');
   check(r.body.meds[1].name === 'Bravecto', 'name trimmed');
   check(r.body.meds[0].lastGiven === '2026-12-15', 'lastGiven round-trips');
+  check(r.body.meds[2].dismissed === true && r.body.meds[1].dismissed === undefined, 'dismissed flag round-trips (and stays absent elsewhere)');
   r = await api(token, 'GET', `/pets/${petId}/meds`);
-  check(r.status === 200 && r.body.meds.length === 2 && r.body.meds[0].name === 'Heartworm prevention', 'meds persisted');
+  check(r.status === 200 && r.body.meds.length === 3 && r.body.meds[0].name === 'Heartworm prevention', 'meds persisted');
+  check(r.body.meds[2].dismissed === true, 'dismissed persisted');
+  // Drop the dismissed helper so the bad-input section's counts stay simple.
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: r.body.meds.slice(0, 2) });
+  check(r.status === 200 && r.body.meds.length === 2, 'dismissed med removed again');
 
   console.log('\n[8d] medications: validation rejects bad input');
   const base = { name: 'X', interval: 1, unit: 'month', nextDue: '2027-01-15' };
@@ -253,7 +256,7 @@ async function main() {
     ['impossible date (Feb 30)', { meds: [{ ...base, nextDue: '2027-02-30' }] }],
     ['non-ISO date', { meds: [{ ...base, nextDue: '06/15/2027' }] }],
     ['bad lastGiven', { meds: [{ ...base, lastGiven: '2026-13-01' }] }],
-    ['5 meds over free limit', { meds: Array.from({ length: 5 }, (_, i) => ({ ...base, name: `Med ${i}` })) }],
+    [`${MAX_MEDS + 1} meds over free limit`, { meds: Array.from({ length: MAX_MEDS + 1 }, (_, i) => ({ ...base, name: `Med ${i}` })) }],
   ];
   for (const [label, body] of badCases) {
     const res = await api(token, 'PUT', `/pets/${petId}/meds`, body);

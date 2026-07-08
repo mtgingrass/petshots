@@ -177,16 +177,18 @@ async function main() {
       med('OverdueThreeMed', -3),     // silent (between weekly nags)
       med('DueTomorrowMed', 1),       // silent (not due yet)
       med('MutedMed', 0, false),      // silent (reminders off for this med)
+      { ...med('DismissedMed', 0), dismissed: true }, // silent ("stop tracking")
     ],
   });
-  check(r.status === 200 && r.body.meds.length === 6, 'six meds saved (paid cap)');
+  check(r.status === 200 && r.body.meds.length === 7, 'seven meds saved (paid cap)');
+  check(r.body.meds.find((m) => m.name === 'DismissedMed')?.dismissed === true, 'dismissed flag stored');
 
   console.log('\n[2b] downgrade to free: over-cap meds grandfathered (edit ok, growth blocked)');
   execSync(`aws s3 rm s3://${BUCKET}/users/${sub}/plan.json`, { encoding: 'utf8' });
   const limitsAfter = await api(token, 'GET', '/pets');
   check(limitsAfter.body?.limits?.plan === 'free', 'limits report free after plan.json removed');
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: r.body.meds });
-  check(r.status === 200 && r.body.meds.length === 6, 're-saving 6 meds allowed over the 4-med free cap');
+  check(r.status === 200 && r.body.meds.length === 7, 're-saving 7 meds allowed over the 4-med free cap');
   const grow = await api(token, 'PUT', `/pets/${petId}/meds`, {
     meds: [...r.body.meds, med('OneTooMany', 3)],
   });
@@ -205,7 +207,7 @@ async function main() {
     for (const name of ['DueTodayMed', 'OverdueSevenMed', 'OverdueFourteenMed']) {
       check(msg.body.includes(name), `${name} in body`);
     }
-    for (const name of ['OverdueThreeMed', 'DueTomorrowMed', 'MutedMed', 'Rabies SmokeVax']) {
+    for (const name of ['OverdueThreeMed', 'DueTomorrowMed', 'MutedMed', 'DismissedMed', 'Rabies SmokeVax']) {
       check(!msg.body.includes(name), `${name} NOT in body`);
     }
     check(msg.body.includes("Smokey's DueTodayMed — due today"), 'due-today phrasing');
@@ -251,6 +253,29 @@ async function main() {
   check(r.status === 200, 'med pushed 5 days out');
   dry = invokeDryRun(fnName);
   check(mine(dry) === null, 'no email for this user when nothing is due');
+
+  console.log('\n[6b] birthday email rides the vaccine-reminder consent');
+  // Remove the expiring doc first so a reminders-on dry run isolates the birthday.
+  const docsRes = await api(token, 'GET', `/pets/${petId}/docs`);
+  for (const d of docsRes.body?.docs ?? []) await api(token, 'DELETE', `/pets/${petId}/docs/${d.id}`);
+  const todayStr = daysFromToday(0);
+  const dob = `${Number(todayStr.slice(0, 4)) - 3}${todayStr.slice(4)}`;
+  r = await api(token, 'PUT', `/pets/${petId}`, { name: 'Smokey', species: 'dog', dob });
+  check(r.status === 200, `dob set so today is the birthday (${dob})`);
+  dry = invokeDryRun(fnName);
+  check(mine(dry) === null, 'reminders off -> no birthday email');
+  r = await api(token, 'PUT', '/settings', {
+    email, remindersEnabled: true, reminderDays: [7, 30], marketingOptIn: false,
+  });
+  check(r.status === 200, 'vaccine reminders turned on');
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(!!msg && !Array.isArray(msg), 'birthday email would send');
+  if (msg && !Array.isArray(msg)) {
+    check(msg.subject === '🎂 Smokey turns 3 today!', `subject "${msg.subject}"`);
+    check(msg.body.includes('happy birthday'), 'birthday line in body');
+    check(!msg.body.includes('Medications due'), 'no med section in a birthday-only email');
+  }
 
   console.log('\n[7] cleanup (pets deleted; caller must delete the user + S3 prefix)');
   await api(token, 'DELETE', `/pets/${petId}`);

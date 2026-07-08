@@ -31,7 +31,7 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.UPLOADS_BUCKET!;
 const MAX_PETS = Number(process.env.MAX_PETS ?? '2');
-const MAX_DOCS = Number(process.env.MAX_DOCS ?? '4');
+const MAX_DOCS = Number(process.env.MAX_DOCS ?? '8');
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -90,6 +90,10 @@ interface Med {
   nextDue: string; // YYYY-MM-DD
   remindersEnabled: boolean;
   lastGiven?: string; // YYYY-MM-DD
+  // "Stop tracking": the med stays on record but banners, overview status, the
+  // public passport, and reminder email all skip it. Distinct from muting
+  // reminders — a dismissed med is no longer considered due at all.
+  dismissed?: boolean;
 }
 const MAX_MEDS = Number(process.env.MAX_MEDS ?? '4');
 const MED_UNIT_MAX: Record<Med['unit'], number> = { day: 365, week: 52, month: 24 };
@@ -142,6 +146,7 @@ function cleanMeds(input: unknown, maxMeds: number): { meds: Med[] } | { error: 
       nextDue: m.nextDue,
       remindersEnabled: m.remindersEnabled !== false,
       lastGiven: m.lastGiven as string | undefined,
+      dismissed: m.dismissed === true ? true : undefined,
     });
   }
   return { meds };
@@ -192,7 +197,7 @@ const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
   free: { maxPets: MAX_PETS, maxDocs: MAX_DOCS, maxMeds: MAX_MEDS },
   paid: {
     maxPets: Number(process.env.PAID_MAX_PETS ?? '10'),
-    maxDocs: Number(process.env.PAID_MAX_DOCS ?? '20'),
+    maxDocs: Number(process.env.PAID_MAX_DOCS ?? '999'),
     maxMeds: Number(process.env.PAID_MAX_MEDS ?? '20'),
   },
 };
@@ -217,10 +222,11 @@ async function getEntitlements(sub: string): Promise<Entitlements> {
 // prefix after a day), get read by Claude, and only become doc records when the
 // user confirms the extraction on the review screen (POST .../docs/commit).
 // bedrock-runtime path with a cross-region inference profile id. (The newer
-// Mantle endpoint rejected this account's model entitlement at ship time —
-// revisit `AnthropicBedrockMantle` + 'anthropic.claude-haiku-4-5' later.)
+// Mantle endpoint still doesn't work for this account — retested 2026-07-07:
+// every Sonnet 4.6 id 404s "model does not exist" on Mantle, and the Haiku
+// alias still 403s on entitlement. Stay on legacy AnthropicBedrock.)
 const BEDROCK_MODEL_ID =
-  process.env.BEDROCK_MODEL_ID ?? 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+  process.env.BEDROCK_MODEL_ID ?? 'us.anthropic.claude-sonnet-4-6';
 const MAX_AI_SCANS = Number(process.env.MAX_AI_SCANS ?? '10');
 const PAID_MAX_AI_SCANS = Number(process.env.PAID_MAX_AI_SCANS ?? '50');
 // Bedrock InvokeModel caps the request body at 25 MB; base64 inflates 4/3, so
@@ -584,10 +590,32 @@ async function handlePublicPassport(
         new GetObjectCommand({ Bucket: BUCKET, Key: key }),
         { expiresIn: 3600 },
       );
-      return { id: parts[5], label: meta.label, expiry: meta.expiry, filename: parts.slice(7).join('/'), url };
+      return {
+        id: parts[5],
+        label: meta.label,
+        expiry: meta.expiry,
+        given: meta.given,
+        filename: parts.slice(7).join('/'),
+        url,
+      };
     }),
   );
   docs.sort((a, b) => statusRank(a.expiry) - statusRank(b.expiry) || (a.expiry ?? '').localeCompare(b.expiry ?? ''));
+
+  // Medication list for boarding facilities/sitters: name + schedule, minus
+  // anything the owner stopped tracking. Reminder toggles are private.
+  const medsStored = await readJson<{ meds: Med[] }>(
+    `users/${userId}/pets/${petId}/meds.json`,
+  );
+  const meds = (medsStored?.meds ?? [])
+    .filter((m) => m.dismissed !== true)
+    .map((m) => ({
+      name: m.name,
+      interval: m.interval,
+      unit: m.unit,
+      nextDue: m.nextDue,
+      lastGiven: m.lastGiven,
+    }));
 
   return json(200, {
     pet: {
@@ -597,6 +625,7 @@ async function handlePublicPassport(
       microchip: pet.microchip, fixed: pet.fixed, notes: pet.notes, avatarUrl,
     },
     docs,
+    meds,
     expiresAt: passportRecord.expiry,
   });
 }
@@ -900,6 +929,27 @@ export const handler = async (
           return json(413, { error: 'TOO_LARGE_FOR_AI' });
         }
 
+        // Exact-duplicate check: a byte-identical re-upload of a file that
+        // already backs a record skips the model call (and costs no scan).
+        // Both the browser POST and the commit-time CopyObject are single-part,
+        // so ETag stays the content MD5 and ETag+Size equality is exact.
+        const dupList = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix }),
+        );
+        const dupObj = (dupList.Contents ?? []).find(
+          (it) =>
+            !it.Key!.includes('/_archived/') &&
+            it.ETag === tmpObj.ETag &&
+            it.Size === tmpObj.Size,
+        );
+        if (dupObj) {
+          const dupParts = dupObj.Key!.split('/');
+          const dupMeta = decodeMeta(dupParts[6]);
+          return json(200, {
+            duplicate: { id: dupParts[5], label: dupMeta.label, expiry: dupMeta.expiry },
+          });
+        }
+
         const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: tmpObj.Key! }));
         const contentType = (obj.ContentType ?? '').toLowerCase().split(';')[0].trim();
         const isPdf = contentType === 'application/pdf';
@@ -1035,6 +1085,67 @@ export const handler = async (
         return json(200, { docs: created });
       }
 
+      // Manual entry: create metadata-only records without requiring a file upload.
+      // Writes a tiny placeholder S3 object so the key schema is consistent.
+      case 'POST /pets/{petId}/docs/create-record': {
+        const input = JSON.parse(event.body ?? '{}');
+        if (!Array.isArray(input.records) || input.records.length === 0) {
+          return json(400, { error: 'at least one record required' });
+        }
+        const records: { label: string; expiry?: string; given?: string; remindersEnabled: boolean }[] = [];
+        for (const raw of input.records) {
+          const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+          const label = String(r.label ?? '').trim().slice(0, 200);
+          if (!label) return json(400, { error: 'record label required' });
+          if (r.expiry !== undefined && r.expiry !== null && r.expiry !== '' && !isStrictDay(r.expiry)) {
+            return json(400, { error: 'expiry must be a valid YYYY-MM-DD date' });
+          }
+          if (r.given !== undefined && r.given !== null && r.given !== '' && !isStrictDay(r.given)) {
+            return json(400, { error: 'given must be a valid YYYY-MM-DD date' });
+          }
+          records.push({
+            label,
+            expiry: isStrictDay(r.expiry) ? r.expiry : undefined,
+            given: isStrictDay(r.given) ? r.given : undefined,
+            remindersEnabled: r.remindersEnabled !== false,
+          });
+        }
+
+        const existingPet = await readJson<Record<string, unknown>>(petKey);
+        if (existingPet === null) return json(404, { error: 'not found' });
+
+        const [docList, ent] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
+          getEntitlements(sub),
+        ]);
+        const currentDocs = (docList.Contents ?? []).filter(
+          (it) => !it.Key!.includes('/_archived/'),
+        );
+        if (currentDocs.length + records.length > ent.maxDocs) {
+          return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
+        }
+        if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
+        }
+
+        const created = await Promise.all(
+          records.map(async (rec) => {
+            const docId = randomUUID();
+            const newKey = `${docsPrefix}${docId}/${encodeMeta({
+              label: rec.label,
+              expiry: rec.expiry,
+              given: rec.given,
+              remindersEnabled: rec.remindersEnabled,
+            })}/_manual`;
+            await s3.send(
+              new PutObjectCommand({ Bucket: BUCKET, Key: newKey, Body: '', ContentType: 'text/plain' }),
+            );
+            return { id: docId, ...rec, filename: '_manual' };
+          }),
+        );
+        return json(200, { docs: created });
+      }
+
       case 'PATCH /pets/{petId}/docs/{id}': {
         // Edit = change label and/or expiry, which live in the key -> S3 has no
         // rename, so copy the object to a new key and delete the old one. docId +
@@ -1076,55 +1187,9 @@ export const handler = async (
         return json(200, { ok: true });
       }
 
-      case 'POST /pets/{petId}/docs/{id}/update-url': {
-        // "Update" = renew the cert. Archives the current file under a versioned
-        // sub-key so the history is preserved, then returns a presigned POST for
-        // the new upload. The docId stays the same, preserving the record's slot
-        // in the list.
-        const id = event.pathParameters?.id;
-        if (!id) return json(400, { error: 'id required' });
-        const input = JSON.parse(event.body ?? '{}');
-        const filename = String(input.filename ?? '')
-          .replace(/[^\w.\- ]/g, '_')
-          .slice(0, 200);
-        const label = String(input.label ?? '').slice(0, 200);
-        const expiry = cleanExpiry(input.expiry);
-        const contentType = String(input.contentType ?? 'application/octet-stream');
-        if (!filename) return json(400, { error: 'filename required' });
-        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
-
-        const prefix = `${docsPrefix}${id}/`;
-        const existing = await s3.send(
-          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }),
-        );
-        const currentKey = existing.Contents?.find(
-          (it) => !it.Key!.includes('/_archived/'),
-        )?.Key;
-        if (!currentKey) return json(404, { error: 'document not found' });
-
-        // Copy current -> _archived/{timestamp}/… before presigning the new slot.
-        // The old file is preserved even if the upload never completes.
-        const archiveKey = `${prefix}_archived/${Date.now()}/${currentKey.slice(prefix.length)}`;
-        const copySource = `${BUCKET}/${encodeURIComponent(currentKey).replace(/%2F/g, '/')}`;
-        await s3.send(
-          new CopyObjectCommand({ Bucket: BUCKET, Key: archiveKey, CopySource: copySource }),
-        );
-        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: currentKey }));
-
-        const safeLabel = label || filename;
-        const newKey = `${prefix}${encodeMeta({ label: safeLabel, expiry })}/${filename}`;
-        const { url, fields } = await createPresignedPost(s3, {
-          Bucket: BUCKET,
-          Key: newKey,
-          Conditions: [
-            ['content-length-range', 1, MAX_FILE_BYTES],
-            ['eq', '$Content-Type', contentType],
-          ],
-          Fields: { 'Content-Type': contentType },
-          Expires: 300,
-        });
-        return json(200, { url, fields, key: newKey });
-      }
+      // (The old POST /docs/{id}/update-url route is gone — the Update-record
+      // feature was removed in session 12. Listings still skip /_archived/
+      // sub-keys because objects archived by that route may exist in S3.)
 
       case 'DELETE /pets/{petId}/docs/{id}': {
         const id = event.pathParameters?.id;

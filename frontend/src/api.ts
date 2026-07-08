@@ -4,7 +4,7 @@
 // never pass through this API.
 import { config } from './config';
 import { getAccessToken } from './auth/cognito';
-import { compressImage } from './utils/compressImage';
+import { compressImage, normalizeForAnalysis } from './utils/compressImage';
 
 const COMPRESSIBLE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
@@ -59,13 +59,24 @@ export interface PassportDoc {
   id: string;
   label: string;
   expiry?: string;
+  given?: string; // YYYY-MM-DD, date administered
   filename: string;
   url: string;
+}
+
+// Public med view: name + schedule only (no ids or reminder settings).
+export interface PassportMed {
+  name: string;
+  interval: number;
+  unit: MedUnit;
+  nextDue: string;
+  lastGiven?: string;
 }
 
 export interface PassportData {
   pet: Omit<Pet, 'id' | 'passportToken' | 'passportExpiry'>;
   docs: PassportDoc[];
+  meds?: PassportMed[]; // absent on responses from an older API
   expiresAt?: string;
 }
 
@@ -91,6 +102,9 @@ export interface Med {
   nextDue: string; // YYYY-MM-DD
   remindersEnabled: boolean;
   lastGiven?: string; // YYYY-MM-DD
+  // "Stop tracking": stays on record, but banners, overview status, the
+  // passport, and reminder emails all skip it.
+  dismissed?: boolean;
 }
 
 // Per-user limits, resolved server-side from the user's plan and returned by
@@ -103,7 +117,7 @@ export interface Limits {
   maxMeds: number;
 }
 
-export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 4, maxMeds: 4 };
+export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 8, maxMeds: 4 };
 
 // fetch() rejects with a browser-internal message ("Failed to fetch") when the
 // network is down or CORS blocks the call — translate it for humans.
@@ -296,16 +310,28 @@ export interface ProfilePatch {
 
 // Uploads to the temp slot and returns the uploadId to analyze/commit with.
 export async function uploadForAnalysis(petId: string, file: File): Promise<string> {
+  // Normalize image orientation before upload. The canvas round-trip applies
+  // EXIF orientation so upside-down/rotated phone photos arrive at the model
+  // right-side up. PDFs and non-image types are passed through unchanged.
+  const toUpload = COMPRESSIBLE_TYPES.has(file.type) ? await normalizeForAnalysis(file) : file;
   const presign = await request<{
     url: string;
     fields: Record<string, string>;
     uploadId: string;
   }>('POST', `/pets/${petId}/docs/analyze-upload-url`, {
-    filename: file.name,
-    contentType: file.type || 'application/octet-stream',
+    filename: toUpload.name,
+    contentType: toUpload.type || 'application/octet-stream',
   });
-  await postToS3(presign, file);
+  await postToS3(presign, toUpload);
   return presign.uploadId;
+}
+
+// A byte-identical re-upload of a file already backing a record comes back as
+// { duplicate } instead of an extraction — no model call, no scan consumed.
+export interface DuplicateInfo {
+  id: string;
+  label: string;
+  expiry?: string;
 }
 
 // Server errors surface as Error(message) with machine-readable messages:
@@ -313,7 +339,7 @@ export async function uploadForAnalysis(petId: string, file: File): Promise<stri
 export function analyzeUpload(
   petId: string,
   uploadId: string,
-): Promise<{ extraction: Extraction; scansRemaining: number }> {
+): Promise<{ extraction?: Extraction; scansRemaining?: number; duplicate?: DuplicateInfo }> {
   return request('POST', `/pets/${petId}/docs/analyze`, { uploadId });
 }
 
@@ -328,6 +354,13 @@ export function commitUpload(
     records,
     ...(profile && Object.keys(profile).length > 0 ? { profile } : {}),
   });
+}
+
+export function createManualRecords(
+  petId: string,
+  records: CommitRecord[],
+): Promise<{ docs: (CommitRecord & { id: string; filename: string })[] }> {
+  return request('POST', `/pets/${petId}/docs/create-record`, { records });
 }
 
 export async function uploadDoc(

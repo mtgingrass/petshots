@@ -6,7 +6,7 @@
 // Run with a THROWAWAY user (admin-created) and delete it afterwards.
 // Needs AWS CLI creds (s3 read/write on the uploads bucket) for the quota and
 // read-only-pet setup, which write users/{sub}/*.json directly.
-// Makes 3 real Claude Haiku calls (~$0.02/run).
+// Makes 4 real Claude calls (~$0.03/run).
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -16,8 +16,10 @@ import pkg from 'amazon-cognito-identity-js';
 import {
   CERT,
   DURATION_CERT,
+  VISIT_CERT,
   makeMultiVaccineCert,
   makeDurationCert,
+  makeVisitSummaryCert,
   makeNonVaccinePdf,
 } from './lib-cert-pdf.mjs';
 
@@ -25,7 +27,9 @@ const { CognitoUserPool, CognitoUser, AuthenticationDetails } = pkg;
 
 const API = process.env.API_URL ?? 'https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com';
 const BUCKET = process.env.UPLOADS_BUCKET ?? 'petshots-uploads';
-const MAX_DOCS = 4; // free-tier cap (the smoke user has no plan.json)
+// The cap tests assume a 4-doc limit; the free tier moved past that, so the
+// script pins it via a plan.json limits override for its throwaway user.
+const MAX_DOCS = 4;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const env = Object.fromEntries(
@@ -115,6 +119,10 @@ console.log(`\nSmoke-testing AI extraction as ${email} (${sub}) against ${API}\n
 
 const cleanup = { petIds: [], wroteQuota: false, wrotePlan: false };
 try {
+  // -- setup: pin the doc cap to what the assertions assume --
+  s3PutJson(`users/${sub}/plan.json`, { plan: 'free', limits: { maxDocs: MAX_DOCS } });
+  cleanup.wrotePlan = true;
+
   // -- setup: one pet --
   console.log('pet setup:');
   const petRes = await api(token, 'POST', '/pets', { name: 'ScanPet', species: 'dog' });
@@ -134,7 +142,7 @@ try {
   check(up1 === 204, 'cert PDF uploads to tmp slot');
 
   // -- analyze: the real Bedrock call --
-  console.log('\nanalyze (Claude Haiku via Bedrock):');
+  console.log('\nanalyze (Claude via Bedrock):');
   const an1 = await api(token, 'POST', `/pets/${petId}/docs/analyze`, {
     uploadId: pre1.body.uploadId,
   });
@@ -196,6 +204,23 @@ try {
   const docs2 = await api(token, 'GET', `/pets/${petId}/docs`);
   const renamed = docs2.body.docs.find((d) => d.id === rabiesDoc.id);
   check(renamed?.label === 'Rabies (3-year)' && renamed?.given === '2025-07-01', 'given survives rename');
+
+  // -- exact duplicate: re-uploading the same bytes skips the model call --
+  console.log('\nexact-duplicate detection (ETag):');
+  const preDup = await api(token, 'POST', `/pets/${petId}/docs/analyze-upload-url`, {
+    filename: 'multi-cert-again.pdf',
+    contentType: 'application/pdf',
+  });
+  await s3Post(preDup.body, certPdf, 'application/pdf');
+  const anDup = await api(token, 'POST', `/pets/${petId}/docs/analyze`, {
+    uploadId: preDup.body.uploadId,
+  });
+  check(anDup.status === 200, `duplicate analyze returns 200 (got ${anDup.status})`);
+  check(!!anDup.body?.duplicate && !anDup.body?.extraction, 'returns duplicate info, no extraction');
+  check(
+    docs2.body.docs.some((d) => d.id === anDup.body?.duplicate?.id),
+    `duplicate points at an existing record ("${anDup.body?.duplicate?.label}")`,
+  );
 
   // -- edge: temp object is consumed by commit --
   console.log('\nedge cases:');
@@ -263,6 +288,38 @@ try {
     );
   }
 
+  // -- visit summary: ONE service date over undated duration-only lines --
+  // (The layout that actually broke in the wild, fixed in s16: the doc-level
+  // "Service Date" must become dateGiven for every listed vaccine.)
+  console.log('\nvisit summary (shared service date, per-line durations):');
+  const preV = await api(token, 'POST', `/pets/${petId}/docs/analyze-upload-url`, {
+    filename: 'visit-summary.pdf',
+    contentType: 'application/pdf',
+  });
+  await s3Post(preV.body, makeVisitSummaryCert(), 'application/pdf');
+  const anV = await api(token, 'POST', `/pets/${petId}/docs/analyze`, {
+    uploadId: preV.body.uploadId,
+  });
+  check(anV.status === 200, `visit summary analyzes (got ${anV.status})`);
+  const vvax = anV.body?.extraction?.vaccines ?? [];
+  check(
+    vvax.length === VISIT_CERT.vaccines.length,
+    `found ${VISIT_CERT.vaccines.length} vaccines, nail trim excluded (got ${vvax.length})`,
+  );
+  for (const expect of VISIT_CERT.vaccines) {
+    const v = vvax.find((x) => x.name.toLowerCase().includes(expect.name.toLowerCase()));
+    check(!!v, `found ${expect.name}`);
+    check(
+      v?.dateGiven === VISIT_CERT.serviceDate,
+      `${expect.name} dateGiven = visit-level service date (got ${v?.dateGiven})`,
+    );
+    check(!v?.expiry, `${expect.name} has no fabricated expiry`);
+    check(
+      v?.suggestedExpiry === expect.suggestedExpiry,
+      `${expect.name} suggestedExpiry ${expect.suggestedExpiry} (got ${v?.suggestedExpiry})`,
+    );
+  }
+
   // -- edge: doc cap (3 committed + 2 would exceed the 4-doc free cap) --
   const over = await api(token, 'POST', `/pets/${petId}/docs/commit`, {
     uploadId: pre2.body.uploadId,
@@ -315,7 +372,7 @@ try {
   cleanup.wroteQuota = false;
 
   // -- edge: read-only (over-cap) pet refuses the whole flow --
-  s3PutJson(`users/${sub}/plan.json`, { plan: 'free', limits: { maxPets: 1 } });
+  s3PutJson(`users/${sub}/plan.json`, { plan: 'free', limits: { maxPets: 1, maxDocs: MAX_DOCS } });
   cleanup.wrotePlan = true;
   // ScanPet is older -> stays active; QuotaPet (newer) goes read-only.
   const preRO = await api(token, 'POST', `/pets/${pet2}/docs/analyze-upload-url`, {

@@ -136,6 +136,42 @@ export function makeDurationCert() {
   return buildPdf(ops);
 }
 
+// Visit-summary layout (the Greenville Humane Society doc that broke s16):
+// ONE "Service Date" header over an undated "Services Received" list where
+// each vaccine line prints only a duration. The prompt rule under test: the
+// visit-level date IS dateGiven for every listed vaccine, so every line must
+// come back with dateGiven + a server-computed suggestedExpiry.
+export const VISIT_CERT = {
+  serviceDate: '2025-05-09', // printed once, US-style: "5/9/2025"
+  vaccines: [
+    { name: 'Rabies', line: 'Rabies Vaccine (1 Year)', suggestedExpiry: '2026-05-09' },
+    { name: 'Bordetella', line: 'Bordetella Vaccine - 1 Year', suggestedExpiry: '2026-05-09' },
+    { name: 'Leptospirosis', line: 'Leptospirosis Vaccine - 1 Year', suggestedExpiry: '2026-05-09' },
+  ],
+};
+
+export function makeVisitSummaryCert() {
+  const ops = [];
+  ops.push('0.13 0.36 0.62 rg', '0 730 612 62 re f', '1 1 1 rg');
+  ops.push(bold(36, 764, 16, 'Hillside Humane Society Veterinary Clinic'));
+  ops.push('0 0 0 rg');
+  ops.push(bold(36, 706, 13, 'VISIT SUMMARY'));
+  let y = 680;
+  ops.push(bold(36, y, 9, 'Patient:'), reg(130, y, 9, CERT.petName));
+  y -= 16;
+  ops.push(bold(36, y, 9, 'Service Date:'), reg(130, y, 9, '5/9/2025'));
+  y -= 28;
+  ops.push(bold(36, y, 10, 'SERVICES RECEIVED'));
+  y -= 17;
+  for (const v of VISIT_CERT.vaccines) {
+    ops.push(reg(36, y, 9, '- ' + v.line));
+    y -= 15;
+  }
+  // Non-vaccine service line, like the real doc — must NOT be extracted.
+  ops.push(reg(36, y, 9, '- Nail Trim'));
+  return buildPdf(ops);
+}
+
 export function makeNonVaccinePdf() {
   const ops = [];
   ops.push(bold(36, 740, 14, 'Weekly Grocery List'));

@@ -30,6 +30,7 @@ interface Med {
   nextDue: string;
   remindersEnabled: boolean;
   lastGiven?: string;
+  dismissed?: boolean; // "stop tracking" — never considered due
 }
 
 async function readJson<T>(key: string): Promise<T | null> {
@@ -80,12 +81,42 @@ function formatDate(d: string): string {
 
 interface DueDoc { petName: string; label: string; expiry: string; days: number }
 interface DueMed { petName: string; name: string; nextDue: string; days: number }
+interface Birthday { petName: string; age: number }
 
-function composeEmail(dueDocs: DueDoc[], dueMeds: DueMed[]): { subject: string; body: string } {
+// True when today (Lambda runs in UTC) is the pet's birthday. Feb-29 birthdays
+// are celebrated on Feb 28 in non-leap years rather than skipped.
+function isBirthdayToday(dob: string, today: Date): boolean {
+  const m = dob.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const [, , mm, dd] = m;
+  const tm = String(today.getMonth() + 1).padStart(2, '0');
+  const td = String(today.getDate()).padStart(2, '0');
+  if (mm === tm && dd === td) return true;
+  if (mm === '02' && dd === '29' && tm === '02' && td === '28') {
+    const y = today.getFullYear();
+    const isLeap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+    return !isLeap;
+  }
+  return false;
+}
+
+function composeEmail(
+  dueDocs: DueDoc[],
+  dueMeds: DueMed[],
+  birthdays: Birthday[] = [],
+): { subject: string; body: string } {
   const total = dueDocs.length + dueMeds.length;
 
   let subject: string;
-  if (total === 1 && dueMeds.length === 1) {
+  if (total === 0 && birthdays.length > 0) {
+    const b = birthdays[0];
+    subject =
+      birthdays.length > 1
+        ? `🎂 ${birthdays.length} Petshots birthdays today!`
+        : b.age >= 1
+          ? `🎂 ${b.petName} turns ${b.age} today!`
+          : `🎂 Happy birthday, ${b.petName}!`;
+  } else if (total === 1 && dueMeds.length === 1) {
     const m = dueMeds[0];
     subject = m.days === 0
       ? `Reminder: ${m.petName}'s ${m.name} is due today`
@@ -102,6 +133,17 @@ function composeEmail(dueDocs: DueDoc[], dueMeds: DueMed[]): { subject: string; 
   }
 
   const sections: string[] = [];
+  if (birthdays.length > 0) {
+    sections.push(
+      birthdays
+        .map((b) =>
+          b.age >= 1
+            ? `🎂 ${b.petName} turns ${b.age} today — happy birthday!`
+            : `🎂 It's ${b.petName}'s birthday today — happy birthday!`,
+        )
+        .join('\n'),
+    );
+  }
   if (dueMeds.length > 0) {
     const bullets = dueMeds
       .map((m) => {
@@ -126,7 +168,7 @@ function composeEmail(dueDocs: DueDoc[], dueMeds: DueMed[]): { subject: string; 
   const body = [
     `Hi,`,
     ``,
-    `Here's your Petshots reminder:`,
+    total === 0 ? `A little celebration from Petshots:` : `Here's your Petshots reminder:`,
     ``,
     sections.join('\n\n'),
     ``,
@@ -175,10 +217,20 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
 
       const dueDocs: DueDoc[] = [];
       const dueMeds: DueMed[] = [];
+      const birthdays: Birthday[] = [];
+      const today = new Date();
 
       for (const petId of petIds) {
-        const pet = await readJson<{ name: string }>(`${userPrefix}pets/${petId}/pet.json`);
+        const pet = await readJson<{ name: string; dob?: string }>(
+          `${userPrefix}pets/${petId}/pet.json`,
+        );
         if (!pet?.name) continue;
+
+        // Birthday email rides the same consent signal as vaccine reminders —
+        // no reminder opt-in, no unsolicited mail.
+        if (vaccineRemindersOn && pet.dob && isBirthdayToday(pet.dob, today)) {
+          birthdays.push({ petName: pet.name, age: today.getFullYear() - Number(pet.dob.slice(0, 4)) });
+        }
 
         if (vaccineRemindersOn) {
           const docsList = await s3.send(
@@ -201,7 +253,7 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
 
         const stored = await readJson<{ meds: Med[] }>(`${userPrefix}pets/${petId}/meds.json`);
         for (const med of stored?.meds ?? []) {
-          if (med.remindersEnabled === false || !med.nextDue) continue;
+          if (med.dismissed === true || med.remindersEnabled === false || !med.nextDue) continue;
           const days = daysUntil(med.nextDue);
           if (medDueToday(days)) {
             dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days });
@@ -209,9 +261,9 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
         }
       }
 
-      if (dueDocs.length === 0 && dueMeds.length === 0) continue;
+      if (dueDocs.length === 0 && dueMeds.length === 0 && birthdays.length === 0) continue;
 
-      const { subject, body } = composeEmail(dueDocs, dueMeds);
+      const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays);
 
       if (dryRun) {
         wouldSend.push({ email: settings.email, subject, body });
@@ -231,7 +283,9 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
           },
         }),
       );
-      console.log(`Sent ${dueDocs.length + dueMeds.length} reminder(s) to ${settings.email}`);
+      console.log(
+        `Sent ${dueDocs.length + dueMeds.length} reminder(s) + ${birthdays.length} birthday(s) to ${settings.email}`,
+      );
     } catch (e) {
       console.error(`Error processing ${userPrefix}:`, e);
       // Continue to next user rather than failing the whole run.

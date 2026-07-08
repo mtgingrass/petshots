@@ -101,6 +101,37 @@ export function verifyPassword(email: string, password: string): Promise<void> {
   return signIn(email, password).then(() => undefined);
 }
 
+// Start the forgot-password flow: Cognito emails a reset code to the account's
+// address. The pool has preventUserExistenceErrors, so unknown emails get a
+// simulated success — callers can't probe which accounts exist.
+export function forgotPassword(email: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const user = new CognitoUser({ Username: email, Pool: userPool });
+    user.forgotPassword({
+      // With inputVerificationCode defined the SDK calls it (not onSuccess)
+      // once the code is sent; the UI collects the code in its own phase.
+      inputVerificationCode: () => resolve(),
+      onSuccess: () => resolve(),
+      onFailure: (err) => reject(err),
+    });
+  });
+}
+
+// Complete the reset with the emailed code + new password.
+export function confirmForgotPassword(
+  email: string,
+  code: string,
+  newPassword: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const user = new CognitoUser({ Username: email, Pool: userPool });
+    user.confirmPassword(code, newPassword, {
+      onSuccess: () => resolve(),
+      onFailure: (err) => reject(err),
+    });
+  });
+}
+
 // Change the signed-in user's password. Requires the current password for
 // verification — Cognito rejects with NotAuthorizedException if it's wrong.
 export function changePassword(oldPassword: string, newPassword: string): Promise<void> {

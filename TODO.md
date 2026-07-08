@@ -36,6 +36,8 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [ ] **Reminder email polish + expiry-date nudge** (2026-07-03) — deep links, pet name in subject, nudge at upload when no expiry set ("we can't remind you without a date"), and decide whether reminders should be ON by default for new signups (currently off = zero touchpoints unless they find Settings).
 
+- [ ] **Password-reset email copy** (2026-07-08, found in s19) — Cognito reuses the pool's ONE verification template for both signup confirmation AND forgot-password codes, so the reset email arrives with subject "Verify your new account" — confusing when you're resetting a password. Fix = either neutral copy in the shared template ("Your Petshots verification code") via AuthStack `userVerification`, or a CustomMessage Lambda trigger to branch on `CustomMessage_ForgotPassword` for properly distinct emails. Cosmetic — the code works fine.
+
 - [x] **Consider "Upgrade" hook at the 3-pet limit message** (2026-07-03) — already shipped in s14 (upgrade CTA in the pet-limit message); checked off during s17 housekeeping.
 
 ---

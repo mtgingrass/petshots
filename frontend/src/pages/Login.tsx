@@ -62,6 +62,9 @@ export function Login() {
       </form>
 
         <p className="subtle">
+          <Link to="/reset-password">Forgot your password?</Link>
+        </p>
+        <p className="subtle">
           Need an account? <Link to="/signup">Sign up</Link>
         </p>
       </main>

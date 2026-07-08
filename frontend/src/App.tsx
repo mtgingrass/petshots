@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom';
 import { Landing } from './pages/Landing';
 import { SignUp } from './pages/SignUp';
 import { Login } from './pages/Login';
+import { ResetPassword } from './pages/ResetPassword';
 import { Dashboard } from './pages/Dashboard';
 import { Privacy } from './pages/Privacy';
 import { PassportPage } from './pages/PassportPage';
@@ -14,6 +15,7 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/signup" element={<SignUp />} />
       <Route path="/login" element={<Login />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/p/:token" element={<PassportPage />} />
       <Route path="/unsubscribe" element={<UnsubscribePage />} />

@@ -424,12 +424,27 @@ interface DailyFile {
   log: Record<string, Record<string, DailyCheck>>; // date -> itemId -> check
   moods?: Record<string, DailyMood>; // date -> mood
 }
-const DAILY_PRESETS: DailyItem[] = [
-  { id: 'preset-breakfast', name: 'Breakfast' },
-  { id: 'preset-dinner', name: 'Dinner' },
-  { id: 'preset-walk', name: 'Walk' },
-  { id: 'preset-poop', name: '💩 Poop', kind: 'counter' },
-];
+// Species-aware defaults (they apply only until the user customizes the
+// list): dogs get walks and poop tracking; cats get the litter box counter —
+// output monitoring is a top early-warning health signal for indoor cats —
+// and no walk; anything else starts with just meals.
+function dailyPresetsFor(species: string | undefined): DailyItem[] {
+  const meals: DailyItem[] = [
+    { id: 'preset-breakfast', name: 'Breakfast' },
+    { id: 'preset-dinner', name: 'Dinner' },
+  ];
+  if (/cat/i.test(species ?? '')) {
+    return [...meals, { id: 'preset-poop', name: '💩 Litter box', kind: 'counter' }];
+  }
+  if (/dog/i.test(species ?? '')) {
+    return [
+      ...meals,
+      { id: 'preset-walk', name: 'Walk' },
+      { id: 'preset-poop', name: '💩 Poop', kind: 'counter' },
+    ];
+  }
+  return meals;
+}
 const MAX_DAILY_ITEMS = 20;
 const MAX_COUNTER_PER_DAY = 30;
 const DAILY_LOG_RETENTION_DAYS = 14;
@@ -1756,14 +1771,15 @@ export const handler = async (
         if (!isDailyDate(date)) {
           return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
         }
-        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const petInfo = await readJson<{ species?: string }>(petKey);
+        if (petInfo === null) return json(404, { error: 'not found' });
         const [file, medsStored] = await Promise.all([
           readJson<DailyFile>(`${petPrefix}daily.json`),
           readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
         ]);
         const checks = file?.log?.[date] ?? {};
         const items = [
-          ...(file?.items ?? DAILY_PRESETS),
+          ...(file?.items ?? dailyPresetsFor(petInfo.species)),
           ...dailyMedItems(medsStored?.meds ?? [], date, checks),
         ];
         return json(200, { date, items, checks, mood: file?.moods?.[date] ?? null });
@@ -1809,7 +1825,8 @@ export const handler = async (
           return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
         }
         if (!itemId || itemId.length > 80) return json(400, { error: 'itemId required' });
-        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const checkPetInfo = await readJson<{ species?: string }>(petKey);
+        if (checkPetInfo === null) return json(404, { error: 'not found' });
 
         // The med side-effect (mark-as-given / restore) is computed inside the
         // retry loop but WRITTEN only after the daily write lands, so a retry
@@ -1857,7 +1874,7 @@ export const handler = async (
               delete day[itemId];
             }
           } else {
-            const items = file.items ?? DAILY_PRESETS;
+            const items = file.items ?? dailyPresetsFor(checkPetInfo.species);
             const item = items.find((i) => i.id === itemId);
             if (!item) return json(404, { error: 'item not found' });
             if (item.kind === 'counter') {

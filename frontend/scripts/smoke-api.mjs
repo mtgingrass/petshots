@@ -343,6 +343,27 @@ async function main() {
   v = await api(token, 'POST', '/roadmap/vote', { itemId: 'no-such-item' });
   check(v.status === 404, 'unknown item 404s');
 
+  console.log('\n[8g2] species-aware daily presets');
+  const wDay = new Date().toISOString().slice(0, 10);
+  r = await api(token, 'GET', `/pets/${petId}/daily?date=${wDay}`);
+  let dNames = r.body.items.map((i) => i.name);
+  check(
+    dNames.includes('Walk') && dNames.includes('💩 Poop'),
+    `dog presets include Walk + Poop (${dNames.join(', ')})`,
+  );
+  r = await api(token, 'GET', `/pets/${p2.body.pet.id}/daily?date=${wDay}`);
+  dNames = r.body.items.map((i) => i.name);
+  check(
+    !dNames.includes('Walk') && dNames.includes('💩 Litter box'),
+    `cat presets drop Walk, get Litter box (${dNames.join(', ')})`,
+  );
+  const litter = r.body.items.find((i) => i.name === '💩 Litter box');
+  const litterCheck = await api(token, 'POST', `/pets/${p2.body.pet.id}/daily/check`, {
+    date: wDay, itemId: litter.id, checked: true,
+  });
+  check(litterCheck.status === 200 && litterCheck.body.checks[litter.id]?.count === 1,
+    'litter box counter works for the cat');
+
   console.log('\n[8h] push subscription routes');
   const fakeSub = {
     endpoint: `https://updates.push.services.mozilla.com/wpush/v2/smoke-${Date.now()}`,

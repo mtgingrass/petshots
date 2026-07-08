@@ -377,12 +377,15 @@ interface WeightEntryView {
 
 const MOOD_EMOJI: Record<number, string> = { 1: '😢', 2: '😕', 3: '😐', 4: '🙂', 5: '😄' };
 const MOOD_LABEL: Record<number, string> = { 1: 'rough', 2: 'off', 3: 'okay', 4: 'good', 5: 'great' };
-const DIGEST_PRESET_NAMES: Record<string, string> = {
-  'preset-breakfast': 'Breakfast',
-  'preset-dinner': 'Dinner',
-  'preset-walk': 'Walk',
-  'preset-poop': '💩 Poop',
-};
+// Preset names for uncustomized lists; preset-poop is species-dependent
+// (dogs poop, cats have a litter box) — resolved by the caller.
+function digestPresetName(itemId: string, species: string | undefined): string | undefined {
+  if (itemId === 'preset-breakfast') return 'Breakfast';
+  if (itemId === 'preset-dinner') return 'Dinner';
+  if (itemId === 'preset-walk') return 'Walk';
+  if (itemId === 'preset-poop') return /cat/i.test(species ?? '') ? '💩 Litter box' : '💩 Poop';
+  return undefined;
+}
 
 function last7Dates(today: Date): string[] {
   const out: string[] = [];
@@ -396,6 +399,7 @@ function last7Dates(today: Date): string[] {
 // One pet's paragraph of the digest, or null if the week held nothing.
 function digestPetSection(
   petName: string,
+  species: string | undefined,
   daily: DailyFileView | null,
   weights: WeightEntryView[],
   dates: string[],
@@ -428,7 +432,7 @@ function digestPetSection(
       const n = entry.count ?? 1;
       if (itemId.startsWith('med:')) medsGiven += 1;
       else {
-        const name = itemNames.get(itemId) ?? DIGEST_PRESET_NAMES[itemId] ?? 'Other';
+        const name = itemNames.get(itemId) ?? digestPresetName(itemId, species) ?? 'Other';
         checkCounts.set(name, (checkCounts.get(name) ?? 0) + n);
       }
       for (const ev of entry.events ?? [{ by: entry.by }]) {
@@ -592,13 +596,15 @@ export const handler = async (event?: {
         const sections: string[] = [];
         const petNames: string[] = [];
         for (const { base, petId } of petSources) {
-          const pet = await readJson<{ name?: string }>(`${base}pets/${petId}/pet.json`);
+          const pet = await readJson<{ name?: string; species?: string }>(
+            `${base}pets/${petId}/pet.json`,
+          );
           if (!pet?.name) continue;
           const [daily, weightsStored] = await Promise.all([
             readJson<DailyFileView>(`${base}pets/${petId}/daily.json`),
             readJson<{ entries: WeightEntryView[] }>(`${base}pets/${petId}/weights.json`),
           ]);
-          const section = digestPetSection(pet.name, daily, weightsStored?.entries ?? [], dates);
+          const section = digestPetSection(pet.name, pet.species, daily, weightsStored?.entries ?? [], dates);
           if (section) {
             sections.push(section);
             petNames.push(pet.name);

@@ -14,6 +14,7 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import {
   CognitoIdentityProviderClient,
   AdminDeleteUserCommand,
+  AdminGetUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 import Stripe from 'stripe';
@@ -198,14 +199,21 @@ interface Limits {
   maxPets: number;
   maxDocs: number;
   maxMeds: number;
+  maxMembers: number; // family members (besides the owner) this plan allows
 }
 type Entitlements = Limits & { plan: 'free' | 'paid' };
 const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
-  free: { maxPets: MAX_PETS, maxDocs: MAX_DOCS, maxMeds: MAX_MEDS },
+  free: {
+    maxPets: MAX_PETS,
+    maxDocs: MAX_DOCS,
+    maxMeds: MAX_MEDS,
+    maxMembers: Number(process.env.MAX_MEMBERS ?? '1'),
+  },
   paid: {
     maxPets: Number(process.env.PAID_MAX_PETS ?? '10'),
     maxDocs: Number(process.env.PAID_MAX_DOCS ?? '999'),
     maxMeds: Number(process.env.PAID_MAX_MEDS ?? '20'),
+    maxMembers: Number(process.env.PAID_MAX_MEMBERS ?? '5'),
   },
 };
 const posInt = (v: unknown, fallback: number): number =>
@@ -221,7 +229,81 @@ async function getEntitlements(sub: string): Promise<Entitlements> {
     maxPets: posInt(file?.limits?.maxPets, base.maxPets),
     maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
     maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
+    maxMembers: posInt(file?.limits?.maxMembers, base.maxMembers),
   };
+}
+
+// ---- family / household ----
+// One owner account holds the shared pets; members get access through an
+// indirection pair (same pattern as passports — a small pointer object, no
+// data moves). users/{owner}/household.json lists members + pending invites;
+// each member carries users/{member}/memberOf.json pointing back. A member
+// belongs to at most ONE household, and a user with members of their own
+// can't also join one (no chains). Invite tokens live at the bucket root
+// (invites/{token}.json) so the join route can resolve them without knowing
+// the owner.
+//
+// Pets stay physically under the owner's prefix, so the OWNER's plan governs
+// the shared pool (docs/meds caps, AI scan budget, active-pets ranking) no
+// matter who's acting. Members keep any pets of their own under their own
+// prefix with their own plan — the two pools never mix.
+interface HouseholdMember {
+  sub: string;
+  email: string;
+  joinedAt: string;
+}
+interface HouseholdInvite {
+  token: string;
+  createdAt: string;
+  expiresAt: string;
+}
+interface HouseholdFile {
+  members: HouseholdMember[];
+  invites: HouseholdInvite[];
+}
+interface MemberOf {
+  ownerSub: string;
+  ownerEmail: string;
+  joinedAt: string;
+}
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MEMBER_FORBIDDEN_ERROR =
+  'Only the family owner can do that.';
+// Destructive-container actions members can never take on household pets.
+const MEMBER_BLOCKED_ROUTES = new Set([
+  'DELETE /pets/{petId}',
+  'POST /pets/{petId}/passport',
+  'DELETE /pets/{petId}/passport',
+]);
+
+async function readHousehold(sub: string): Promise<HouseholdFile> {
+  const h = await readJson<Partial<HouseholdFile>>(`users/${sub}/household.json`);
+  return {
+    members: Array.isArray(h?.members) ? h.members : [],
+    invites: Array.isArray(h?.invites) ? h.invites : [],
+  };
+}
+const readMemberOf = (sub: string) => readJson<MemberOf>(`users/${sub}/memberOf.json`);
+
+// Display email for a sub. The access token the client sends carries no email
+// claim, so member emails come from Cognito at invite/join time.
+async function getUserEmail(sub: string): Promise<string> {
+  const res = await cognito.send(
+    new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: sub }),
+  );
+  return res.UserAttributes?.find((a) => a.Name === 'email')?.Value ?? '';
+}
+
+// Drop expired invites from a household file AND their bucket-root token
+// objects. Returns the pruned file; caller persists it if it changed.
+async function pruneInvites(h: HouseholdFile): Promise<{ h: HouseholdFile; changed: boolean }> {
+  const now = Date.now();
+  const live = h.invites.filter((i) => Date.parse(i.expiresAt) > now);
+  const dead = h.invites.filter((i) => Date.parse(i.expiresAt) <= now);
+  for (const i of dead) {
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${i.token}.json` }));
+  }
+  return { h: { members: h.members, invites: live }, changed: dead.length > 0 };
 }
 
 // ---- AI document extraction (Bedrock / Claude Haiku) ----
@@ -691,6 +773,24 @@ export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
   // Public routes handled before auth check.
+  // Invite preview for the /join page — token possession is the only auth,
+  // same trust model as passports (unguessable UUID, short-lived).
+  if (event.routeKey === 'GET /household/invites/{token}') {
+    try {
+      const token = event.pathParameters?.token;
+      if (!isUuid(token)) return json(404, { error: 'not found' });
+      const inv = await readJson<{ ownerEmail?: string; expiresAt?: string }>(
+        `invites/${token}.json`,
+      );
+      if (!inv || !inv.expiresAt || Date.parse(inv.expiresAt) <= Date.now()) {
+        return json(404, { error: 'not found' });
+      }
+      return json(200, { ownerEmail: inv.ownerEmail, expiresAt: inv.expiresAt });
+    } catch (e) {
+      console.error('invite info error', e);
+      return json(500, { error: 'internal error' });
+    }
+  }
   if (event.routeKey === 'GET /passport/{token}') {
     try { return await handlePublicPassport(event); }
     catch (e) { console.error('passport error', e); return json(500, { error: 'internal error' }); }
@@ -711,13 +811,37 @@ export const handler = async (
   const sub = event.requestContext.authorizer?.jwt?.claims?.sub as string | undefined;
   if (!sub) return json(401, { error: 'unauthorized' });
 
-  const petsPrefix = `users/${sub}/pets/`;
-
   // Pet-scoped routes carry {petId}; validate the shape before it touches a key.
   const petId = event.pathParameters?.petId;
   if (event.routeKey.includes('{petId}') && !isUuid(petId)) {
     return json(400, { error: 'invalid pet id' });
   }
+
+  // Family resolution. A petId not under the caller's own prefix may live in
+  // the household they belong to — if so, every prefix below swaps to the
+  // owner's, and the case code runs unchanged against the shared pool (the
+  // owner's entitlements govern it — see dataSub uses in the cases). Checked
+  // per-request, so removing a member cuts access immediately regardless of
+  // how long their JWT lives.
+  let dataSub = sub;
+  let role: 'owner' | 'member' = 'owner';
+  if (event.routeKey.includes('{petId}')) {
+    if ((await readJson(`users/${sub}/pets/${petId}/pet.json`)) === null) {
+      const membership = await readMemberOf(sub);
+      if (
+        membership &&
+        (await readJson(`users/${membership.ownerSub}/pets/${petId}/pet.json`)) !== null
+      ) {
+        dataSub = membership.ownerSub;
+        role = 'member';
+      }
+    }
+    if (role === 'member' && MEMBER_BLOCKED_ROUTES.has(event.routeKey)) {
+      return json(403, { error: MEMBER_FORBIDDEN_ERROR });
+    }
+  }
+
+  const petsPrefix = `users/${dataSub}/pets/`;
   const petPrefix = `${petsPrefix}${petId}/`;
   const petKey = `${petPrefix}pet.json`;
   const avatarKey = `${petPrefix}avatar`;
@@ -727,50 +851,82 @@ export const handler = async (
     switch (event.routeKey) {
       // ---- pets (each a small JSON object under its own prefix, no DB) ----
       case 'GET /pets': {
-        // One LIST covers everything under pets/: pet.json keys identify the
-        // pets, an `avatar` key marks a photo. Doc keys in the result are ignored.
-        const [list, entitlements] = await Promise.all([
-          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix })),
-          getEntitlements(sub),
-        ]);
-        const keys = (list.Contents ?? []).map((it) => it.Key!);
-        const ids = keys
-          .filter((k) => k.endsWith('/pet.json'))
-          .map((k) => k.slice(petsPrefix.length).split('/')[0]);
-        const pets = await Promise.all(
-          ids.map(async (id) => {
-            const pet = await readJson<{ name: string; species: string }>(
-              `${petsPrefix}${id}/pet.json`,
-            );
-            const hasAvatar = keys.includes(`${petsPrefix}${id}/avatar`);
-            const avatarUrl = hasAvatar
-              ? await getSignedUrl(
-                  s3,
-                  new GetObjectCommand({ Bucket: BUCKET, Key: `${petsPrefix}${id}/avatar` }),
-                  { expiresIn: 3600 },
-                )
-              : undefined;
-            return { id, ...pet, avatarUrl };
-          }),
-        );
-        // Stable order so the switcher doesn't shuffle between loads.
-        pets.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-        // Over-cap accounts: flag which pets still accept new docs/meds.
-        const activeIds = rankActivePets(
-          pets as { id: string; createdAt?: string }[],
-          entitlements.maxPets,
-        );
-        const flagged = pets.map((p) => ({ ...p, active: activeIds.has(p.id) }));
+        // One LIST per pool covers everything under pets/: pet.json keys
+        // identify the pets, an `avatar` key marks a photo.
+        const loadPool = async (poolSub: string) => {
+          const poolPrefix = `users/${poolSub}/pets/`;
+          const [list, ent] = await Promise.all([
+            s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix })),
+            getEntitlements(poolSub),
+          ]);
+          const keys = (list.Contents ?? []).map((it) => it.Key!);
+          const ids = keys
+            .filter((k) => k.endsWith('/pet.json'))
+            .map((k) => k.slice(poolPrefix.length).split('/')[0]);
+          const pets = await Promise.all(
+            ids.map(async (id) => {
+              const pet = await readJson<{ name: string; species: string }>(
+                `${poolPrefix}${id}/pet.json`,
+              );
+              const hasAvatar = keys.includes(`${poolPrefix}${id}/avatar`);
+              const avatarUrl = hasAvatar
+                ? await getSignedUrl(
+                    s3,
+                    new GetObjectCommand({ Bucket: BUCKET, Key: `${poolPrefix}${id}/avatar` }),
+                    { expiresIn: 3600 },
+                  )
+                : undefined;
+              return { id, ...pet, avatarUrl };
+            }),
+          );
+          // Over-cap accounts: flag which pets still accept new docs/meds —
+          // ranked within their own pool, by that pool's plan.
+          const activeIds = rankActivePets(
+            pets as { id: string; createdAt?: string }[],
+            ent.maxPets,
+          );
+          return { pets: pets.map((p) => ({ ...p, active: activeIds.has(p.id) })), ent };
+        };
+
+        const membership = await readMemberOf(sub);
+        const own = await loadPool(sub);
+        let pets: Record<string, unknown>[] = own.pets;
         // The client reads its limits from here — never hardcode them in the UI.
-        return json(200, { pets: flagged, limits: entitlements });
+        // For members, creation targets the household pool, so those are the
+        // limits that matter.
+        let limits = own.ent;
+        let family: Record<string, unknown> | undefined;
+        if (membership) {
+          const shared = await loadPool(membership.ownerSub);
+          pets = [...shared.pets.map((p) => ({ ...p, household: true })), ...own.pets];
+          limits = shared.ent;
+          family = { role: 'member', ownerEmail: membership.ownerEmail };
+        } else {
+          const household = await readHousehold(sub);
+          if (household.members.length > 0) {
+            family = { role: 'owner', memberCount: household.members.length };
+          }
+        }
+        // Stable order so the switcher doesn't shuffle between loads.
+        pets.sort((a, b) =>
+          String((a as { name?: string }).name ?? '').localeCompare(
+            String((b as { name?: string }).name ?? ''),
+          ),
+        );
+        return json(200, { pets, limits, family });
       }
 
       case 'POST /pets': {
         const pet = cleanPet(JSON.parse(event.body ?? '{}'));
         if (!pet.name) return json(400, { error: 'name required' });
+        // A member's new pet is a family pet: it goes into the household pool
+        // under the owner's prefix, governed by the owner's plan.
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
         const [list, ent] = await Promise.all([
-          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix })),
-          getEntitlements(sub),
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix })),
+          getEntitlements(poolSub),
         ]);
         const count = (list.Contents ?? []).filter((it) => it.Key!.endsWith('/pet.json')).length;
         if (count >= ent.maxPets) {
@@ -780,8 +936,10 @@ export const handler = async (
         // createdAt drives the active-pets ranking on downgrade; server-stamped
         // so it can't be forged into a better rank.
         const createdAt = new Date().toISOString();
-        await putJson(`${petsPrefix}${id}/pet.json`, { ...pet, createdAt });
-        return json(200, { pet: { id, ...pet, createdAt } });
+        await putJson(`${poolPrefix}${id}/pet.json`, { ...pet, createdAt });
+        return json(200, {
+          pet: { id, ...pet, createdAt, ...(membership ? { household: true } : {}) },
+        });
       }
 
       case 'PUT /pets/{petId}': {
@@ -900,7 +1058,7 @@ export const handler = async (
         // inflate the count and block uploads.
         const [list, ent] = await Promise.all([
           s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
-          getEntitlements(sub),
+          getEntitlements(dataSub),
         ]);
         const currentDocs = (list.Contents ?? []).filter(
           (it) => !it.Key!.includes('/_archived/'),
@@ -951,7 +1109,7 @@ export const handler = async (
         // a temp file it can never commit.
         const [list, ent] = await Promise.all([
           s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
-          getEntitlements(sub),
+          getEntitlements(dataSub),
         ]);
         const currentDocs = (list.Contents ?? []).filter((it) => !it.Key!.includes('/_archived/'));
         if (currentDocs.length >= ent.maxDocs) {
@@ -1023,11 +1181,13 @@ export const handler = async (
         }
         const data = Buffer.from(await obj.Body!.transformToByteArray()).toString('base64');
 
-        const ent = await getEntitlements(sub);
+        // Household pets bill AI scans to the owner's plan and daily budget —
+        // the family shares one scan allowance, like every other cap.
+        const ent = await getEntitlements(dataSub);
         const cap = ent.plan === 'paid' ? PAID_MAX_AI_SCANS : MAX_AI_SCANS;
         // Bump after the cheap rejections but before the model call: failed
         // model calls still count, so a hostile client can't loop free scans.
-        const quota = await bumpAiQuota(sub, cap);
+        const quota = await bumpAiQuota(dataSub, cap);
         if (!quota.ok) return json(429, { error: 'AI_QUOTA_EXCEEDED' });
 
         let extraction: Extraction;
@@ -1095,7 +1255,7 @@ export const handler = async (
         const [tmpList, docList, ent] = await Promise.all([
           s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: tmpPrefix })),
           s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
-          getEntitlements(sub),
+          getEntitlements(dataSub),
         ]);
         const tmpKey = tmpList.Contents?.[0]?.Key;
         if (!tmpKey) return json(404, { error: 'upload not found' });
@@ -1181,7 +1341,7 @@ export const handler = async (
 
         const [docList, ent] = await Promise.all([
           s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: docsPrefix })),
-          getEntitlements(sub),
+          getEntitlements(dataSub),
         ]);
         const currentDocs = (docList.Contents ?? []).filter(
           (it) => !it.Key!.includes('/_archived/'),
@@ -1282,7 +1442,7 @@ export const handler = async (
         // meds can't be stashed under arbitrary petIds outside the pet limit.
         const [existingPet, ent, stored] = await Promise.all([
           readJson(petKey),
-          getEntitlements(sub),
+          getEntitlements(dataSub),
           readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
         ]);
         if (existingPet === null) return json(404, { error: 'not found' });
@@ -1399,6 +1559,26 @@ export const handler = async (
           }
         }
 
+        // Family cleanup, both directions: members' back-pointers and pending
+        // invite tokens die with an owner; a member's seat is freed with them.
+        const household = await readHousehold(sub);
+        for (const m of household.members) {
+          await s3.send(
+            new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${m.sub}/memberOf.json` }),
+          );
+        }
+        for (const i of household.invites) {
+          await s3.send(
+            new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${i.token}.json` }),
+          );
+        }
+        const membership = await readMemberOf(sub);
+        if (membership) {
+          const oh = await readHousehold(membership.ownerSub);
+          oh.members = oh.members.filter((m) => m.sub !== sub);
+          await putJson(`users/${membership.ownerSub}/household.json`, oh);
+        }
+
         await deletePrefix(`users/${sub}/`);
 
         await cognito.send(
@@ -1489,6 +1669,139 @@ export const handler = async (
             Body: JSON.stringify(rest),
             ContentType: 'application/json',
           }),
+        );
+        return { statusCode: 204 };
+      }
+
+      // ---- family / household ----
+
+      case 'GET /household': {
+        const membership = await readMemberOf(sub);
+        if (membership) {
+          return json(200, {
+            role: 'member',
+            ownerEmail: membership.ownerEmail,
+            joinedAt: membership.joinedAt,
+          });
+        }
+        const [raw, ent] = await Promise.all([readHousehold(sub), getEntitlements(sub)]);
+        const { h, changed } = await pruneInvites(raw);
+        if (changed) await putJson(`users/${sub}/household.json`, h);
+        return json(200, {
+          role: 'owner',
+          members: h.members.map((m) => ({ sub: m.sub, email: m.email, joinedAt: m.joinedAt })),
+          invites: h.invites.map((i) => ({
+            token: i.token,
+            url: `${APP_URL}/join/${i.token}`,
+            expiresAt: i.expiresAt,
+          })),
+          maxMembers: ent.maxMembers,
+        });
+      }
+
+      case 'POST /household/invites': {
+        // Members can't build households of their own (no chains), so being
+        // in one blocks inviting.
+        if (await readMemberOf(sub)) {
+          return json(409, { error: 'ALREADY_IN_FAMILY' });
+        }
+        const [raw, ent] = await Promise.all([readHousehold(sub), getEntitlements(sub)]);
+        const { h } = await pruneInvites(raw);
+        // Pending invites count against the cap — an invite is a promised seat.
+        if (h.members.length + h.invites.length >= ent.maxMembers) {
+          return json(409, { error: 'MEMBER_LIMIT_REACHED', maxMembers: ent.maxMembers });
+        }
+        const token = randomUUID();
+        const createdAt = new Date().toISOString();
+        const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
+        const ownerEmail = await getUserEmail(sub);
+        await putJson(`invites/${token}.json`, { ownerSub: sub, ownerEmail, createdAt, expiresAt });
+        h.invites.push({ token, createdAt, expiresAt });
+        await putJson(`users/${sub}/household.json`, h);
+        return json(200, { token, url: `${APP_URL}/join/${token}`, expiresAt });
+      }
+
+      case 'DELETE /household/invites/{token}': {
+        const token = event.pathParameters?.token;
+        if (!isUuid(token)) return json(404, { error: 'not found' });
+        const h = await readHousehold(sub);
+        // Only the invite's owner can revoke it — it must be in THEIR list.
+        if (!h.invites.some((i) => i.token === token)) return json(404, { error: 'not found' });
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${token}.json` }));
+        h.invites = h.invites.filter((i) => i.token !== token);
+        await putJson(`users/${sub}/household.json`, h);
+        return { statusCode: 204 };
+      }
+
+      case 'POST /household/join': {
+        const input = JSON.parse(event.body ?? '{}');
+        const token = typeof input.token === 'string' ? input.token : undefined;
+        if (!isUuid(token)) return json(400, { error: 'token required' });
+        const inv = await readJson<{ ownerSub: string; ownerEmail: string; expiresAt: string }>(
+          `invites/${token}.json`,
+        );
+        const existing = await readMemberOf(sub);
+        if (existing) {
+          // Re-clicking an already-used link (its token object is deleted on
+          // join) shouldn't error out — but a live invite to a DIFFERENT
+          // family still conflicts.
+          if (!inv || inv.ownerSub === existing.ownerSub) {
+            return json(200, { ownerEmail: existing.ownerEmail });
+          }
+          return json(409, { error: 'ALREADY_IN_FAMILY' });
+        }
+        if (!inv || Date.parse(inv.expiresAt) <= Date.now()) {
+          return json(404, { error: 'INVITE_NOT_FOUND' });
+        }
+        if (inv.ownerSub === sub) return json(409, { error: 'OWN_INVITE' });
+        const ownFamily = await readHousehold(sub);
+        if (ownFamily.members.length > 0) {
+          return json(409, { error: 'HAS_OWN_FAMILY' });
+        }
+        const [ownerHousehold, ownerEnt] = await Promise.all([
+          readHousehold(inv.ownerSub),
+          getEntitlements(inv.ownerSub),
+        ]);
+        if (ownerHousehold.members.length >= ownerEnt.maxMembers) {
+          return json(409, { error: 'MEMBER_LIMIT_REACHED' });
+        }
+        const email = await getUserEmail(sub);
+        const joinedAt = new Date().toISOString();
+        // memberOf first: if the household.json write fails, the pointer is
+        // harmless (owner's file omits them; a retry heals it).
+        await putJson(`users/${sub}/memberOf.json`, {
+          ownerSub: inv.ownerSub,
+          ownerEmail: inv.ownerEmail,
+          joinedAt,
+        });
+        ownerHousehold.members.push({ sub, email, joinedAt });
+        ownerHousehold.invites = ownerHousehold.invites.filter((i) => i.token !== token);
+        await putJson(`users/${inv.ownerSub}/household.json`, ownerHousehold);
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${token}.json` }));
+        return json(200, { ownerEmail: inv.ownerEmail });
+      }
+
+      case 'DELETE /household/members/{memberSub}': {
+        const memberSub = event.pathParameters?.memberSub;
+        if (!isUuid(memberSub)) return json(404, { error: 'not found' });
+        const h = await readHousehold(sub);
+        if (!h.members.some((m) => m.sub === memberSub)) return json(404, { error: 'not found' });
+        await s3.send(
+          new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${memberSub}/memberOf.json` }),
+        );
+        h.members = h.members.filter((m) => m.sub !== memberSub);
+        await putJson(`users/${sub}/household.json`, h);
+        return { statusCode: 204 };
+      }
+
+      case 'POST /household/leave': {
+        const membership = await readMemberOf(sub);
+        if (!membership) return json(404, { error: 'not in a family' });
+        const ownerHousehold = await readHousehold(membership.ownerSub);
+        ownerHousehold.members = ownerHousehold.members.filter((m) => m.sub !== sub);
+        await putJson(`users/${membership.ownerSub}/household.json`, ownerHousehold);
+        await s3.send(
+          new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${sub}/memberOf.json` }),
         );
         return { statusCode: 204 };
       }

@@ -8,6 +8,7 @@ import { Privacy } from './pages/Privacy';
 import { PassportPage } from './pages/PassportPage';
 import { UnsubscribePage } from './pages/UnsubscribePage';
 import { DoorPage } from './pages/DoorPage';
+import { JoinPage } from './pages/JoinPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
       <Route path="/p/:token" element={<PassportPage />} />
       <Route path="/unsubscribe" element={<UnsubscribePage />} />
       <Route path="/door" element={<DoorPage />} />
+      <Route path="/join/:token" element={<JoinPage />} />
       <Route
         path="/dashboard"
         element={

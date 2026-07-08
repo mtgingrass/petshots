@@ -87,6 +87,11 @@ export class ApiStack extends cdk.Stack {
         PAID_MAX_DOCS: '999',
         PAID_MAX_MEDS: '20',
 
+        // Family members (besides the owner). Pets stay under the owner's
+        // prefix, so the owner's plan governs the shared pool.
+        MAX_MEMBERS: '1',
+        PAID_MAX_MEMBERS: '5',
+
         MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
 
         // AI document extraction (Bedrock, Claude Sonnet 4.6). Daily per-user
@@ -128,11 +133,12 @@ export class ApiStack extends cdk.Stack {
       }),
     );
 
-    // Self-service account deletion. Scoped to this pool; the Lambda only ever
-    // deletes the sub from the verified JWT, so users can only delete themselves.
+    // AdminDeleteUser: self-service account deletion (only ever the verified
+    // JWT's own sub). AdminGetUser: display emails for family invites/joins —
+    // the access token carries no email claim.
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminDeleteUser'],
+        actions: ['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminGetUser'],
         resources: [userPool.userPoolArn],
       }),
     );
@@ -228,6 +234,12 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.DELETE, '/pets/{petId}/passport'],
       [HttpMethod.GET, '/settings'],
       [HttpMethod.PUT, '/settings'],
+      [HttpMethod.GET, '/household'],
+      [HttpMethod.POST, '/household/invites'],
+      [HttpMethod.DELETE, '/household/invites/{token}'],
+      [HttpMethod.POST, '/household/join'],
+      [HttpMethod.DELETE, '/household/members/{memberSub}'],
+      [HttpMethod.POST, '/household/leave'],
       [HttpMethod.POST, '/billing/checkout'],
       [HttpMethod.POST, '/billing/portal'],
       [HttpMethod.DELETE, '/account'],
@@ -239,6 +251,14 @@ export class ApiStack extends cdk.Stack {
     // Public passport endpoint — no Cognito token required; the Lambda checks the
     // passport token's validity itself.
     httpApi.addRoutes({ path: '/passport/{token}', methods: [HttpMethod.GET], integration });
+
+    // Public invite preview for the /join page (who invited you, is it live) —
+    // possession of the unguessable token is the auth, same as passports.
+    httpApi.addRoutes({
+      path: '/household/invites/{token}',
+      methods: [HttpMethod.GET],
+      integration,
+    });
 
     // Stripe webhook — server-to-server, authenticated by the webhook signature
     // (verified in the Lambda), so no Cognito authorizer.

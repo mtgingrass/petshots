@@ -321,21 +321,33 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
       const userSub = userPrefix.slice('users/'.length).replace(/\/$/, '');
       const unsubUrl = `${APP_URL}/unsubscribe?u=${userSub}&t=${settings.unsubToken}`;
 
-      const petsList = await s3.send(
-        new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}pets/` }),
-      );
-      const petIds = (petsList.Contents ?? [])
-        .filter((it) => it.Key!.endsWith('/pet.json'))
-        .map((it) => it.Key!.slice(`${userPrefix}pets/`.length).split('/')[0]);
+      // Pets this user should hear about: their own, plus the household's if
+      // they're a family member (users/{sub}/memberOf.json points at the
+      // owner whose prefix holds the shared pets). Each recipient's own
+      // settings/milestones still govern their email.
+      const petSources: { base: string; petId: string }[] = [];
+      const collectPets = async (base: string) => {
+        const petsList = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${base}pets/` }),
+        );
+        for (const it of petsList.Contents ?? []) {
+          if (it.Key!.endsWith('/pet.json')) {
+            petSources.push({ base, petId: it.Key!.slice(`${base}pets/`.length).split('/')[0] });
+          }
+        }
+      };
+      await collectPets(userPrefix);
+      const membership = await readJson<{ ownerSub?: string }>(`${userPrefix}memberOf.json`);
+      if (membership?.ownerSub) await collectPets(`users/${membership.ownerSub}/`);
 
       const dueDocs: DueDoc[] = [];
       const dueMeds: DueMed[] = [];
       const birthdays: Birthday[] = [];
       const today = new Date();
 
-      for (const petId of petIds) {
+      for (const { base, petId } of petSources) {
         const pet = await readJson<{ name: string; dob?: string }>(
-          `${userPrefix}pets/${petId}/pet.json`,
+          `${base}pets/${petId}/pet.json`,
         );
         if (!pet?.name) continue;
 
@@ -349,7 +361,7 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
           const docsList = await s3.send(
             new ListObjectsV2Command({
               Bucket: BUCKET,
-              Prefix: `${userPrefix}pets/${petId}/docs/`,
+              Prefix: `${base}pets/${petId}/docs/`,
             }),
           );
           for (const it of (docsList.Contents ?? []).filter((x) => !x.Key!.includes('/_archived/'))) {
@@ -364,7 +376,7 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
           }
         }
 
-        const stored = await readJson<{ meds: Med[] }>(`${userPrefix}pets/${petId}/meds.json`);
+        const stored = await readJson<{ meds: Med[] }>(`${base}pets/${petId}/meds.json`);
         for (const med of stored?.meds ?? []) {
           if (med.dismissed === true || med.remindersEnabled === false || !med.nextDue) continue;
           const days = daysUntil(med.nextDue);

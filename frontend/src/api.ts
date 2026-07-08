@@ -17,6 +17,10 @@ export interface Pet {
   // False when the account holds more pets than its plan allows and this pet
   // is outside the oldest-N set: still fully viewable, but no new docs/meds.
   active?: boolean;
+  // True when this pet belongs to the family the caller is a member of (it
+  // lives under the owner's account). Members can't delete it or manage its
+  // passport — the server enforces this; the flag drives the UI.
+  household?: boolean;
   passportToken?: string;
   passportExpiry?: string; // YYYY-MM-DD
   // optional health profile fields
@@ -134,9 +138,17 @@ export interface Limits {
   maxPets: number;
   maxDocs: number;
   maxMeds: number;
+  maxMembers?: number; // family members besides the owner (absent on older API)
 }
 
-export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 8, maxMeds: 4 };
+export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 8, maxMeds: 4, maxMembers: 1 };
+
+// Family summary riding on GET /pets: enough for badges without an extra call.
+export interface FamilyInfo {
+  role: 'owner' | 'member';
+  ownerEmail?: string; // member view
+  memberCount?: number; // owner view
+}
 
 // fetch() rejects with a browser-internal message ("Failed to fetch") when the
 // network is down or CORS blocks the call — translate it for humans.
@@ -187,8 +199,62 @@ async function postToS3(presign: { url: string; fields: Record<string, string> }
 
 // ---- pets ----
 
-export function listPets(): Promise<{ pets: Pet[]; limits?: Limits }> {
+export function listPets(): Promise<{ pets: Pet[]; limits?: Limits; family?: FamilyInfo }> {
   return request('GET', '/pets');
+}
+
+// ---- family / household ----
+
+export interface HouseholdMemberView {
+  sub: string;
+  email: string;
+  joinedAt: string;
+}
+export interface HouseholdInviteView {
+  token: string;
+  url: string;
+  expiresAt: string;
+}
+export type Household =
+  | {
+      role: 'owner';
+      members: HouseholdMemberView[];
+      invites: HouseholdInviteView[];
+      maxMembers: number;
+    }
+  | { role: 'member'; ownerEmail: string; joinedAt: string };
+
+export function getHousehold(): Promise<Household> {
+  return request('GET', '/household');
+}
+
+export function createInvite(): Promise<{ token: string; url: string; expiresAt: string }> {
+  return request('POST', '/household/invites');
+}
+
+export function revokeInvite(token: string): Promise<void> {
+  return request('DELETE', `/household/invites/${token}`);
+}
+
+export function joinHousehold(token: string): Promise<{ ownerEmail: string }> {
+  return request('POST', '/household/join', { token });
+}
+
+export function removeMember(memberSub: string): Promise<void> {
+  return request('DELETE', `/household/members/${memberSub}`);
+}
+
+export function leaveHousehold(): Promise<void> {
+  return request('POST', '/household/leave');
+}
+
+// Public (no login): the /join page's invite preview.
+export async function getInviteInfo(
+  token: string,
+): Promise<{ ownerEmail?: string; expiresAt: string }> {
+  const res = await friendlyFetch(`${config.apiBaseUrl}/household/invites/${token}`);
+  if (!res.ok) throw new Error('This invite link is invalid or has expired.');
+  return (await res.json()) as { ownerEmail?: string; expiresAt: string };
 }
 
 export function createPet(name: string, species: string): Promise<{ pet: Pet }> {

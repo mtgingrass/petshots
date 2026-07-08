@@ -25,6 +25,11 @@ import {
   getSettings,
   saveSettings,
   deleteAccount,
+  getHousehold,
+  createInvite,
+  revokeInvite,
+  removeMember,
+  leaveHousehold,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -33,6 +38,7 @@ import {
   type Med,
   type MedUnit,
   type UserSettings,
+  type Household,
   type Extraction,
   type CommitRecord,
   type ProfilePatch,
@@ -342,6 +348,16 @@ export function Dashboard() {
   useEffect(() => {
     void loadPets();
   }, [loadPets]);
+
+  // A family invite followed through signup/login lands here — bounce back to
+  // the join page to finish accepting. One-shot: clear the key first so
+  // declining ("Not now") can't loop back.
+  useEffect(() => {
+    const inviteToken = localStorage.getItem('petshots.pendingInvite');
+    if (!inviteToken) return;
+    localStorage.removeItem('petshots.pendingInvite');
+    navigate(`/join/${inviteToken}`);
+  }, [navigate]);
 
   // Flush marketing opt-in captured at signup (stored before the user was logged in).
   useEffect(() => {
@@ -1130,7 +1146,7 @@ function PetForm({
           </button>
         )}
       </div>
-      {pet && onDeletePet && (
+      {pet && onDeletePet && !pet.household && (
         <div className="actions">
           <button
             type="button"
@@ -1141,6 +1157,11 @@ function PetForm({
             Delete {pet.name}…
           </button>
         </div>
+      )}
+      {pet?.household && (
+        <p className="subtle">
+          {pet.name} is a family pet — only the family owner can delete it.
+        </p>
       )}
     </form>
   );
@@ -3033,6 +3054,15 @@ function PassportTabSection({
   }
 
   if (!passportUrl) {
+    if (pet.household) {
+      return (
+        <div className="share-tab card">
+          <p className="subtle">
+            Only the family owner can create share links for {pet.name}.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="share-tab card">
         <p className="share-tab__intro">
@@ -3083,16 +3113,20 @@ function PassportTabSection({
         </p>
       )}
 
-      <div className="share-tab__revoke">
-        <button
-          className="btn btn--link btn--danger"
-          onClick={handleRevoke}
-          disabled={busy}
-        >
-          {busy ? 'Revoking…' : 'Revoke link'}
-        </button>
-        <span className="subtle share-tab__revoke-hint">Revoked links stop working immediately.</span>
-      </div>
+      {pet.household ? (
+        <p className="subtle">Only the family owner can revoke this link.</p>
+      ) : (
+        <div className="share-tab__revoke">
+          <button
+            className="btn btn--link btn--danger"
+            onClick={handleRevoke}
+            disabled={busy}
+          >
+            {busy ? 'Revoking…' : 'Revoke link'}
+          </button>
+          <span className="subtle share-tab__revoke-hint">Revoked links stop working immediately.</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -3515,6 +3549,8 @@ function SettingsScreen({
               </div>
             </fieldset>
 
+            <FamilySection onError={onError} />
+
             <fieldset className="settings-group">
               <legend>Appearance</legend>
               <div className="settings-row">
@@ -3701,6 +3737,201 @@ function SettingsScreen({
         )}
       </div>
     </div>
+  );
+}
+
+// ---- family (Settings card) ----
+// Owner: invite links (7-day expiry), member list with remove. Member: who
+// you're sharing with + leave. Server enforces everything; this is just the
+// controls.
+function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
+  const [household, setHousehold] = useState<Household | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null); // invite token
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null); // member sub
+  const [confirmLeave, setConfirmLeave] = useState(false);
+
+  const load = useCallback(() => {
+    getHousehold()
+      .then(setHousehold)
+      .catch(() => setHousehold(null));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleInvite() {
+    setBusy(true);
+    onError(null);
+    try {
+      await createInvite();
+      load();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      onError(
+        msg === 'MEMBER_LIMIT_REACHED'
+          ? 'Your plan has no member seats left. Revoke a pending invite or upgrade.'
+          : msg || 'Could not create the invite',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleShare(url: string, token: string) {
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: 'Join my Petshots family',
+          text: "Join my Petshots family — our pets' vaccine records and med reminders, shared.",
+          url,
+        });
+        return;
+      } catch {
+        /* user cancelled */
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(token);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      onError('Could not copy — try long-pressing the link');
+    }
+  }
+
+  async function handleRevoke(token: string) {
+    setBusy(true);
+    try {
+      await revokeInvite(token);
+      load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not revoke the invite');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemove(sub: string) {
+    setBusy(true);
+    try {
+      await removeMember(sub);
+      setConfirmRemove(null);
+      load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not remove the member');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleLeave() {
+    setBusy(true);
+    try {
+      await leaveHousehold();
+      setConfirmLeave(false);
+      load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not leave the family');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!household) return null;
+
+  if (household.role === 'member') {
+    return (
+      <fieldset className="settings-group">
+        <legend>Family</legend>
+        <div className="settings-row">
+          <span className="settings-row__label">
+            You share <strong>{household.ownerEmail}</strong>'s family pets
+            <span className="subtle settings-row__sub">
+              Their records and reminders show alongside your own.
+            </span>
+          </span>
+        </div>
+        {confirmLeave ? (
+          <div className="actions">
+            <button className="btn btn--danger" type="button" disabled={busy} onClick={() => void handleLeave()}>
+              {busy ? 'Leaving…' : 'Yes, leave the family'}
+            </button>
+            <button className="btn" type="button" disabled={busy} onClick={() => setConfirmLeave(false)}>
+              Stay
+            </button>
+          </div>
+        ) : (
+          <button className="btn btn--link btn--danger" type="button" onClick={() => setConfirmLeave(true)}>
+            Leave family…
+          </button>
+        )}
+      </fieldset>
+    );
+  }
+
+  const seatsUsed = household.members.length + household.invites.length;
+  return (
+    <fieldset className="settings-group">
+      <legend>Family</legend>
+      <p className="subtle">
+        Family members see and update your pets' records, meds, and reminders.
+        They can't delete pets or manage share links.
+      </p>
+
+      {household.members.map((m) => (
+        <div className="settings-row" key={m.sub}>
+          <span className="settings-row__label">
+            {m.email}
+            <span className="subtle settings-row__sub">Member since {formatDate(m.joinedAt.slice(0, 10))}</span>
+          </span>
+          {confirmRemove === m.sub ? (
+            <span className="actions">
+              <button className="btn btn--danger" type="button" disabled={busy} onClick={() => void handleRemove(m.sub)}>
+                Remove
+              </button>
+              <button className="btn" type="button" disabled={busy} onClick={() => setConfirmRemove(null)}>
+                Keep
+              </button>
+            </span>
+          ) : (
+            <button className="btn btn--link btn--danger" type="button" onClick={() => setConfirmRemove(m.sub)}>
+              Remove…
+            </button>
+          )}
+        </div>
+      ))}
+
+      {household.invites.map((i) => (
+        <div className="settings-row" key={i.token}>
+          <span className="settings-row__label">
+            Invite link (pending)
+            <span className="subtle settings-row__sub">Expires {formatDate(i.expiresAt.slice(0, 10))}</span>
+          </span>
+          <span className="actions">
+            <button className="btn" type="button" onClick={() => void handleShare(i.url, i.token)}>
+              {copied === i.token ? 'Copied!' : 'Share'}
+            </button>
+            <button className="btn btn--link btn--danger" type="button" disabled={busy} onClick={() => void handleRevoke(i.token)}>
+              Revoke
+            </button>
+          </span>
+        </div>
+      ))}
+
+      {seatsUsed < household.maxMembers ? (
+        <button className="btn btn--primary" type="button" disabled={busy} onClick={() => void handleInvite()}>
+          {busy ? 'Working…' : '+ Invite a family member'}
+        </button>
+      ) : (
+        <p className="subtle">
+          {household.maxMembers === 1
+            ? 'Your plan includes 1 family member.'
+            : `All ${household.maxMembers} member seats on your plan are in use.`}
+          {household.maxMembers === 1 && seatsUsed >= 1 ? ' Upgrade for up to 5.' : ''}
+        </p>
+      )}
+    </fieldset>
   );
 }
 

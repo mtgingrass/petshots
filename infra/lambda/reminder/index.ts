@@ -1,5 +1,11 @@
-import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  ListObjectsV2Command,
+  GetObjectCommand,
+  PutObjectCommand,
+} from '@aws-sdk/client-s3';
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { randomUUID } from 'node:crypto';
 
 const s3 = new S3Client({
   requestChecksumCalculation: 'WHEN_REQUIRED',
@@ -14,6 +20,8 @@ interface UserSettings {
   email?: string;
   remindersEnabled?: boolean;
   reminderDays?: number[];
+  emailOptOut?: boolean; // master kill-switch: true = never email this user
+  unsubToken?: string; // per-user secret for the no-login unsubscribe link
 }
 
 interface DocMeta {
@@ -65,10 +73,46 @@ function daysUntil(day: string): number {
   return Math.round((d.getTime() - today.getTime()) / 86_400_000);
 }
 
-// A med reminder fires on the due day, then weekly while it stays overdue —
-// nagging without spamming daily. NaN days (bad date) never matches.
-function medDueToday(days: number): boolean {
-  return days === 0 || (days < 0 && (-days) % 7 === 0);
+type Phase = 'overdue' | 'today' | 'upcoming';
+
+function phaseFor(days: number): Phase {
+  if (days > 0) return 'upcoming';
+  if (days === 0) return 'today';
+  return 'overdue';
+}
+
+// Shared overdue cadence for both vaccines and meds: weekly nags for the
+// first month, then taper to monthly so a long-neglected record doesn't nag
+// forever. NaN days (bad date) never matches.
+function overdueCadenceMatch(overdueDays: number): boolean {
+  if (overdueDays <= 0) return false;
+  if (overdueDays <= 30) return overdueDays % 7 === 0;
+  return overdueDays % 30 === 0;
+}
+
+// Vaccine trigger days = whatever the user picked in Settings, PLUS a forced
+// "final countdown" (3 days and 1 day before) so the last-mile warning never
+// depends on the user having picked those specific milestones, PLUS the
+// expiry day itself. Once past expiry, hand off to the overdue cadence.
+function docShouldRemind(days: number, userDays: number[]): boolean {
+  if (days > 0) return userDays.includes(days) || days === 3 || days === 1;
+  if (days === 0) return true;
+  return overdueCadenceMatch(-days);
+}
+
+// A med reminder fires on the due day, then on the overdue cadence, plus (for
+// meds with a week-or-longer cadence) a single "due in 3 days" heads-up —
+// skipped for daily/short-cycle meds where "coming due" is meaningless.
+function medShouldRemind(days: number, effectiveIntervalDays: number): boolean {
+  if (days === 0) return true;
+  if (days > 0) return days === 3 && effectiveIntervalDays >= 7;
+  return overdueCadenceMatch(-days);
+}
+
+function effectiveMedIntervalDays(unit: Med['unit'], interval: number): number {
+  if (unit === 'day') return interval;
+  if (unit === 'week') return interval * 7;
+  return interval * 30; // month, approximate — only used for the >=7-day gate
 }
 
 function formatDate(d: string): string {
@@ -79,8 +123,8 @@ function formatDate(d: string): string {
   });
 }
 
-interface DueDoc { petName: string; label: string; expiry: string; days: number }
-interface DueMed { petName: string; name: string; nextDue: string; days: number }
+interface DueDoc { petName: string; label: string; expiry: string; days: number; phase: Phase }
+interface DueMed { petName: string; name: string; nextDue: string; days: number; phase: Phase }
 interface Birthday { petName: string; age: number }
 
 // True when today (Lambda runs in UTC) is the pet's birthday. Feb-29 birthdays
@@ -100,12 +144,58 @@ function isBirthdayToday(dob: string, today: Date): boolean {
   return false;
 }
 
+function docBullet(d: DueDoc): string {
+  if (d.phase === 'overdue') {
+    const od = -d.days;
+    return `• ${d.petName}'s ${d.label} — expired ${formatDate(d.expiry)} (${od} day${od === 1 ? '' : 's'} overdue)`;
+  }
+  if (d.phase === 'today') {
+    return `• ${d.petName}'s ${d.label} — expires today`;
+  }
+  const when = d.days === 1 ? 'tomorrow' : `in ${d.days} days`;
+  return `• ${d.petName}'s ${d.label} — expires ${formatDate(d.expiry)} (${when})`;
+}
+
+function medBullet(m: DueMed): string {
+  if (m.phase === 'overdue') {
+    const od = -m.days;
+    return `• ${m.petName}'s ${m.name} — ${od} day${od === 1 ? '' : 's'} overdue (was due ${formatDate(m.nextDue)})`;
+  }
+  if (m.phase === 'today') {
+    return `• ${m.petName}'s ${m.name} — due today`;
+  }
+  const when = m.days === 1 ? 'tomorrow' : `in ${m.days} days`;
+  return `• ${m.petName}'s ${m.name} — due ${formatDate(m.nextDue)} (${when})`;
+}
+
+// Combines docs + meds for one urgency tier into a single bulleted block,
+// most-urgent-first (most overdue, or soonest-upcoming).
+function urgencySection(title: string, docs: DueDoc[], meds: DueMed[]): string | null {
+  if (docs.length === 0 && meds.length === 0) return null;
+  const items = [
+    ...meds.map((m) => ({ days: m.days, text: medBullet(m) })),
+    ...docs.map((d) => ({ days: d.days, text: docBullet(d) })),
+  ].sort((a, b) => a.days - b.days);
+  return `${title}:\n${items.map((i) => i.text).join('\n')}`;
+}
+
 function composeEmail(
   dueDocs: DueDoc[],
   dueMeds: DueMed[],
-  birthdays: Birthday[] = [],
+  birthdays: Birthday[],
+  unsubUrl: string,
 ): { subject: string; body: string } {
-  const total = dueDocs.length + dueMeds.length;
+  const overdueDocs = dueDocs.filter((d) => d.phase === 'overdue');
+  const overdueMeds = dueMeds.filter((m) => m.phase === 'overdue');
+  const todayDocs = dueDocs.filter((d) => d.phase === 'today');
+  const todayMeds = dueMeds.filter((m) => m.phase === 'today');
+  const upcomingDocs = dueDocs.filter((d) => d.phase === 'upcoming');
+  const upcomingMeds = dueMeds.filter((m) => m.phase === 'upcoming');
+
+  const overdueCount = overdueDocs.length + overdueMeds.length;
+  const todayCount = todayDocs.length + todayMeds.length;
+  const upcomingCount = upcomingDocs.length + upcomingMeds.length;
+  const total = overdueCount + todayCount + upcomingCount;
 
   let subject: string;
   if (total === 0 && birthdays.length > 0) {
@@ -116,20 +206,36 @@ function composeEmail(
         : b.age >= 1
           ? `🎂 ${b.petName} turns ${b.age} today!`
           : `🎂 Happy birthday, ${b.petName}!`;
-  } else if (total === 1 && dueMeds.length === 1) {
-    const m = dueMeds[0];
-    subject = m.days === 0
-      ? `Reminder: ${m.petName}'s ${m.name} is due today`
-      : `Reminder: ${m.petName}'s ${m.name} is overdue`;
-  } else if (total === 1) {
-    const d = dueDocs[0];
+  } else if (overdueCount === 1 && total === 1) {
+    if (overdueDocs.length === 1) {
+      const d = overdueDocs[0];
+      const od = -d.days;
+      subject = `⚠️ ${d.petName}'s ${d.label} is ${od} day${od === 1 ? '' : 's'} overdue`;
+    } else {
+      const m = overdueMeds[0];
+      const od = -m.days;
+      subject = `⚠️ ${m.petName}'s ${m.name} is ${od} day${od === 1 ? '' : 's'} overdue`;
+    }
+  } else if (overdueCount > 0) {
+    subject = `⚠️ Petshots: ${overdueCount} overdue reminder${overdueCount !== 1 ? 's' : ''}`;
+  } else if (todayCount === 1 && total === 1) {
+    subject = todayDocs.length === 1
+      ? `Reminder: ${todayDocs[0].petName}'s ${todayDocs[0].label} expires today`
+      : `Reminder: ${todayMeds[0].petName}'s ${todayMeds[0].name} is due today`;
+  } else if (todayCount > 0) {
+    subject = `Petshots: ${todayCount} reminder${todayCount !== 1 ? 's' : ''} due today`;
+  } else if (upcomingCount === 1 && upcomingMeds.length === 1) {
+    const m = upcomingMeds[0];
+    subject = `Reminder: ${m.petName}'s ${m.name} is due in ${m.days} day${m.days !== 1 ? 's' : ''}`;
+  } else if (upcomingCount === 1) {
+    const d = upcomingDocs[0];
     subject = `Reminder: ${d.petName}'s ${d.label} expires in ${d.days} day${d.days !== 1 ? 's' : ''}`;
-  } else if (dueMeds.length === 0) {
-    subject = `Petshots: ${total} vaccine records expiring soon`;
-  } else if (dueDocs.length === 0) {
-    subject = `Petshots: ${total} medications due`;
+  } else if (upcomingMeds.length === 0) {
+    subject = `Petshots: ${upcomingCount} vaccine records expiring soon`;
+  } else if (upcomingDocs.length === 0) {
+    subject = `Petshots: ${upcomingCount} medications due soon`;
   } else {
-    subject = `Petshots: ${total} pet care reminders`;
+    subject = `Petshots: ${upcomingCount} pet care reminders`;
   }
 
   const sections: string[] = [];
@@ -144,27 +250,14 @@ function composeEmail(
         .join('\n'),
     );
   }
-  if (dueMeds.length > 0) {
-    const bullets = dueMeds
-      .map((m) => {
-        const when = m.days === 0
-          ? 'due today'
-          : `${-m.days} day${m.days === -1 ? '' : 's'} overdue (was due ${formatDate(m.nextDue)})`;
-        return `• ${m.petName}'s ${m.name} — ${when}`;
-      })
-      .join('\n');
-    sections.push(`Medications due:\n${bullets}`);
-  }
-  if (dueDocs.length > 0) {
-    const bullets = dueDocs
-      .map((r) => {
-        const when = r.days === 0 ? 'today' : r.days === 1 ? 'tomorrow' : `in ${r.days} days`;
-        return `• ${r.petName}'s ${r.label} — expires ${formatDate(r.expiry)} (${when})`;
-      })
-      .join('\n');
-    sections.push(`Vaccine records expiring:\n${bullets}`);
-  }
+  const overdueSection = urgencySection('⚠️ Overdue', overdueDocs, overdueMeds);
+  if (overdueSection) sections.push(overdueSection);
+  const todaySection = urgencySection('📅 Due today', todayDocs, todayMeds);
+  if (todaySection) sections.push(todaySection);
+  const upcomingSection = urgencySection('Coming up', upcomingDocs, upcomingMeds);
+  if (upcomingSection) sections.push(upcomingSection);
 
+  const anyMeds = dueMeds.length > 0;
   const body = [
     `Hi,`,
     ``,
@@ -172,13 +265,14 @@ function composeEmail(
     ``,
     sections.join('\n\n'),
     ``,
-    dueMeds.length > 0
+    anyMeds
       ? `Mark meds as given and keep records up to date: ${APP_URL}/dashboard`
       : `Keep records up to date: ${APP_URL}/dashboard`,
     ``,
     `— The Petshots team`,
     ``,
     `Manage reminders in Settings or on each pet's Meds tab.`,
+    `Unsubscribe from all Petshots email: ${unsubUrl}`,
   ].join('\n');
 
   return { subject, body };
@@ -205,8 +299,27 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
       // reminders additionally require the global settings toggle; med
       // reminders are governed by each med's own toggle.
       if (!settings?.email) continue;
+      // Master kill-switch (the email unsubscribe link / Settings "pause all
+      // email" toggle) — skip before any scanning.
+      if (settings.emailOptOut === true) continue;
       const vaccineRemindersOn = settings.remindersEnabled === true;
       const reminderDays = settings.reminderDays?.length ? settings.reminderDays : [7, 30];
+
+      // Every email must carry a working unsubscribe link. Accounts that
+      // predate unsubTokens get one minted and persisted here.
+      if (!settings.unsubToken) {
+        settings.unsubToken = randomUUID();
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: `${userPrefix}settings.json`,
+            Body: JSON.stringify(settings),
+            ContentType: 'application/json',
+          }),
+        );
+      }
+      const userSub = userPrefix.slice('users/'.length).replace(/\/$/, '');
+      const unsubUrl = `${APP_URL}/unsubscribe?u=${userSub}&t=${settings.unsubToken}`;
 
       const petsList = await s3.send(
         new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}pets/` }),
@@ -245,8 +358,8 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
             if (!meta.expiry) continue;
             if (meta.remindersEnabled === false) continue;
             const days = daysUntil(meta.expiry);
-            if (reminderDays.includes(days)) {
-              dueDocs.push({ petName: pet.name, label: meta.label, expiry: meta.expiry, days });
+            if (docShouldRemind(days, reminderDays)) {
+              dueDocs.push({ petName: pet.name, label: meta.label, expiry: meta.expiry, days, phase: phaseFor(days) });
             }
           }
         }
@@ -255,15 +368,16 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
         for (const med of stored?.meds ?? []) {
           if (med.dismissed === true || med.remindersEnabled === false || !med.nextDue) continue;
           const days = daysUntil(med.nextDue);
-          if (medDueToday(days)) {
-            dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days });
+          const effInterval = effectiveMedIntervalDays(med.unit, med.interval);
+          if (medShouldRemind(days, effInterval)) {
+            dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days, phase: phaseFor(days) });
           }
         }
       }
 
       if (dueDocs.length === 0 && dueMeds.length === 0 && birthdays.length === 0) continue;
 
-      const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays);
+      const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays, unsubUrl);
 
       if (dryRun) {
         wouldSend.push({ email: settings.email, subject, body });

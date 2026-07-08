@@ -38,13 +38,15 @@ export interface UserSettings {
   remindersEnabled: boolean;
   reminderDays: number[];
   marketingOptIn: boolean;
+  emailOptOut: boolean; // master kill-switch: true = no Petshots email at all
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
   email: '',
-  remindersEnabled: false,
+  remindersEnabled: true,
   reminderDays: [7, 30],
-  marketingOptIn: false,
+  marketingOptIn: true,
+  emailOptOut: false,
 };
 
 export function getSettings(): Promise<UserSettings> {
@@ -53,6 +55,23 @@ export function getSettings(): Promise<UserSettings> {
 
 export function saveSettings(settings: UserSettings): Promise<UserSettings> {
   return request('PUT', '/settings', settings);
+}
+
+// Permanently deletes everything: S3 data, passports, Stripe subscription,
+// and the Cognito user itself. The caller must sign the user out afterwards.
+export function deleteAccount(): Promise<void> {
+  return request('DELETE', '/account');
+}
+
+// Public (no login): called from the email unsubscribe link's landing page.
+// sub + token come from the link's query params.
+export async function unsubscribeAll(sub: string, token: string): Promise<void> {
+  const res = await friendlyFetch(config.apiBaseUrl + '/unsubscribe', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sub, token }),
+  });
+  if (!res.ok) throw new Error('This unsubscribe link is invalid or has expired.');
 }
 
 export interface PassportDoc {

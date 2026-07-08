@@ -100,6 +100,10 @@ export class ApiStack extends cdk.Stack {
         // secret, maintained by infra/scripts/setup-stripe.mjs.
         STRIPE_SECRET_NAME: 'petshots/stripe',
         APP_URL: 'https://petshots.app',
+
+        // DELETE /account removes the caller's own Cognito user (always the
+        // verified JWT's sub, never a client-supplied name).
+        USER_POOL_ID: userPool.userPoolId,
       },
       bundling: {
         externalModules: [],
@@ -121,6 +125,15 @@ export class ApiStack extends cdk.Stack {
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
         ],
+      }),
+    );
+
+    // Self-service account deletion. Scoped to this pool; the Lambda only ever
+    // deletes the sub from the verified JWT, so users can only delete themselves.
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminDeleteUser'],
+        resources: [userPool.userPoolArn],
       }),
     );
 
@@ -177,7 +190,10 @@ export class ApiStack extends cdk.Stack {
       },
       bundling: { externalModules: [], minify: true, target: 'node20' },
     });
-    uploads.grantRead(reminderFn);
+    // ReadWrite (not just read): the reminder run lazily persists a per-user
+    // unsubToken into settings.json for accounts created before unsubscribe
+    // links existed.
+    uploads.grantReadWrite(reminderFn);
     reminderFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ses:SendEmail', 'sesv2:SendEmail'],
@@ -214,6 +230,7 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.PUT, '/settings'],
       [HttpMethod.POST, '/billing/checkout'],
       [HttpMethod.POST, '/billing/portal'],
+      [HttpMethod.DELETE, '/account'],
     ];
     for (const [method, routePath] of authedRoutes) {
       httpApi.addRoutes({ path: routePath, methods: [method], integration, authorizer });
@@ -226,6 +243,10 @@ export class ApiStack extends cdk.Stack {
     // Stripe webhook — server-to-server, authenticated by the webhook signature
     // (verified in the Lambda), so no Cognito authorizer.
     httpApi.addRoutes({ path: '/billing/webhook', methods: [HttpMethod.POST], integration });
+
+    // Unsubscribe-from-all-email — reached from an email link with no login;
+    // the Lambda validates the per-user unsubToken itself.
+    httpApi.addRoutes({ path: '/unsubscribe', methods: [HttpMethod.POST], integration });
 
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: httpApi.apiEndpoint,

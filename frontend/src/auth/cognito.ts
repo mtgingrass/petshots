@@ -94,6 +94,13 @@ export async function getAccessToken(): Promise<string | null> {
   return session ? session.getAccessToken().getJwtToken() : null;
 }
 
+// Prove the signed-in user knows their password (the gate in front of
+// destructive actions like account deletion). Same SRP flow as login: a wrong
+// password rejects with NotAuthorizedException; success just refreshes tokens.
+export function verifyPassword(email: string, password: string): Promise<void> {
+  return signIn(email, password).then(() => undefined);
+}
+
 // Change the signed-in user's password. Requires the current password for
 // verification — Cognito rejects with NotAuthorizedException if it's wrong.
 export function changePassword(oldPassword: string, newPassword: string): Promise<void> {

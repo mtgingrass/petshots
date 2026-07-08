@@ -1,5 +1,5 @@
 // End-to-end smoke test for the reminder Lambda's medication + vaccine logic.
-// Seeds a user with meds at crafted offsets from today, then invokes the
+// Seeds a user with meds/docs at crafted offsets from today, then invokes the
 // deployed ReminderFn with { dryRun: true } (returns would-send emails instead
 // of sending) and asserts exactly the right reminders fire.
 //
@@ -9,15 +9,24 @@
 // afterwards: the seeded settings.json contains the email, and the real
 // nightly cron would otherwise try to send to it.
 //
+// Reminder cadence under test (see infra/lambda/reminder/index.ts):
+//   - Vaccines: fire on the user's chosen milestone days, PLUS a forced
+//     "final countdown" at 3 and 1 days before expiry, PLUS the expiry day
+//     itself. Once overdue: weekly for the first 30 days, then monthly.
+//   - Meds: fire on the due day, then the same weekly-then-monthly overdue
+//     cadence, plus (for meds due weekly or less often) a single "due in 3
+//     days" heads-up — short-cycle (daily) meds skip that heads-up.
+//
 // Needs AWS CLI creds (lambda:InvokeFunction + cloudformation:ListStackResources
 // + s3 read/write on the uploads bucket — the script writes users/{sub}/plan.json
-// to mark the throwaway user paid, since six meds on one pet exceeds the free
-// 4-med cap, then removes it to assert over-cap grandfathering).
+// to mark the throwaway user paid for the 10-med seed, then removes it to
+// assert over-cap grandfathering).
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import pkg from 'amazon-cognito-identity-js';
 
 const { CognitoUserPool, CognitoUser, AuthenticationDetails } = pkg;
@@ -140,7 +149,8 @@ async function main() {
   const token = await login();
   check(!!token, 'got access token');
   // plan.json is operator/billing-written (no API route can touch it); the
-  // seed needs the paid med cap. Removed with the user's S3 prefix at cleanup.
+  // seed needs the paid med cap (10 meds > free cap of 4). Removed with the
+  // user's S3 prefix at cleanup.
   const sub = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub;
   const planFile = join(tmpdir(), `plan-${Date.now()}.json`);
   writeFileSync(planFile, JSON.stringify({ plan: 'paid' }));
@@ -153,7 +163,7 @@ async function main() {
   check(petRes.status === 200, 'pet created');
   const petId = petRes.body.pet.id;
 
-  console.log('\n[2] seed: vaccine toggle OFF, six meds at crafted offsets, one expiring doc');
+  console.log('\n[2] seed: vaccine toggle OFF, ten meds covering every med trigger, isolate meds');
   let r = await api(token, 'PUT', '/settings', {
     email,
     remindersEnabled: false, // vaccine reminders OFF — meds must fire anyway
@@ -162,25 +172,28 @@ async function main() {
   });
   check(r.status === 200, 'settings saved (vaccine reminders off)');
 
-  const med = (name, offset, remindersEnabled = true) => ({
+  const med = (name, offset, unit = 'month', extra = {}) => ({
     name,
     interval: 1,
-    unit: 'month',
+    unit,
     nextDue: daysFromToday(offset),
-    remindersEnabled,
+    remindersEnabled: true,
+    ...extra,
   });
-  r = await api(token, 'PUT', `/pets/${petId}/meds`, {
-    meds: [
-      med('DueTodayMed', 0),          // fires (due day)
-      med('OverdueSevenMed', -7),     // fires (weekly overdue nag)
-      med('OverdueFourteenMed', -14), // fires (weekly overdue nag)
-      med('OverdueThreeMed', -3),     // silent (between weekly nags)
-      med('DueTomorrowMed', 1),       // silent (not due yet)
-      med('MutedMed', 0, false),      // silent (reminders off for this med)
-      { ...med('DismissedMed', 0), dismissed: true }, // silent ("stop tracking")
-    ],
-  });
-  check(r.status === 200 && r.body.meds.length === 7, 'seven meds saved (paid cap)');
+  const meds = [
+    med('DueTodayMed', 0),                        // fires: due today
+    med('OverdueSevenMed', -7),                    // fires: weekly overdue nag
+    med('OverdueThreeMed', -3),                     // silent: between weekly nags
+    med('OverdueSixtyMed', -60),                    // fires: tapered to monthly past 30 days
+    med('OverdueThirtyFiveMed', -35),               // silent: between taper ticks
+    med('DueSoonWeeklyMed', 3, 'week'),             // fires: 3-day heads-up (weekly-cadence med)
+    med('DueSoonDailyMed', 3, 'day'),               // silent: daily meds skip the heads-up
+    med('DueTomorrowMed', 1),                       // silent: not due yet, not the 3-day mark
+    med('MutedMed', 0, 'month', { remindersEnabled: false }), // silent: reminders off for this med
+    med('DismissedMed', 0, 'month', { dismissed: true }),     // silent: "stop tracking"
+  ];
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds });
+  check(r.status === 200 && r.body.meds.length === 10, 'ten meds saved (paid cap)');
   check(r.body.meds.find((m) => m.name === 'DismissedMed')?.dismissed === true, 'dismissed flag stored');
 
   console.log('\n[2b] downgrade to free: over-cap meds grandfathered (edit ok, growth blocked)');
@@ -188,33 +201,41 @@ async function main() {
   const limitsAfter = await api(token, 'GET', '/pets');
   check(limitsAfter.body?.limits?.plan === 'free', 'limits report free after plan.json removed');
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: r.body.meds });
-  check(r.status === 200 && r.body.meds.length === 7, 're-saving 7 meds allowed over the 4-med free cap');
+  check(r.status === 200 && r.body.meds.length === 10, 're-saving 10 meds allowed over the 4-med free cap');
   const grow = await api(token, 'PUT', `/pets/${petId}/meds`, {
     meds: [...r.body.meds, med('OneTooMany', 3)],
   });
   check(grow.status === 400, `growing past current count rejected 400 (got ${grow.status})`);
 
-  await uploadDoc(token, petId, 'Rabies SmokeVax', daysFromToday(7)); // in reminderDays window
-  check(true, 'doc uploaded (expires in 7 days)');
-
-  console.log('\n[3] dry run: meds fire on their own; vaccine stays gated off');
+  console.log('\n[3] dry run: meds fire per the new due/heads-up/overdue-taper rules');
   let dry = invokeDryRun(fnName);
   check(dry?.dryRun === true, 'dry run returned without sending');
   let msg = mine(dry);
   check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
   if (msg && !Array.isArray(msg)) {
-    check(msg.subject === 'Petshots: 3 medications due', `subject "${msg.subject}"`);
-    for (const name of ['DueTodayMed', 'OverdueSevenMed', 'OverdueFourteenMed']) {
-      check(msg.body.includes(name), `${name} in body`);
+    check(msg.subject === '⚠️ Petshots: 2 overdue reminders', `subject "${msg.subject}"`);
+    for (const name of ['DueTodayMed', 'OverdueSevenMed', 'OverdueSixtyMed', 'DueSoonWeeklyMed']) {
+      check(msg.body.includes(name), `${name} in body (should fire)`);
     }
-    for (const name of ['OverdueThreeMed', 'DueTomorrowMed', 'MutedMed', 'DismissedMed', 'Rabies SmokeVax']) {
-      check(!msg.body.includes(name), `${name} NOT in body`);
+    for (const name of [
+      'OverdueThreeMed', 'OverdueThirtyFiveMed', 'DueSoonDailyMed',
+      'DueTomorrowMed', 'MutedMed', 'DismissedMed',
+    ]) {
+      check(!msg.body.includes(name), `${name} NOT in body (should stay silent)`);
     }
+    check(msg.body.includes('⚠️ Overdue:'), 'overdue section header present');
+    check(msg.body.includes('📅 Due today:'), 'due-today section header present');
+    check(msg.body.includes('Coming up:'), 'coming-up section header present');
     check(msg.body.includes("Smokey's DueTodayMed — due today"), 'due-today phrasing');
-    check(msg.body.includes("Smokey's OverdueSevenMed — 7 days overdue"), 'overdue phrasing');
+    check(msg.body.includes("Smokey's OverdueSevenMed — 7 days overdue"), 'weekly-overdue phrasing');
+    check(msg.body.includes("Smokey's OverdueSixtyMed — 60 days overdue"), 'tapered-monthly-overdue phrasing');
+    check(msg.body.includes("Smokey's DueSoonWeeklyMed — due") && msg.body.includes('(in 3 days)'), '3-day heads-up phrasing');
+    check(msg.body.includes('/unsubscribe?u='), 'unsubscribe link in footer');
   }
 
-  console.log('\n[4] dry run: vaccine toggle ON adds the expiring doc');
+  console.log('\n[4] seed: vaccine toggle ON, eight docs covering every vaccine trigger, meds cleared');
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [] });
+  check(r.status === 200 && r.body.meds.length === 0, 'meds cleared to isolate the doc assertions');
   r = await api(token, 'PUT', '/settings', {
     email,
     remindersEnabled: true,
@@ -222,20 +243,44 @@ async function main() {
     marketingOptIn: false,
   });
   check(r.status === 200, 'settings saved (vaccine reminders on)');
+
+  await uploadDoc(token, petId, 'VaxOverdueSixty', daysFromToday(-60));   // fires: tapered monthly
+  await uploadDoc(token, petId, 'VaxOverdueThirtyFive', daysFromToday(-35)); // silent: between taper ticks
+  await uploadDoc(token, petId, 'VaxOverdueSeven', daysFromToday(-7));    // fires: weekly overdue nag
+  await uploadDoc(token, petId, 'VaxOverdueThree', daysFromToday(-3));    // silent: between weekly nags
+  await uploadDoc(token, petId, 'VaxDueToday', daysFromToday(0));         // fires: expiry day
+  await uploadDoc(token, petId, 'VaxFinalOne', daysFromToday(1));         // fires: forced final countdown
+  await uploadDoc(token, petId, 'VaxUpcomingFive', daysFromToday(5));     // silent: not a milestone or countdown day
+  await uploadDoc(token, petId, 'VaxMilestoneSeven', daysFromToday(7));   // fires: user's reminderDays milestone
+  check(true, 'eight docs uploaded at crafted offsets');
+
+  console.log('\n[5] dry run: docs fire per the new milestone/final-countdown/overdue-taper rules');
   dry = invokeDryRun(fnName);
   msg = mine(dry);
   check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
   if (msg && !Array.isArray(msg)) {
-    check(msg.subject === 'Petshots: 4 pet care reminders', `subject "${msg.subject}"`);
-    check(msg.body.includes('Rabies SmokeVax'), 'expiring doc now in body');
-    check(msg.body.includes('Medications due:'), 'meds section present');
-    check(msg.body.includes('Vaccine records expiring:'), 'vaccine section present');
+    check(msg.subject === '⚠️ Petshots: 2 overdue reminders', `subject "${msg.subject}"`);
+    for (const name of ['VaxOverdueSixty', 'VaxOverdueSeven', 'VaxDueToday', 'VaxFinalOne', 'VaxMilestoneSeven']) {
+      check(msg.body.includes(name), `${name} in body (should fire)`);
+    }
+    for (const name of ['VaxOverdueThirtyFive', 'VaxOverdueThree', 'VaxUpcomingFive']) {
+      check(!msg.body.includes(name), `${name} NOT in body (should stay silent)`);
+    }
+    check(msg.body.includes("VaxOverdueSixty — expired") && msg.body.includes('60 days overdue'), 'tapered-monthly-overdue doc phrasing');
+    check(msg.body.includes("VaxOverdueSeven — expired") && msg.body.includes('7 days overdue'), 'weekly-overdue doc phrasing');
+    check(msg.body.includes("VaxDueToday — expires today"), 'due-today doc phrasing');
+    check(msg.body.includes('(tomorrow)'), 'final-countdown doc (1 day) phrasing');
+    check(msg.body.includes('(in 7 days)'), 'user-milestone doc (7 days) phrasing');
   }
 
-  console.log('\n[5] dry run: single due med gets the specific subject');
+  console.log('\n[6] cleanup docs + reset meds for the remaining single-item subject tests');
+  const docsRes0 = await api(token, 'GET', `/pets/${petId}/docs`);
+  for (const d of docsRes0.body?.docs ?? []) await api(token, 'DELETE', `/pets/${petId}/docs/${d.id}`);
   r = await api(token, 'PUT', '/settings', {
     email, remindersEnabled: false, reminderDays: [7, 30], marketingOptIn: false,
   });
+
+  console.log('\n[7] dry run: single due-today med gets the specific subject');
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [med('Heartworm prevention', 0)] });
   check(r.status === 200, 'meds replaced with single due-today med');
   dry = invokeDryRun(fnName);
@@ -248,16 +293,87 @@ async function main() {
     );
   }
 
-  console.log('\n[6] dry run: nothing due -> no email at all');
+  console.log('\n[8] dry run: single overdue med gets the "N days overdue" subject');
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [med('Heartworm prevention', -14)] });
+  check(r.status === 200, 'meds replaced with single 14-day-overdue med');
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
+  if (msg && !Array.isArray(msg)) {
+    check(
+      msg.subject === "⚠️ Smokey's Heartworm prevention is 14 days overdue",
+      `subject "${msg.subject}"`,
+    );
+  }
+
+  console.log('\n[8b] emailOptOut master switch + unsubToken + public unsubscribe route');
+  // The overdue med from [8] is still seeded, so email WOULD fire without the switch.
+  r = await api(token, 'PUT', '/settings', {
+    email, remindersEnabled: false, reminderDays: [7, 30], marketingOptIn: false,
+    emailOptOut: true,
+  });
+  check(r.status === 200 && r.body.emailOptOut === true, 'settings saved with emailOptOut on');
+  check(typeof r.body.unsubToken === 'string' && r.body.unsubToken.length > 0, 'server minted an unsubToken');
+  const mintedToken = r.body.unsubToken;
+  dry = invokeDryRun(fnName);
+  check(mine(dry) === null, 'opted-out user gets NO email even with a med overdue');
+
+  r = await api(token, 'PUT', '/settings', {
+    email, remindersEnabled: false, reminderDays: [7, 30], marketingOptIn: false,
+    emailOptOut: false,
+  });
+  check(r.status === 200 && r.body.emailOptOut === false, 'emailOptOut off again');
+  check(r.body.unsubToken === mintedToken, 'unsubToken stable across saves (server-managed)');
+
+  // Legacy-user path: strip the token from settings.json directly in S3; the
+  // reminder Lambda must mint + persist one (needs its S3 write grant) and
+  // still send, with the fresh token in the footer.
+  const settingsFile = join(tmpdir(), `settings-${Date.now()}.json`);
+  execSync(`aws s3 cp s3://${BUCKET}/users/${sub}/settings.json ${settingsFile}`, { encoding: 'utf8' });
+  const legacy = JSON.parse(readFileSync(settingsFile, 'utf8'));
+  delete legacy.unsubToken;
+  delete legacy.emailOptOut;
+  writeFileSync(settingsFile, JSON.stringify(legacy));
+  execSync(`aws s3 cp ${settingsFile} s3://${BUCKET}/users/${sub}/settings.json`, { encoding: 'utf8' });
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(!!msg && !Array.isArray(msg), 'email still sends for a legacy user without a token');
+  execSync(`aws s3 cp s3://${BUCKET}/users/${sub}/settings.json ${settingsFile}`, { encoding: 'utf8' });
+  const backfilled = JSON.parse(readFileSync(settingsFile, 'utf8'));
+  unlinkSync(settingsFile);
+  check(typeof backfilled.unsubToken === 'string' && backfilled.unsubToken.length > 0, 'Lambda backfilled a fresh unsubToken into settings.json');
+  if (msg && !Array.isArray(msg)) {
+    check(msg.body.includes(`/unsubscribe?u=${sub}&t=${backfilled.unsubToken}`), "footer carries this user's exact unsubscribe link");
+  }
+
+  const unsubPost = (body) => fetch(`${API}/unsubscribe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let pubRes = await unsubPost({ sub, token: randomUUID() });
+  check(pubRes.status === 404, `wrong token rejected 404 (got ${pubRes.status})`);
+  pubRes = await unsubPost({ sub: randomUUID(), token: backfilled.unsubToken });
+  check(pubRes.status === 404, `unknown sub rejected 404 (got ${pubRes.status})`);
+  pubRes = await unsubPost({ sub, token: backfilled.unsubToken });
+  check(pubRes.status === 200, `correct token accepted 200 (got ${pubRes.status})`);
+  dry = invokeDryRun(fnName);
+  check(mine(dry) === null, 'unsubscribed via the public link -> no email');
+  r = await api(token, 'PUT', '/settings', {
+    email, remindersEnabled: false, reminderDays: [7, 30], marketingOptIn: false,
+    emailOptOut: false,
+  });
+  check(r.status === 200 && r.body.emailOptOut === false, 'opt-out cleared for the remaining sections');
+
+  console.log('\n[9] dry run: nothing due -> no email at all');
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [med('Heartworm prevention', 5)] });
-  check(r.status === 200, 'med pushed 5 days out');
+  check(r.status === 200, 'med pushed 5 days out (not the 3-day mark)');
   dry = invokeDryRun(fnName);
   check(mine(dry) === null, 'no email for this user when nothing is due');
 
-  console.log('\n[6b] birthday email rides the vaccine-reminder consent');
-  // Remove the expiring doc first so a reminders-on dry run isolates the birthday.
-  const docsRes = await api(token, 'GET', `/pets/${petId}/docs`);
-  for (const d of docsRes.body?.docs ?? []) await api(token, 'DELETE', `/pets/${petId}/docs/${d.id}`);
+  console.log('\n[10] birthday email rides the vaccine-reminder consent');
+  r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [] });
+  check(r.status === 200 && r.body.meds.length === 0, 'meds cleared to isolate the birthday');
   const todayStr = daysFromToday(0);
   const dob = `${Number(todayStr.slice(0, 4)) - 3}${todayStr.slice(4)}`;
   r = await api(token, 'PUT', `/pets/${petId}`, { name: 'Smokey', species: 'dog', dob });
@@ -274,10 +390,10 @@ async function main() {
   if (msg && !Array.isArray(msg)) {
     check(msg.subject === '🎂 Smokey turns 3 today!', `subject "${msg.subject}"`);
     check(msg.body.includes('happy birthday'), 'birthday line in body');
-    check(!msg.body.includes('Medications due'), 'no med section in a birthday-only email');
+    check(!msg.body.includes('Overdue:') && !msg.body.includes('Due today:'), 'no reminder sections in a birthday-only email');
   }
 
-  console.log('\n[7] cleanup (pets deleted; caller must delete the user + S3 prefix)');
+  console.log('\n[11] cleanup (pets deleted; caller must delete the user + S3 prefix)');
   await api(token, 'DELETE', `/pets/${petId}`);
   r = await api(token, 'GET', '/pets');
   check(r.body.pets.length === 0, 'pets deleted');

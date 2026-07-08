@@ -2,18 +2,25 @@
 // Logs in via SRP (the web client's only flow), then exercises the full
 // pet + upload loop against the live HTTP API + S3.
 //
-//   node scripts/smoke-api.mjs <email> <password>
+//   node scripts/smoke-api.mjs <email> <password> [--delete-account]
 //
 // Reads pool/client ids from ../.env. Nothing is persisted; it cleans up after
 // itself (deletes every pet it created, which removes their docs/avatars too).
+//
+// --delete-account: ONLY for a THROWAWAY user. Ends the run by calling
+// DELETE /account and verifying (via AWS CLI) that the Cognito user, the
+// users/{sub}/ S3 prefix, and any passport objects are all gone — which also
+// replaces the usual manual post-run cleanup.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { execSync } from 'node:child_process';
 import pkg from 'amazon-cognito-identity-js';
 
 const { CognitoUserPool, CognitoUser, AuthenticationDetails } = pkg;
 
 const API = process.env.API_URL ?? 'https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com';
+const BUCKET = process.env.UPLOADS_BUCKET ?? 'petshots-uploads';
 const MAX_PETS = 2; // free-tier cap (the smoke user has no plan.json)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,9 +34,10 @@ const env = Object.fromEntries(
     }),
 );
 
-const [email, password] = process.argv.slice(2);
+const deleteAccountFlag = process.argv.includes('--delete-account');
+const [email, password] = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 if (!email || !password) {
-  console.error('usage: node scripts/smoke-api.mjs <email> <password>');
+  console.error('usage: node scripts/smoke-api.mjs <email> <password> [--delete-account]');
   process.exit(1);
 }
 
@@ -291,11 +299,77 @@ async function main() {
   r = await api(token, 'GET', `/pets/${petId}/meds`);
   check(r.body.meds.length === 0, 'deleted pet has no meds left (meds.json cascaded)');
 
+  console.log('\n[9b] deleting a pet revokes its passport (no orphaned public link)');
+  r = await api(token, 'POST', '/pets', { name: 'Passporter', species: 'cat' });
+  check(r.status === 200, 'pet created');
+  const ppPetId = r.body.pet.id;
+  r = await api(token, 'POST', `/pets/${ppPetId}/passport`, {});
+  check(r.status === 200 && !!r.body.token, 'passport created');
+  const petPassportToken = r.body.token;
+  r = await api(token, 'DELETE', `/pets/${ppPetId}`);
+  check(r.status === 204, 'pet deleted');
+  const pubPassport = await fetch(`${API}/passport/${petPassportToken}`);
+  const pubBody = await pubPassport.json();
+  // 'passport not found' = token object deleted with the pet; 'pet not found'
+  // would mean the token object survived as an orphan (the pre-fix behavior).
+  check(
+    pubPassport.status === 404 && pubBody.error === 'passport not found',
+    `passport object gone with the pet (got ${pubPassport.status} "${pubBody.error}")`,
+  );
+
   console.log('\n[10] cleanup');
   r = await api(token, 'GET', '/pets');
   for (const p of r.body.pets) await api(token, 'DELETE', `/pets/${p.id}`);
   r = await api(token, 'GET', '/pets');
   check(r.body.pets.length === 0, 'all pets deleted');
+
+  if (deleteAccountFlag) {
+    console.log('\n[11] DELETE /account wipes S3 + passports + the Cognito user');
+    const sub = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub;
+
+    // Seed the shapes account deletion must clean up: a pet with a doc, a
+    // live passport token (bucket-root object), and settings.json.
+    const petR = await api(token, 'POST', '/pets', { name: 'DeleteMe', species: 'dog' });
+    check(petR.status === 200, 'seed pet created');
+    const delPetId = petR.body.pet.id;
+    const seedUp = await uploadDoc(token, delPetId, 'Rabies DeleteAccount');
+    check(seedUp.putStatus === 204, 'seed doc uploaded');
+    const pp = await api(token, 'POST', `/pets/${delPetId}/passport`, {});
+    check(pp.status === 200 && !!pp.body.token, 'seed passport created');
+    const ppToken = pp.body.token;
+    await api(token, 'PUT', '/settings', {
+      email, remindersEnabled: false, reminderDays: [7, 30], marketingOptIn: false,
+    });
+
+    const delAcct = await api(token, 'DELETE', '/account');
+    check(delAcct.status === 204, `DELETE /account returns 204 (got ${delAcct.status})`);
+
+    let userGone = false;
+    try {
+      execSync(
+        `aws cognito-idp admin-get-user --user-pool-id ${env.VITE_COGNITO_USER_POOL_ID} --username ${sub}`,
+        { stdio: 'pipe' },
+      );
+    } catch { userGone = true; }
+    check(userGone, 'Cognito user deleted');
+
+    let prefixEmpty = false;
+    try {
+      const out = execSync(`aws s3 ls s3://${BUCKET}/users/${sub}/ --recursive`, {
+        encoding: 'utf8', stdio: 'pipe',
+      });
+      prefixEmpty = out.trim() === '';
+    } catch { prefixEmpty = true; } // aws s3 ls exits nonzero on an empty prefix
+    check(prefixEmpty, `users/${sub}/ prefix empty`);
+
+    let passportGone = false;
+    try {
+      execSync(`aws s3api head-object --bucket ${BUCKET} --key passports/${ppToken}.json`, {
+        stdio: 'pipe',
+      });
+    } catch { passportGone = true; }
+    check(passportGone, 'passport token object deleted from bucket root');
+  }
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===`);
   process.exit(fail ? 1 : 0);

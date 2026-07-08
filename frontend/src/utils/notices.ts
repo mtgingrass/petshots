@@ -85,6 +85,13 @@ export function dismissNotice(notice: Notice): void {
   localStorage.setItem(DISMISS_PREFIX + notice.id, String(Date.now()));
 }
 
+// Which pet-detail tab a notice should deep-link to when tapped.
+export function noticeTab(type: NoticeType): 'records' | 'meds' | 'profile' {
+  if (type === 'med-overdue' || type === 'med-due') return 'meds';
+  if (type.startsWith('birthday') || type === 'dob-nudge') return 'profile';
+  return 'records';
+}
+
 // ---- compute ----
 
 export function computeNotices(

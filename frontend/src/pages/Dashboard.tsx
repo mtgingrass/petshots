@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { useAuth } from '../auth/AuthContext';
-import { changePassword } from '../auth/cognito';
+import { changePassword, verifyPassword } from '../auth/cognito';
 import {
   listPets,
   createPet,
@@ -24,6 +24,7 @@ import {
   createBillingPortal,
   getSettings,
   saveSettings,
+  deleteAccount,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -42,6 +43,7 @@ import {
   computeNotices,
   isDismissed,
   dismissNotice,
+  noticeTab,
   MAX_NOTICES,
   type Notice,
 } from '../utils/notices';
@@ -200,7 +202,7 @@ function vaccineBlurb(label: string): string | null {
 
 type DashView =
   | { type: 'overview' }
-  | { type: 'detail'; petId: string }
+  | { type: 'detail'; petId: string; tab?: 'records' | 'meds' | 'profile' | 'passport' }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
@@ -525,7 +527,7 @@ export function Dashboard() {
             onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
             onDone={backToOverview}
             onError={setError}
-            onNotice={showNotice}
+            onAccountDeleted={() => { logout(); navigate('/'); }}
           />
         ) : dashView.type === 'change-password' ? (
           <ChangePasswordScreen
@@ -582,6 +584,7 @@ export function Dashboard() {
           ) : (
             <PetDetailScreen
               pet={detailPet}
+              initialTab={dashView.tab}
               docs={detailDocs}
               meds={allMeds[detailPet.id]}
               onMedsChanged={(meds) =>
@@ -628,7 +631,7 @@ export function Dashboard() {
               pets={pets}
               allDocs={allDocs}
               allMeds={allMeds}
-              onNavigateToPet={(petId) => setDashView({ type: 'detail', petId })}
+              onNavigateToPet={(petId, tab) => setDashView({ type: 'detail', petId, tab })}
             />
             <h2 className="section-title">Your Pets</h2>
             <div className="pet-pins">
@@ -791,7 +794,7 @@ function NoticeStrip({
   pets: Pet[];
   allDocs: Record<string, Doc[]>;
   allMeds: Record<string, Med[]>;
-  onNavigateToPet: (petId: string) => void;
+  onNavigateToPet: (petId: string, tab: 'records' | 'meds' | 'profile') => void;
 }) {
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
 
@@ -813,7 +816,7 @@ function NoticeStrip({
           key={notice.id}
           notice={notice}
           onDismiss={() => handleDismiss(notice)}
-          onNavigate={() => onNavigateToPet(notice.petId)}
+          onNavigate={() => onNavigateToPet(notice.petId, noticeTab(notice.type))}
         />
       ))}
     </div>
@@ -1201,6 +1204,7 @@ function DashboardSkeleton() {
 
 function PetDetailScreen({
   pet,
+  initialTab,
   docs,
   meds,
   onMedsChanged,
@@ -1218,6 +1222,7 @@ function PetDetailScreen({
   onNotice,
 }: {
   pet: Pet;
+  initialTab?: 'records' | 'meds' | 'profile' | 'passport';
   docs: Doc[];
   meds: Med[] | undefined;
   onMedsChanged: (meds: Med[]) => void;
@@ -1240,7 +1245,7 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'passport'>('records');
+  const [tab, setTab] = useState<'records' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -3333,7 +3338,7 @@ function SettingsScreen({
   onThemeChange,
   onDone,
   onError,
-  onNotice,
+  onAccountDeleted,
 }: {
   email: string;
   limits: Limits;
@@ -3341,11 +3346,37 @@ function SettingsScreen({
   onThemeChange: (t: Theme) => void;
   onDone: () => void;
   onError: (msg: string | null) => void;
-  onNotice: (msg: string) => void;
+  onAccountDeleted: () => void;
 }) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePw, setDeletePw] = useState('');
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  async function handleDeleteAccount(e: FormEvent) {
+    e.preventDefault();
+    setDeleting(true);
+    setDeleteErr(null);
+    try {
+      await verifyPassword(email, deletePw);
+    } catch {
+      setDeleteErr('That password is incorrect.');
+      setDeleting(false);
+      return;
+    }
+    try {
+      await deleteAccount();
+      onAccountDeleted();
+    } catch (err) {
+      setDeleteErr(err instanceof Error ? err.message : 'Could not delete the account — try again.');
+      setDeleting(false);
+    }
+  }
 
   // Both hand the browser to a Stripe-hosted page; errors keep the user here.
   async function handleCheckout(interval: 'month' | 'year') {
@@ -3384,28 +3415,32 @@ function SettingsScreen({
       .finally(() => setLoading(false));
   }, [email]);
 
-  async function handleSave(e: FormEvent) {
-    e.preventDefault();
-    if (!settings) return;
-    setBusy(true);
-    onError(null);
-    try {
-      await saveSettings({ ...settings, email });
-      onNotice('Settings saved');
-      onDone();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Could not save settings');
-    } finally {
-      setBusy(false);
-    }
+  // Auto-saves toggles/day-chips as they're changed — no explicit Save button.
+  // Debounced so rapid-fire clicks (e.g. several day chips in a row) coalesce into one request.
+  function persist(next: UserSettings) {
+    setSettings(next);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaveStatus('saving');
+    saveTimer.current = setTimeout(() => {
+      saveSettings({ ...next, email })
+        .then(() => setSaveStatus('saved'))
+        .catch((err) => {
+          setSaveStatus('error');
+          onError(err instanceof Error ? err.message : 'Could not save settings');
+        });
+    }, 400);
   }
+
+  useEffect(() => () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+  }, []);
 
   function toggleDay(day: number) {
     if (!settings) return;
     const days = settings.reminderDays.includes(day)
       ? settings.reminderDays.filter((d) => d !== day)
       : [...settings.reminderDays, day].sort((a, b) => a - b);
-    setSettings({ ...settings, reminderDays: days });
+    persist({ ...settings, reminderDays: days });
   }
 
   return (
@@ -3420,7 +3455,7 @@ function SettingsScreen({
         {loading ? (
           <p className="subtle">Loading…</p>
         ) : (
-          <form className="form settings-form" onSubmit={handleSave}>
+          <div className="form settings-form">
 
             <fieldset className="settings-group">
               <legend>Plan</legend>
@@ -3497,6 +3532,33 @@ function SettingsScreen({
             <fieldset className="settings-group">
               <legend>Email</legend>
               <div className="settings-row">
+                <label className="settings-row__label" htmlFor="optout-toggle">
+                  Pause all email
+                  <span className="subtle settings-row__sub">
+                    Nothing from Petshots — no reminders, birthdays, or updates
+                  </span>
+                </label>
+                <label className="toggle" aria-label="Toggle pause all email">
+                  <input
+                    id="optout-toggle"
+                    type="checkbox"
+                    checked={settings?.emailOptOut ?? false}
+                    onChange={(e) => settings && persist({ ...settings, emailOptOut: e.target.checked })}
+                  />
+                  <span className="toggle__track" />
+                </label>
+              </div>
+              {settings?.emailOptOut && (
+                <p className="settings-hint subtle">
+                  All email is paused. Your settings below are kept and take effect again when you
+                  turn this off.
+                </p>
+              )}
+
+              <div className="settings-group__divider" />
+
+              <div className={settings?.emailOptOut ? 'settings-muted' : undefined}>
+              <div className="settings-row">
                 <label className="settings-row__label" htmlFor="marketing-toggle">
                   Product updates
                   <span className="subtle settings-row__sub">Tips, new features, and Petshots news</span>
@@ -3506,7 +3568,7 @@ function SettingsScreen({
                     id="marketing-toggle"
                     type="checkbox"
                     checked={settings?.marketingOptIn ?? false}
-                    onChange={(e) => settings && setSettings({ ...settings, marketingOptIn: e.target.checked })}
+                    onChange={(e) => settings && persist({ ...settings, marketingOptIn: e.target.checked })}
                   />
                   <span className="toggle__track" />
                 </label>
@@ -3524,7 +3586,7 @@ function SettingsScreen({
                     id="reminders-toggle"
                     type="checkbox"
                     checked={settings?.remindersEnabled ?? false}
-                    onChange={(e) => settings && setSettings({ ...settings, remindersEnabled: e.target.checked })}
+                    onChange={(e) => settings && persist({ ...settings, remindersEnabled: e.target.checked })}
                   />
                   <span className="toggle__track" />
                 </label>
@@ -3545,23 +3607,88 @@ function SettingsScreen({
                       </label>
                     ))}
                   </div>
+                  <p className="settings-hint subtle">
+                    You'll also always get a heads-up 3 and 1 day before expiry, on the expiry date itself,
+                    and — if it lapses — a follow-up every week for a month, then monthly until it's updated.
+                  </p>
                 </>
               )}
 
               <p className="settings-hint subtle">
-                Medication reminders are set per medication on each pet's Meds tab.
+                Medication reminders are set per medication on each pet's Meds tab: due-date and overdue
+                (weekly, then monthly) reminders always apply when a med's toggle is on; meds due every
+                week or longer also get a 3-day-ahead heads-up.
               </p>
+              </div>
+            </fieldset>
+
+            <fieldset className="settings-group settings-group--danger">
+              <legend>Danger zone</legend>
+              {!deleteOpen ? (
+                <div className="settings-row">
+                  <span className="settings-row__label">
+                    Delete account
+                    <span className="subtle settings-row__sub">
+                      Permanently removes your pets, records, and account
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn--danger"
+                    onClick={() => { setDeleteOpen(true); setDeleteErr(null); }}
+                  >
+                    Delete account…
+                  </button>
+                </div>
+              ) : (
+                <form className="danger-confirm" onSubmit={handleDeleteAccount}>
+                  <p className="danger-confirm__warning">
+                    This permanently deletes your account: every pet, all uploaded records and
+                    medications, and any shared passport links. An active subscription is cancelled.
+                    <strong> There is no undo.</strong>
+                  </p>
+                  <label>
+                    Enter your password to confirm
+                    <input
+                      type="password"
+                      value={deletePw}
+                      onChange={(e) => setDeletePw(e.target.value)}
+                      autoComplete="current-password"
+                      autoFocus
+                      required
+                    />
+                  </label>
+                  {deleteErr && <p className="danger-confirm__error" role="alert">{deleteErr}</p>}
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={deleting}
+                      onClick={() => { setDeleteOpen(false); setDeletePw(''); setDeleteErr(null); }}
+                    >
+                      Keep my account
+                    </button>
+                    <button
+                      type="submit"
+                      className="btn btn--danger"
+                      disabled={deleting || !deletePw}
+                    >
+                      {deleting ? 'Deleting…' : 'Delete my account forever'}
+                    </button>
+                  </div>
+                </form>
+              )}
             </fieldset>
 
             <div className="actions">
-              <button className="btn btn--primary" type="submit" disabled={busy}>
-                {busy ? 'Saving…' : 'Save settings'}
+              <button className="btn btn--primary" type="button" onClick={onDone} disabled={busy}>
+                Done
               </button>
-              <button className="btn" type="button" onClick={onDone} disabled={busy}>
-                Cancel
-              </button>
+              <span className="subtle settings-save-status" role="status">
+                {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : ''}
+              </span>
             </div>
-          </form>
+          </div>
         )}
       </div>
     </div>

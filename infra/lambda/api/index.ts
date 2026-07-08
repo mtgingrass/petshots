@@ -5,14 +5,19 @@ import {
   HeadObjectCommand,
   ListObjectsV2Command,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import {
+  CognitoIdentityProviderClient,
+  AdminDeleteUserCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 import Stripe from 'stripe';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   APIGatewayProxyResultV2,
@@ -29,7 +34,9 @@ const s3 = new S3Client({
   requestChecksumCalculation: 'WHEN_REQUIRED',
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
+const cognito = new CognitoIdentityProviderClient({});
 const BUCKET = process.env.UPLOADS_BUCKET!;
+const USER_POOL_ID = process.env.USER_POOL_ID ?? '';
 const MAX_PETS = Number(process.env.MAX_PETS ?? '2');
 const MAX_DOCS = Number(process.env.MAX_DOCS ?? '8');
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
@@ -424,6 +431,24 @@ async function putJson(key: string, body: unknown): Promise<void> {
   );
 }
 
+// Deletes every object under a prefix, paginated — a paid account can hold
+// >1000 objects (10 pets x 999 docs), past a single ListObjectsV2 page.
+async function deletePrefix(prefix: string): Promise<void> {
+  let token: string | undefined;
+  do {
+    const list = await s3.send(
+      new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, ContinuationToken: token }),
+    );
+    const keys = (list.Contents ?? []).map((it) => ({ Key: it.Key! }));
+    if (keys.length > 0) {
+      await s3.send(
+        new DeleteObjectsCommand({ Bucket: BUCKET, Delete: { Objects: keys, Quiet: true } }),
+      );
+    }
+    token = list.IsTruncated ? list.NextContinuationToken : undefined;
+  } while (token);
+}
+
 // Active-pets rule: an account holding more pets than its plan allows
 // (downgrade, lapsed trial) keeps every pet fully visible and presentable,
 // but only the OLDEST maxPets pets accept new docs/meds. Otherwise one month's
@@ -630,6 +655,38 @@ async function handlePublicPassport(
   });
 }
 
+// ---- public unsubscribe (no JWT required) ----
+// The link in every reminder email lands on the SPA's /unsubscribe page, which
+// POSTs here after one confirm click (a plain GET link would let mail-scanner
+// prefetch unsubscribe people silently). Auth = possession of the per-user
+// unsubToken from settings.json, which is only ever sent to the user's own
+// inbox. Flips the master kill-switch; per-med/vaccine reminder config is left
+// intact so re-enabling in Settings restores exactly what they had.
+async function handleUnsubscribe(
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+): Promise<APIGatewayProxyResultV2> {
+  let input: { sub?: unknown; token?: unknown };
+  try {
+    input = JSON.parse(event.body ?? '{}');
+  } catch {
+    return json(400, { error: 'invalid request' });
+  }
+  const sub = typeof input.sub === 'string' ? input.sub : undefined;
+  const token = typeof input.token === 'string' ? input.token : undefined;
+  // Both are UUIDs (Cognito sub / randomUUID); reject other shapes before they
+  // touch a key. Wrong or unknown values all 404 so subs can't be probed.
+  if (!isUuid(sub) || !isUuid(token)) return json(404, { error: 'not found' });
+  const settings = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
+  const stored = typeof settings?.unsubToken === 'string' ? settings.unsubToken : '';
+  const given = Buffer.from(token);
+  const expected = Buffer.from(stored);
+  if (!stored || given.length !== expected.length || !timingSafeEqual(given, expected)) {
+    return json(404, { error: 'not found' });
+  }
+  await putJson(`users/${sub}/settings.json`, { ...settings, emailOptOut: true });
+  return json(200, { ok: true });
+}
+
 export const handler = async (
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> => {
@@ -637,6 +694,10 @@ export const handler = async (
   if (event.routeKey === 'GET /passport/{token}') {
     try { return await handlePublicPassport(event); }
     catch (e) { console.error('passport error', e); return json(500, { error: 'internal error' }); }
+  }
+  if (event.routeKey === 'POST /unsubscribe') {
+    try { return await handleUnsubscribe(event); }
+    catch (e) { console.error('unsubscribe error', e); return json(500, { error: 'internal error' }); }
   }
   // Stripe calls this server-to-server; auth is the webhook signature, not a JWT.
   if (event.routeKey === 'POST /billing/webhook') {
@@ -747,15 +808,19 @@ export const handler = async (
       }
 
       case 'DELETE /pets/{petId}': {
-        // Removes the whole pet: pet.json, avatar, and every doc under it.
-        const list = await s3.send(
-          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petPrefix }),
-        );
-        await Promise.all(
-          (list.Contents ?? []).map((it) =>
-            s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),
-          ),
-        );
+        // Removes the whole pet: pet.json, avatar, every doc under it — and
+        // its passport token object, which lives at the bucket root and would
+        // otherwise survive as a live-but-dead public link.
+        const pet = await readJson<{ passportToken?: string }>(petKey);
+        if (pet?.passportToken) {
+          await s3.send(
+            new DeleteObjectCommand({
+              Bucket: BUCKET,
+              Key: `passports/${pet.passportToken}.json`,
+            }),
+          );
+        }
+        await deletePrefix(petPrefix);
         return { statusCode: 204 };
       }
 
@@ -1257,6 +1322,10 @@ export const handler = async (
       case 'PUT /settings': {
         const input = JSON.parse(event.body ?? '{}');
         const validDays = [1, 3, 7, 14, 30, 60];
+        // unsubToken is server-managed: preserved from the stored file (never
+        // trusted from the client) and minted here if absent, so every user
+        // who saves settings gets a working unsubscribe link.
+        const existing = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
         const settings = {
           email: typeof input.email === 'string' ? input.email.slice(0, 254) : '',
           remindersEnabled: input.remindersEnabled === true,
@@ -1266,6 +1335,9 @@ export const handler = async (
               )
             : [7, 30],
           marketingOptIn: input.marketingOptIn === true,
+          emailOptOut: input.emailOptOut === true,
+          unsubToken:
+            typeof existing?.unsubToken === 'string' ? existing.unsubToken : randomUUID(),
         };
         await s3.send(
           new PutObjectCommand({
@@ -1276,6 +1348,64 @@ export const handler = async (
           }),
         );
         return json(200, settings);
+      }
+
+      // ---- account deletion ----
+
+      case 'DELETE /account': {
+        // Hard delete, everything, in an order that keeps a mid-failure
+        // retryable: Stripe + orphanable root objects first, then the user's
+        // S3 prefix, then the Cognito user LAST (while it exists the user can
+        // still re-auth and hit this route again).
+        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
+        if (plan?.stripeCustomerId) {
+          try {
+            const { stripe } = await getStripe();
+            // Default list excludes already-canceled subscriptions.
+            const subs = await stripe.subscriptions.list({ customer: plan.stripeCustomerId });
+            for (const s of subs.data) {
+              await stripe.subscriptions.cancel(s.id);
+            }
+            await s3.send(
+              new DeleteObjectCommand({
+                Bucket: BUCKET,
+                Key: `billing/customers/${plan.stripeCustomerId}.json`,
+              }),
+            );
+          } catch (e) {
+            // Don't strand the user with an undeletable account; an orphaned
+            // subscription is visible (and cancellable) in the Stripe dashboard.
+            console.error(`account delete: Stripe cleanup failed for ${sub}`, e);
+          }
+        }
+
+        // Passport tokens live at the bucket root keyed by token — collect them
+        // from each pet.json before the prefix delete orphans them as live links.
+        const petsList = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: petsPrefix }),
+        );
+        const petJsonKeys = (petsList.Contents ?? [])
+          .map((it) => it.Key!)
+          .filter((k) => k.endsWith('/pet.json'));
+        for (const key of petJsonKeys) {
+          const pet = await readJson<{ passportToken?: string }>(key);
+          if (pet?.passportToken) {
+            await s3.send(
+              new DeleteObjectCommand({
+                Bucket: BUCKET,
+                Key: `passports/${pet.passportToken}.json`,
+              }),
+            );
+          }
+        }
+
+        await deletePrefix(`users/${sub}/`);
+
+        await cognito.send(
+          new AdminDeleteUserCommand({ UserPoolId: USER_POOL_ID, Username: sub }),
+        );
+        console.log(`account deleted: ${sub}`);
+        return { statusCode: 204 };
       }
 
       // ---- billing ----

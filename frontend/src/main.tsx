@@ -9,6 +9,14 @@ import { applyTheme, getSavedTheme } from './utils/theme'
 // Apply saved theme before first paint to avoid flash.
 applyTheme(getSavedTheme());
 
+// PWA: offline fallback + install support. Prod only — a worker on
+// localhost:5173 would cache dev-server output and confuse hot reload.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js');
+  });
+}
+
 // BrowserRouter gives clean URLs (/dashboard, not /#/dashboard). CloudFront is
 // already configured to rewrite 403/404 -> /index.html, so deep links work.
 createRoot(document.getElementById('root')!).render(

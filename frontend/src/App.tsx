@@ -7,6 +7,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Privacy } from './pages/Privacy';
 import { PassportPage } from './pages/PassportPage';
 import { UnsubscribePage } from './pages/UnsubscribePage';
+import { DoorPage } from './pages/DoorPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/p/:token" element={<PassportPage />} />
       <Route path="/unsubscribe" element={<UnsubscribePage />} />
+      <Route path="/door" element={<DoorPage />} />
       <Route
         path="/dashboard"
         element={

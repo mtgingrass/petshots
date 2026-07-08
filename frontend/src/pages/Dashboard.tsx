@@ -39,6 +39,7 @@ import {
   type DuplicateInfo,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
+import { readDoorCache, updateDoorCache } from '../doorCache';
 import {
   computeNotices,
   isDismissed,
@@ -288,11 +289,17 @@ export function Dashboard() {
       setLimits(res.limits ?? DEFAULT_LIMITS);
       return res.pets;
     } catch (err) {
+      // Offline with saved records = the door moment. Skip the dead dashboard
+      // and go straight to the offline copy.
+      if (!navigator.onLine && readDoorCache()) {
+        navigate('/door', { replace: true });
+        return [];
+      }
       setPets([]);
       setError(err instanceof Error ? err.message : 'Failed to load your pets');
       return [];
     }
-  }, []);
+  }, [navigate]);
 
   const loadAllDocs = useCallback(async (petList: Pet[]) => {
     if (petList.length === 0) {
@@ -313,6 +320,8 @@ export function Dashboard() {
       ]);
       setAllDocs(Object.fromEntries(docPairs));
       setAllMeds(Object.fromEntries(medPairs));
+      // Refresh the offline door-mode copy in the background.
+      void updateDoorCache(petList, Object.fromEntries(docPairs));
     } catch {
       // non-fatal — overview cards show without status
     } finally {
@@ -3222,7 +3231,7 @@ function ProfileEditScreen({
 
 // ---- present mode (full-screen swipeable carousel) ----
 
-function PresentScreen({
+export function PresentScreen({
   pet,
   docs,
   onExit,

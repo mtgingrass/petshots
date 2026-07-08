@@ -9,6 +9,7 @@
 //  - Everything else (API on execute-api.*, presigned S3 URLs): untouched.
 //
 // Bump CACHE_VERSION to force old caches to be dropped on activate.
+// Keep in sync with the asset-precache cache name in main.tsx.
 const CACHE_VERSION = 'petshots-v1';
 
 self.addEventListener('install', (event) => {
@@ -27,7 +28,14 @@ self.addEventListener('activate', (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))),
+        Promise.all(
+          keys
+            // Only reap our own versioned caches — petshots-door-v1 (door
+            // mode's offline doc store, owned by doorCache.ts) must survive
+            // service-worker updates.
+            .filter((k) => k.startsWith('petshots-v') && k !== CACHE_VERSION)
+            .map((k) => caches.delete(k)),
+        ),
       )
       .then(() => self.clients.claim()),
   );

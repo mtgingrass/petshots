@@ -13,7 +13,24 @@ applyTheme(getSavedTheme());
 // localhost:5173 would cache dev-server output and confuse hot reload.
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js');
+    void navigator.serviceWorker.register('/sw.js').then(async () => {
+      // The worker doesn't control this very first page load, so its
+      // fetch handler never sees the hashed /assets/* files — and a user who
+      // visited exactly once would get a blank page offline (door mode's
+      // worst case). Push this page's own bundles into the cache directly.
+      try {
+        const cache = await caches.open('petshots-v1');
+        const assets = [
+          ...document.querySelectorAll<HTMLScriptElement>('script[src]'),
+          ...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'),
+        ]
+          .map((el) => ('src' in el ? el.src : el.href))
+          .filter((u) => new URL(u).origin === location.origin);
+        await cache.addAll(assets);
+      } catch {
+        // best-effort — the fetch handler still caches assets on later visits
+      }
+    });
   });
 }
 

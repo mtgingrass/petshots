@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { getSession, signOut as cognitoSignOut } from './cognito';
+import { clearDoorCache } from '../doorCache';
 
 interface AuthContextValue {
   email: string | null;
@@ -35,6 +36,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   function logout() {
     cognitoSignOut();
+    // Door mode's offline copy is viewable without auth — it must not outlive
+    // the login that created it.
+    void clearDoorCache();
     setEmail(null);
   }
 

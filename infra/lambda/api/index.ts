@@ -297,6 +297,7 @@ Extract ONLY information explicitly printed in the document:
 Rules:
 - name is the vaccine's common name ONLY — never append durations or parenthetical validity periods like "(1 Year)" or "(3 Months)" to it.
 - If the document states a validity period or duration instead of (or alongside) a date — e.g. "1 year", "(3 Months)", "annual", "good for 36 months" — copy that phrase verbatim into validityText.
+- Vet visit summaries and invoices often print ONE service/visit date for the whole document (e.g. "Service Date", "Date of Service", "Visit Date") next to a list of services received. That date IS the administered date (dateGiven) for every vaccine in the list, unless a line shows its own date.
 - All dates in YYYY-MM-DD. If a date is partial or unreadable, use null for it.
 - NEVER infer or calculate an expiration date that is not written in the document (do not guess 1-year vs 3-year durations); expiry is only for an explicitly printed date. Printed durations belong in validityText.
 - Use null for anything not present or not legible.

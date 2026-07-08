@@ -2917,3 +2917,9 @@ a {
   border-radius: 10px;
   padding: 0.6rem 0.8rem;
 }
+
+.roadmap-teaser {
+  text-align: center;
+  margin: 1.5rem auto 0;
+  max-width: 34rem;
+}

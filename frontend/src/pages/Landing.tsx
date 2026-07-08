@@ -61,6 +61,12 @@ export function Landing() {
           <strong>No clutter, ever.</strong> No feeds, no upsells, no
           vet-portal maze. Just your pet's records, free.
         </div>
+
+        <p className="roadmap-teaser subtle">
+          Petshots ships every week — family sharing, daily care checklists,
+          and weight tracking all landed recently.{' '}
+          <Link to="/roadmap">See what's next on the roadmap →</Link>
+        </p>
       </main>
       <SiteFooter />
     </>

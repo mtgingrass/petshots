@@ -2752,3 +2752,9 @@ a {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+
+.med-given-today {
+  color: var(--ok-text, #34d399);
+  font-weight: 600;
+  padding: 0.5rem 0.25rem;
+}

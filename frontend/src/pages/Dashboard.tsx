@@ -169,7 +169,7 @@ function petOverallStatus(docs: Doc[], meds?: Med[]): Status {
     return STATUS_RANK[s] < STATUS_RANK[w] ? s : w;
   }, 'none');
   for (const med of trackedMeds(meds)) {
-    const s = medStatus(med.nextDue).status;
+    const s = medStatus(med).status;
     if (STATUS_RANK[s] < STATUS_RANK[worst]) worst = s;
   }
   return worst;
@@ -181,11 +181,11 @@ function petPinStatus(docs: Doc[], meds?: Med[]): string {
   if (docs.length === 0 && tracked.length === 0) return 'No records yet';
   const overdue =
     docs.filter((d) => statusOf(d.expiry) === 'overdue').length +
-    tracked.filter((m) => medStatus(m.nextDue).status === 'overdue').length;
+    tracked.filter((m) => medStatus(m).status === 'overdue').length;
   if (overdue > 0) return `${overdue} overdue`;
   const dueSoon =
     docs.filter((d) => statusOf(d.expiry) === 'due-soon').length +
-    tracked.filter((m) => medStatus(m.nextDue).status === 'due-soon').length;
+    tracked.filter((m) => medStatus(m).status === 'due-soon').length;
   if (dueSoon > 0) return `${dueSoon} due soon`;
   return 'All current';
 }
@@ -1287,7 +1287,7 @@ function PetDetailScreen({
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
-    (m) => medStatus(m.nextDue).status !== 'current',
+    (m) => medStatus(m).status !== 'current',
   ).length;
 
   return (
@@ -2662,15 +2662,24 @@ function cadenceLabel(interval: number, unit: MedUnit): string {
   return `Every ${interval} ${unit}${interval !== 1 ? 's' : ''}`;
 }
 
-// Meds use a tighter urgency window than vaccines: a monthly med inside a
-// 30-day "due soon" window would never leave it.
-function medStatus(nextDue: string): { status: Status; pill: string | null } {
-  const days = daysUntil(nextDue);
+// Meds use a tighter urgency window than vaccines (a monthly med inside a
+// 30-day "due soon" window would never leave it) — and the lookahead must
+// also shrink with the cadence: a daily med is ALWAYS within 3 days of its
+// next dose, so a fixed 3-day window flagged it "due tomorrow" the moment it
+// was given. Lookahead = min(3, interval-1) days, so short-cycle meds only
+// alarm on their actual due day.
+function medStatus(
+  med: Pick<Med, 'nextDue' | 'interval' | 'unit'>,
+): { status: Status; pill: string | null } {
+  const days = daysUntil(med.nextDue);
+  const intervalDays =
+    med.unit === 'day' ? med.interval : med.unit === 'week' ? med.interval * 7 : med.interval * 30;
+  const lookahead = Math.min(3, Math.max(0, intervalDays - 1));
   if (days < 0) return { status: 'overdue', pill: `Overdue ${-days}d` };
   if (days === 0) return { status: 'due-soon', pill: 'Due today' };
+  if (days > lookahead) return { status: 'current', pill: null };
   if (days === 1) return { status: 'due-soon', pill: 'Due tomorrow' };
-  if (days <= 3) return { status: 'due-soon', pill: `Due in ${days}d` };
-  return { status: 'current', pill: null };
+  return { status: 'due-soon', pill: `Due in ${days}d` };
 }
 
 // Reminder emails go to settings.email, which users who never opened Settings
@@ -2936,7 +2945,7 @@ function MedItem({
   const dismissed = med.dismissed === true;
   const { status, pill } = dismissed
     ? { status: 'none' as Status, pill: 'Not tracked' }
-    : medStatus(med.nextDue);
+    : medStatus(med);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -3023,9 +3032,15 @@ function MedItem({
       </div>
       {!dismissed && (
         <div className="med-item__actions">
-          <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
-            ✓ Mark as given
-          </button>
+          {med.lastGiven === todayYMD() ? (
+            // Already given today — show it plainly instead of an armable
+            // button that would advance the schedule a second time.
+            <span className="med-given-today">✓ Given today</span>
+          ) : (
+            <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
+              ✓ Mark as given
+            </button>
+          )}
           <label className="med-remind">
             <span className="med-remind__label subtle">
               {med.remindersEnabled ? '🔔 Reminders' : '🔕 Reminders'}

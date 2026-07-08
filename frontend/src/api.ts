@@ -43,6 +43,7 @@ export interface UserSettings {
   reminderDays: number[];
   marketingOptIn: boolean;
   emailOptOut: boolean; // master kill-switch: true = no Petshots email at all
+  weeklyDigest: boolean; // Sunday summary; only sends alongside remindersEnabled
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   reminderDays: [7, 30],
   marketingOptIn: true,
   emailOptOut: false,
+  weeklyDigest: true,
 };
 
 export function getSettings(): Promise<UserSettings> {
@@ -128,6 +130,35 @@ export interface Med {
   // "Stop tracking": stays on record, but banners, overview status, the
   // passport, and reminder emails all skip it.
   dismissed?: boolean;
+}
+
+// ---- weight log ----
+
+export interface WeightEntry {
+  date: string; // YYYY-MM-DD
+  weight: number;
+  unit: 'lb' | 'kg';
+  by: string; // who logged it, server-stamped
+  at: string;
+}
+
+export function listWeights(petId: string): Promise<{ entries: WeightEntry[] }> {
+  return request('GET', `/pets/${petId}/weights`);
+}
+
+// Same-date logs replace (typo fix); the newest entry also becomes the
+// profile's display weight server-side.
+export function logWeight(
+  petId: string,
+  date: string,
+  weight: number,
+  unit: 'lb' | 'kg',
+): Promise<{ entries: WeightEntry[] }> {
+  return request('POST', `/pets/${petId}/weights`, { date, weight, unit });
+}
+
+export function deleteWeight(petId: string, date: string): Promise<{ entries: WeightEntry[] }> {
+  return request('DELETE', `/pets/${petId}/weights/${date}`);
 }
 
 // ---- daily care checklist ----

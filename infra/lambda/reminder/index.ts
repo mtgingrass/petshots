@@ -22,6 +22,7 @@ interface UserSettings {
   reminderDays?: number[];
   emailOptOut?: boolean; // master kill-switch: true = never email this user
   unsubToken?: string; // per-user secret for the no-login unsubscribe link
+  weeklyDigest?: boolean; // Sunday summary; absent = on (requires remindersEnabled)
 }
 
 interface DocMeta {
@@ -278,11 +279,132 @@ function composeEmail(
   return { subject, body };
 }
 
+// ---- weekly digest ----
+// Sunday summary per user: last 7 days of the daily checklist (feedings,
+// walks, counters, meds given, moods, who did what) + weight changes. Only
+// sends when there was actual activity — silence beats an empty email.
+
+interface DailyCheckEntry {
+  by: string;
+  at: string;
+  count?: number;
+  events?: { by: string; at: string }[];
+}
+interface DailyFileView {
+  items: { id: string; name: string; kind?: string }[] | null;
+  log?: Record<string, Record<string, DailyCheckEntry>>;
+  moods?: Record<string, { value: number; by: string; at: string }>;
+}
+interface WeightEntryView {
+  date: string;
+  weight: number;
+  unit: string;
+}
+
+const MOOD_EMOJI: Record<number, string> = { 1: '😢', 2: '😕', 3: '😐', 4: '🙂', 5: '😄' };
+const MOOD_LABEL: Record<number, string> = { 1: 'rough', 2: 'off', 3: 'okay', 4: 'good', 5: 'great' };
+const DIGEST_PRESET_NAMES: Record<string, string> = {
+  'preset-breakfast': 'Breakfast',
+  'preset-dinner': 'Dinner',
+  'preset-walk': 'Walk',
+  'preset-poop': '💩 Poop',
+};
+
+function last7Dates(today: Date): string[] {
+  const out: string[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86_400_000);
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+// One pet's paragraph of the digest, or null if the week held nothing.
+function digestPetSection(
+  petName: string,
+  daily: DailyFileView | null,
+  weights: WeightEntryView[],
+  dates: string[],
+): string | null {
+  const lines: string[] = [];
+  const window = new Set(dates);
+
+  // Mood strip, oldest → newest.
+  const moods = dates
+    .map((d) => daily?.moods?.[d]?.value)
+    .filter((v): v is number => typeof v === 'number');
+  if (moods.length > 0) {
+    const avg = Math.round(moods.reduce((a, b) => a + b, 0) / moods.length);
+    lines.push(
+      `Mood: ${moods.map((v) => MOOD_EMOJI[v] ?? '·').join(' ')} (mostly ${MOOD_LABEL[avg] ?? 'okay'})`,
+    );
+  }
+
+  // Checklist totals by item name; counters report their tallies.
+  const itemNames = new Map<string, string>(
+    (daily?.items ?? []).map((i) => [i.id, i.name]),
+  );
+  const checkCounts = new Map<string, number>();
+  const byPerson = new Map<string, number>();
+  let medsGiven = 0;
+  for (const d of dates) {
+    const day = daily?.log?.[d];
+    if (!day) continue;
+    for (const [itemId, entry] of Object.entries(day)) {
+      const n = entry.count ?? 1;
+      if (itemId.startsWith('med:')) medsGiven += 1;
+      else {
+        const name = itemNames.get(itemId) ?? DIGEST_PRESET_NAMES[itemId] ?? 'Other';
+        checkCounts.set(name, (checkCounts.get(name) ?? 0) + n);
+      }
+      for (const ev of entry.events ?? [{ by: entry.by }]) {
+        const who = (ev.by ?? '').split('@')[0];
+        if (who) byPerson.set(who, (byPerson.get(who) ?? 0) + 1);
+      }
+    }
+  }
+  if (checkCounts.size > 0) {
+    lines.push(
+      [...checkCounts.entries()].map(([name, n]) => `${name} ×${n}`).join(' · '),
+    );
+  }
+  if (medsGiven > 0) {
+    lines.push(`Meds given: ${medsGiven}`);
+  }
+
+  // Weight: newest in-window entry, plus the change across the window.
+  const inWindow = weights.filter((w) => window.has(w.date));
+  if (inWindow.length > 0) {
+    const latest = inWindow[inWindow.length - 1];
+    const before = [...weights].reverse().find((w) => w.date < dates[0]);
+    const base = inWindow.length > 1 ? inWindow[0] : before;
+    let deltaText = '';
+    if (base && base.unit === latest.unit && base.weight !== latest.weight) {
+      const d = Math.round((latest.weight - base.weight) * 100) / 100;
+      deltaText = ` (${d > 0 ? '▲' : '▼'} ${Math.abs(d)} ${latest.unit})`;
+    }
+    lines.push(`Weight: ${latest.weight} ${latest.unit}${deltaText}`);
+  }
+
+  if (lines.length === 0) return null;
+  if (byPerson.size > 1) {
+    lines.push(
+      `Checked off by: ${[...byPerson.entries()].map(([who, n]) => `${who} ${n}`).join(' · ')}`,
+    );
+  }
+  return `${petName}\n${lines.map((l) => `  ${l}`).join('\n')}`;
+}
+
 // EventBridge invokes with its scheduled-event payload (no dryRun field).
 // Passing { dryRun: true } via a manual invoke returns the would-send emails
 // instead of sending them — the smoke test's window into this logic.
-export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> => {
+// { forceDigest: true } composes the weekly digest regardless of weekday.
+export const handler = async (event?: {
+  dryRun?: boolean;
+  forceDigest?: boolean;
+}): Promise<unknown> => {
   const dryRun = event?.dryRun === true;
+  const digestDay = event?.forceDigest === true || new Date().getUTCDay() === 0;
   const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
 
   // Discover all user prefixes via delimiter listing (users/{sub}/)
@@ -383,6 +505,66 @@ export const handler = async (event?: { dryRun?: boolean }): Promise<unknown> =>
           const effInterval = effectiveMedIntervalDays(med.unit, med.interval);
           if (medShouldRemind(days, effInterval)) {
             dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days, phase: phaseFor(days) });
+          }
+        }
+      }
+
+      // Weekly digest (Sundays) — a separate email from the reminder, sent
+      // only to reminder-consented users who haven't turned the digest off,
+      // and only when the week actually held activity.
+      if (digestDay && vaccineRemindersOn && settings.weeklyDigest !== false) {
+        const dates = last7Dates(today);
+        const sections: string[] = [];
+        const petNames: string[] = [];
+        for (const { base, petId } of petSources) {
+          const pet = await readJson<{ name?: string }>(`${base}pets/${petId}/pet.json`);
+          if (!pet?.name) continue;
+          const [daily, weightsStored] = await Promise.all([
+            readJson<DailyFileView>(`${base}pets/${petId}/daily.json`),
+            readJson<{ entries: WeightEntryView[] }>(`${base}pets/${petId}/weights.json`),
+          ]);
+          const section = digestPetSection(pet.name, daily, weightsStored?.entries ?? [], dates);
+          if (section) {
+            sections.push(section);
+            petNames.push(pet.name);
+          }
+        }
+        if (sections.length > 0) {
+          const subject =
+            petNames.length === 1
+              ? `🐾 ${petNames[0]}'s week at a glance`
+              : `🐾 Your pets' week at a glance`;
+          const body = [
+            `Hi,`,
+            ``,
+            `Here's how the last 7 days went:`,
+            ``,
+            sections.join('\n\n'),
+            ``,
+            `Keep it up: ${APP_URL}/dashboard`,
+            ``,
+            `— The Petshots team`,
+            ``,
+            `Turn the weekly digest off in Settings.`,
+            `Unsubscribe from all Petshots email: ${unsubUrl}`,
+          ].join('\n');
+          if (dryRun) {
+            wouldSend.push({ email: settings.email, subject, body });
+            console.log(`[dry run] would send digest to ${settings.email}: ${subject}`);
+          } else {
+            await ses.send(
+              new SendEmailCommand({
+                FromEmailAddress: FROM_EMAIL,
+                Destination: { ToAddresses: [settings.email] },
+                Content: {
+                  Simple: {
+                    Subject: { Data: subject, Charset: 'UTF-8' },
+                    Body: { Text: { Data: body, Charset: 'UTF-8' } },
+                  },
+                },
+              }),
+            );
+            console.log(`Sent weekly digest to ${settings.email}`);
           }
         }
       }

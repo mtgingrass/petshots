@@ -289,6 +289,36 @@ async function main() {
   const noAuth = await fetch(`${API}/pets/${petId}/meds`);
   check(noAuth.status === 401, `unauthenticated meds GET 401 (got ${noAuth.status})`);
 
+  console.log('\n[8f] weight log: add, same-date replace, profile sync, delete');
+  r = await api(token, 'GET', `/pets/${petId}/weights`);
+  check(r.status === 200 && r.body.entries.length === 0, 'weights start empty');
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: '2026-06-01', weight: 80, unit: 'lb' });
+  check(r.status === 200 && r.body.entries.length === 1, 'historical weight logged');
+  const wToday = new Date().toISOString().slice(0, 10);
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: wToday, weight: 83.5, unit: 'lb' });
+  check(r.body.entries.length === 2 && r.body.entries[1].weight === 83.5, 'today logged, sorted by date');
+  check(!!r.body.entries[1].by && !!r.body.entries[1].at, 'entry attributed (by + at)');
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: wToday, weight: 83, unit: 'lb' });
+  check(r.body.entries.length === 2 && r.body.entries[1].weight === 83, 'same-date log replaces (typo fix)');
+  let petCheck = await api(token, 'GET', '/pets');
+  check(
+    petCheck.body.pets.find((p) => p.id === petId)?.weight === '83 lb',
+    "latest entry synced to the profile's display weight",
+  );
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: '2030-01-01', weight: 80, unit: 'lb' });
+  check(r.status === 400, 'future date rejected');
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: wToday, weight: -3, unit: 'lb' });
+  check(r.status === 400, 'negative weight rejected');
+  r = await api(token, 'DELETE', `/pets/${petId}/weights/${wToday}`);
+  check(r.status === 200 && r.body.entries.length === 1, 'entry deleted');
+  petCheck = await api(token, 'GET', '/pets');
+  check(
+    petCheck.body.pets.find((p) => p.id === petId)?.weight === '80 lb',
+    'profile weight falls back to newest remaining entry',
+  );
+  r = await api(token, 'DELETE', `/pets/${petId}/weights/2020-01-01`);
+  check(r.status === 404, 'deleting a missing date 404s');
+
   console.log('\n[9] DELETE pet removes it and its docs');
   del = await api(token, 'DELETE', `/pets/${petId}`);
   check(del.status === 204, `pet delete returns 204 (got ${del.status})`);

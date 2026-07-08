@@ -457,6 +457,29 @@ function dailyMedItems(
     .map((m) => ({ id: `med:${m.id}`, name: m.name, med: true as const }));
 }
 
+// ---- weight log ----
+// Weight over time per pet (vets ask at every visit; sudden loss is often the
+// first symptom of something). One entry per date — re-logging a date
+// replaces it. The latest entry also updates pet.json's display weight so the
+// profile and passport stay current.
+interface WeightEntry {
+  date: string; // YYYY-MM-DD
+  weight: number;
+  unit: 'lb' | 'kg';
+  by: string; // who logged it, server-stamped
+  at: string;
+}
+const MAX_WEIGHT_ENTRIES = 500;
+const formatWeight = (e: WeightEntry): string => `${e.weight} ${e.unit}`;
+
+// Any real past-or-today date is loggable (historical backfill from old vet
+// records is legitimate); +1 day of slack covers timezones ahead of UTC.
+function isWeightDate(v: unknown): v is string {
+  if (!isStrictDay(v)) return false;
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  return v <= tomorrow;
+}
+
 // Drop expired invites from a household file AND their bucket-root token
 // objects. Returns the pruned file; caller persists it if it changed.
 async function pruneInvites(h: HouseholdFile): Promise<{ h: HouseholdFile; changed: boolean }> {
@@ -1854,6 +1877,10 @@ export const handler = async (
             : [7, 30],
           marketingOptIn: input.marketingOptIn === true,
           emailOptOut: input.emailOptOut === true,
+          // Sunday summary of the week's care/mood/weight. Default ON (it
+          // only ever sends when reminders are enabled AND there was
+          // activity), explicit false turns it off.
+          weeklyDigest: input.weeklyDigest !== false,
           unsubToken:
             typeof existing?.unsubToken === 'string' ? existing.unsubToken : randomUUID(),
         };
@@ -2029,6 +2056,80 @@ export const handler = async (
           }),
         );
         return { statusCode: 204 };
+      }
+
+      // ---- weight log (per pet) ----
+
+      case 'GET /pets/{petId}/weights': {
+        const stored = await readJson<{ entries: WeightEntry[] }>(`${petPrefix}weights.json`);
+        return json(200, { entries: stored?.entries ?? [] });
+      }
+
+      case 'POST /pets/{petId}/weights': {
+        const input = JSON.parse(event.body ?? '{}');
+        const date = input.date;
+        const unit = input.unit === 'kg' ? 'kg' : input.unit === 'lb' ? 'lb' : null;
+        const weight =
+          typeof input.weight === 'number' && input.weight > 0 && input.weight <= 2000
+            ? Math.round(input.weight * 100) / 100
+            : null;
+        if (!isWeightDate(date)) return json(400, { error: 'date must be a real day, not in the future' });
+        if (!unit) return json(400, { error: 'unit must be lb or kg' });
+        if (weight === null) return json(400, { error: 'weight must be a positive number' });
+        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+
+        const entry: WeightEntry = {
+          date,
+          weight,
+          unit,
+          by: await actorEmail(sub),
+          at: new Date().toISOString(),
+        };
+        let entries: WeightEntry[] = [];
+        for (let attempt = 0; ; attempt++) {
+          const { value, etag } = await readJsonTagged<{ entries: WeightEntry[] }>(
+            `${petPrefix}weights.json`,
+          );
+          // One entry per date: same-date logs replace (typo correction).
+          entries = [...(value?.entries ?? []).filter((e) => e.date !== date), entry]
+            .sort((a, b) => a.date.localeCompare(b.date))
+            .slice(-MAX_WEIGHT_ENTRIES);
+          if (await putJsonGuarded(`${petPrefix}weights.json`, { entries }, etag)) break;
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
+        }
+
+        // Keep the profile's display weight in sync with the newest entry.
+        const latest = entries[entries.length - 1];
+        const pet = await readJson<Record<string, unknown>>(petKey);
+        if (pet && latest.date === date) {
+          await putJson(petKey, { ...pet, weight: formatWeight(latest) });
+        }
+        return json(200, { entries });
+      }
+
+      case 'DELETE /pets/{petId}/weights/{date}': {
+        const date = event.pathParameters?.date;
+        if (!isStrictDay(date)) return json(400, { error: 'invalid date' });
+        let entries: WeightEntry[] = [];
+        let removed: WeightEntry | undefined;
+        for (let attempt = 0; ; attempt++) {
+          const { value, etag } = await readJsonTagged<{ entries: WeightEntry[] }>(
+            `${petPrefix}weights.json`,
+          );
+          removed = (value?.entries ?? []).find((e) => e.date === date);
+          if (!removed) return json(404, { error: 'not found' });
+          entries = (value?.entries ?? []).filter((e) => e.date !== date);
+          if (await putJsonGuarded(`${petPrefix}weights.json`, { entries }, etag)) break;
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
+        }
+        // If the profile was showing the deleted entry, fall back to the
+        // newest remaining one (a hand-typed profile weight is left alone).
+        const pet = await readJson<Record<string, unknown>>(petKey);
+        if (pet && pet.weight === formatWeight(removed)) {
+          const latest = entries[entries.length - 1];
+          await putJson(petKey, { ...pet, weight: latest ? formatWeight(latest) : undefined });
+        }
+        return json(200, { entries });
       }
 
       // ---- family / household ----

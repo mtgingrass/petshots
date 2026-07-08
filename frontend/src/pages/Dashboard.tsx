@@ -35,6 +35,9 @@ import {
   setDailyMood,
   saveDailyItems,
   localToday,
+  listWeights,
+  logWeight,
+  deleteWeight,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -46,6 +49,7 @@ import {
   type Household,
   type DailyState,
   type DailyItem,
+  type WeightEntry,
   type Extraction,
   type CommitRecord,
   type ProfilePatch,
@@ -626,6 +630,7 @@ export function Dashboard() {
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPresent={() => setPresenting(true)}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
+              onPetChanged={() => void loadPets()}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onReviewExtraction={(uploadId, fileName, extraction, aiNote, duplicateOf) =>
@@ -1249,6 +1254,7 @@ function PetDetailScreen({
   onEditPet,
   onPresent,
   onEditProfile,
+  onPetChanged,
   onViewDoc,
   onEditDoc,
   onReviewExtraction,
@@ -1267,6 +1273,7 @@ function PetDetailScreen({
   onEditPet: () => void;
   onPresent: () => void;
   onEditProfile: () => void;
+  onPetChanged: () => void; // weight log syncs the profile's display weight
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onReviewExtraction: (
@@ -1403,7 +1410,10 @@ function PetDetailScreen({
             onMedsChanged={onMedsChanged}
           />
         ) : tab === 'profile' ? (
-          <ProfileSection pet={pet} onEdit={onEditProfile} />
+          <>
+            <ProfileSection pet={pet} onEdit={onEditProfile} />
+            <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
+          </>
         ) : (
           <PassportTabSection
             pet={pet}
@@ -3249,6 +3259,194 @@ function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
   );
 }
 
+// ---- weight log (Profile tab card) ----
+
+// Tiny inline trend, last 12 entries. No axes — the numbers are in the list;
+// this is just "which way is it going".
+function WeightSparkline({ entries }: { entries: WeightEntry[] }) {
+  const pts = entries.slice(-12);
+  if (pts.length < 2) return null;
+  const W = 132;
+  const H = 36;
+  const PAD = 4;
+  const min = Math.min(...pts.map((e) => e.weight));
+  const max = Math.max(...pts.map((e) => e.weight));
+  const span = max - min || 1;
+  const coords = pts
+    .map((e, i) => {
+      const x = PAD + (i * (W - PAD * 2)) / (pts.length - 1);
+      const y = H - PAD - ((e.weight - min) / span) * (H - PAD * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return (
+    <svg
+      className="weight-spark"
+      width={W}
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      aria-label="Weight trend"
+      role="img"
+    >
+      <polyline points={coords} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function WeightSection({
+  petId,
+  onPetChanged,
+  onError,
+}: {
+  petId: string;
+  onPetChanged: () => void; // profile display weight is server-synced
+  onError: (msg: string | null) => void;
+}) {
+  const [entries, setEntries] = useState<WeightEntry[] | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [weight, setWeight] = useState('');
+  const [unit, setUnit] = useState<'lb' | 'kg'>(
+    (localStorage.getItem('petshots.weightUnit') as 'lb' | 'kg') || 'lb',
+  );
+  const [date, setDate] = useState(localToday());
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    listWeights(petId)
+      .then((r) => { if (live) setEntries(r.entries); })
+      .catch(() => { if (live) setEntries([]); });
+    return () => { live = false; };
+  }, [petId]);
+
+  async function handleLog(e: FormEvent) {
+    e.preventDefault();
+    const value = Number(weight);
+    if (!Number.isFinite(value) || value <= 0) {
+      onError('Enter a weight greater than zero.');
+      return;
+    }
+    setBusy(true);
+    onError(null);
+    try {
+      const res = await logWeight(petId, date, value, unit);
+      setEntries(res.entries);
+      localStorage.setItem('petshots.weightUnit', unit);
+      setWeight('');
+      setAdding(false);
+      setDate(localToday());
+      onPetChanged();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not log the weight');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(d: string) {
+    setBusy(true);
+    onError(null);
+    try {
+      const res = await deleteWeight(petId, d);
+      setEntries(res.entries);
+      onPetChanged();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not remove the entry');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (entries === null) return null;
+
+  const latest = entries[entries.length - 1];
+  const previous = entries[entries.length - 2];
+  const delta = latest && previous ? latest.weight - previous.weight : null;
+  const recent = [...entries].slice(-5).reverse();
+
+  return (
+    <section className="profile-section weight-card">
+      <h3 className="profile-section__title">Weight over time</h3>
+
+      {latest ? (
+        <div className="weight-card__now">
+          <span className="weight-card__value">
+            {latest.weight} {latest.unit}
+            {delta !== null && delta !== 0 && (
+              <span className={`weight-card__delta ${delta > 0 ? 'weight-card__delta--up' : 'weight-card__delta--down'}`}>
+                {delta > 0 ? '▲' : '▼'} {Math.abs(Math.round(delta * 100) / 100)} {latest.unit}
+              </span>
+            )}
+          </span>
+          <WeightSparkline entries={entries} />
+        </div>
+      ) : (
+        <p className="subtle">
+          No weigh-ins yet. Log one after each vet visit (or the bathroom-scale
+          trick: hold them, subtract yourself).
+        </p>
+      )}
+
+      {recent.map((e) => (
+        <div className="weight-row" key={e.date}>
+          <span className="weight-row__main">
+            {formatDate(e.date)} · <strong>{e.weight} {e.unit}</strong>
+            <span className="subtle weight-row__who"> — {e.by.split('@')[0]}</span>
+          </span>
+          <button
+            type="button"
+            className="btn btn--icon"
+            aria-label={`Delete the ${formatDate(e.date)} weigh-in`}
+            disabled={busy}
+            onClick={() => void handleDelete(e.date)}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+
+      {adding ? (
+        <form className="weight-add" onSubmit={handleLog}>
+          <input
+            type="number"
+            inputMode="decimal"
+            step="0.1"
+            min="0.1"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+            placeholder="Weight"
+            autoFocus
+            required
+          />
+          <select value={unit} onChange={(e) => setUnit(e.target.value as 'lb' | 'kg')}>
+            <option value="lb">lb</option>
+            <option value="kg">kg</option>
+          </select>
+          <input
+            type="date"
+            value={date}
+            max={localToday()}
+            onChange={(e) => setDate(e.target.value)}
+            required
+          />
+          <div className="actions">
+            <button className="btn btn--primary" type="submit" disabled={busy || !weight}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+            <button className="btn" type="button" disabled={busy} onClick={() => setAdding(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button className="btn" type="button" onClick={() => setAdding(true)}>
+          + Log weight
+        </button>
+      )}
+    </section>
+  );
+}
+
 // ---- passport tab ----
 
 function PassportTabSection({
@@ -3951,6 +4149,28 @@ function SettingsScreen({
                 (weekly, then monthly) reminders always apply when a med's toggle is on; meds due every
                 week or longer also get a 3-day-ahead heads-up.
               </p>
+
+              <div className="settings-group__divider" />
+
+              <div className="settings-row">
+                <label className="settings-row__label" htmlFor="digest-toggle">
+                  Weekly digest
+                  <span className="subtle settings-row__sub">
+                    A Sunday summary of the week's care, mood, and weight — only when
+                    there's something to report
+                  </span>
+                </label>
+                <label className="toggle" aria-label="Toggle weekly digest">
+                  <input
+                    id="digest-toggle"
+                    type="checkbox"
+                    checked={(settings?.weeklyDigest ?? true) && (settings?.remindersEnabled ?? false)}
+                    disabled={!settings?.remindersEnabled}
+                    onChange={(e) => settings && persist({ ...settings, weeklyDigest: e.target.checked })}
+                  />
+                  <span className="toggle__track" />
+                </label>
+              </div>
               </div>
             </fieldset>
 

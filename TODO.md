@@ -40,6 +40,10 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [ ] **Daily-history reports** (2026-07-08, s19 started collecting the data) — Mark's idea: "what did you feed your pet the last week, because you said he was feeling slow most of this week." Every pet now accumulates `daily-archive/{YYYY-MM}.json` (check-offs + mood per day, who + when); nothing reads it yet. Build: trends view (mood over time, missed feedings), maybe AI-written weekly summary via Bedrock. The active `daily.json` keeps 14 days; archives are append-only and complete.
 
+- [ ] **SES bounce/complaint handling** (2026-07-08) — email volume is growing (reminders + birthdays + weekly digest). Add an SNS topic for bounces/complaints and suppress those addresses; keeps SES sender reputation clean without babysitting. Low urgency at current volume.
+
+- [ ] **Retention ideas parked from the s19 brainstorm** (2026-07-08) — shipped: weight log + weekly digest. Still open, roughly in value order: (a) **web push notifications** ("Insulin due today" on the installed PWA — the strongest channel, but a full session: VAPID, subscription storage, permission UX); (b) **.ics "add to calendar" links** in reminder emails (trivial, high leverage); (c) records health-check line in reminder emails ("Bordetella has no expiry date"). Deliberately rejected: gamification/streaks, photo feeds, more email frequency.
+
 - [ ] **Password-reset email copy** (2026-07-08, found in s19) — Cognito reuses the pool's ONE verification template for both signup confirmation AND forgot-password codes, so the reset email arrives with subject "Verify your new account" — confusing when you're resetting a password. Fix = either neutral copy in the shared template ("Your Petshots verification code") via AuthStack `userVerification`, or a CustomMessage Lambda trigger to branch on `CustomMessage_ForgotPassword` for properly distinct emails. Cosmetic — the code works fine.
 
 - [x] **Consider "Upgrade" hook at the 3-pet limit message** (2026-07-03) — already shipped in s14 (upgrade CTA in the pet-limit message); checked off during s17 housekeeping.

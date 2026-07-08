@@ -153,6 +153,28 @@ async function main() {
   check(hhEmailed.body.invites[0]?.sentTo === simAddr, 'pending list shows who it was sent to');
   const badEmail = await api(owner, 'POST', '/household/invites', { email: 'not-an-email' });
   check(badEmail.status === 400, 'malformed email rejected');
+  // Daily invite-email cap: pre-fill today's counter, expect the send refused
+  // (invite still created as a working link) — then reset the counter.
+  const invObj = JSON.parse(
+    execSync(`aws s3 cp s3://petshots-uploads/invites/${emailedInv.body.token}.json -`, {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }),
+  );
+  const ownerSubId = invObj.ownerSub;
+  const capDate = new Date().toISOString().slice(0, 10);
+  execSync(
+    `echo '{"date":"${capDate}","count":10}' | aws s3 cp - s3://petshots-uploads/users/${ownerSubId}/invite-emails.json --content-type application/json`,
+    { stdio: 'pipe' },
+  );
+  await api(owner, 'DELETE', `/household/invites/${emailedInv.body.token}`);
+  const cappedInv = await api(owner, 'POST', '/household/invites', { email: simAddr });
+  check(
+    cappedInv.status === 200 && cappedInv.body.emailDelivered === false,
+    'daily email cap refuses the send but keeps the link working',
+  );
+  execSync(`aws s3 rm s3://petshots-uploads/users/${ownerSubId}/invite-emails.json`, { stdio: 'pipe' });
+  await api(owner, 'DELETE', `/household/invites/${cappedInv.body.token}`);
   // Swap back to a plain link invite for the join flow below.
   await api(owner, 'DELETE', `/household/invites/${emailedInv.body.token}`);
   const relink = await api(owner, 'POST', '/household/invites');

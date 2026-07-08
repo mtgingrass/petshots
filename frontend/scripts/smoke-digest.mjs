@@ -90,7 +90,7 @@ async function main() {
   });
   await api(token, 'POST', '/push/subscribe', {
     subscription: {
-      endpoint: `https://updates.push.example.com/wpush/v2/digest-smoke-${Date.now()}`,
+      endpoint: `https://updates.push.services.mozilla.com/wpush/v2/digest-smoke-${Date.now()}`,
       keys: { p256dh: 'BFakeKeyForDryRunCounting0000000000000000000000000000000000000000000000000000000000000', auth: 'FakeAuthSecret16' },
     },
   });

@@ -322,12 +322,47 @@ const MEMBER_BLOCKED_ROUTES = new Set([
   'DELETE /pets/{petId}/passport',
 ]);
 
-async function readHousehold(sub: string): Promise<HouseholdFile> {
-  const h = await readJson<Partial<HouseholdFile>>(`users/${sub}/household.json`);
+function normalizeHousehold(h: Partial<HouseholdFile> | null): HouseholdFile {
   return {
     members: Array.isArray(h?.members) ? h.members : [],
     invites: Array.isArray(h?.invites) ? h.invites : [],
   };
+}
+async function readHousehold(sub: string): Promise<HouseholdFile> {
+  return normalizeHousehold(await readJson<Partial<HouseholdFile>>(`users/${sub}/household.json`));
+}
+
+// household.json is written from several flows that can race across family
+// devices (invite, join, remove, leave, account deletion) — same ETag-guarded
+// read-mutate-write as daily.json. `mutate` returns null to abort untouched.
+async function updateHousehold<T>(
+  ownerSub: string,
+  mutate: (h: HouseholdFile) => { result: T } | null,
+): Promise<T | null> {
+  for (let attempt = 0; ; attempt++) {
+    const { value, etag } = await readJsonTagged<Partial<HouseholdFile>>(
+      `users/${ownerSub}/household.json`,
+    );
+    const h = normalizeHousehold(value ?? null);
+    const out = mutate(h);
+    if (out === null) return null;
+    if (await putJsonGuarded(`users/${ownerSub}/household.json`, h, etag)) return out.result;
+    if (attempt >= 3) throw new Error('household write contention');
+  }
+}
+
+// Daily cap on emailed invites: the invite CREATE is already seat-capped, but
+// create→revoke→create would otherwise loop unlimited SES sends to arbitrary
+// addresses from any account.
+const MAX_INVITE_EMAILS_PER_DAY = Number(process.env.MAX_INVITE_EMAILS ?? '10');
+async function bumpInviteEmailQuota(sub: string): Promise<boolean> {
+  const key = `users/${sub}/invite-emails.json`;
+  const today = new Date().toISOString().slice(0, 10);
+  const usage = await readJson<{ date?: string; count?: number }>(key);
+  const count = usage?.date === today ? Math.max(0, Number(usage.count) || 0) : 0;
+  if (count >= MAX_INVITE_EMAILS_PER_DAY) return false;
+  await putJson(key, { date: today, count: count + 1 });
+  return true;
 }
 const readMemberOf = (sub: string) => readJson<MemberOf>(`users/${sub}/memberOf.json`);
 
@@ -2015,9 +2050,23 @@ export const handler = async (
         }
         const membership = await readMemberOf(sub);
         if (membership) {
-          const oh = await readHousehold(membership.ownerSub);
-          oh.members = oh.members.filter((m) => m.sub !== sub);
-          await putJson(`users/${membership.ownerSub}/household.json`, oh);
+          await updateHousehold(membership.ownerSub, (h) => {
+            h.members = h.members.filter((m) => m.sub !== sub);
+            return { result: true };
+          });
+        }
+
+        // Roadmap votes are keyed by sub at the bucket root — remove them so
+        // nothing user-linked outlives the account.
+        try {
+          const roadmapItems = await readRoadmapItems();
+          for (const i of roadmapItems) {
+            await s3.send(
+              new DeleteObjectCommand({ Bucket: BUCKET, Key: `roadmap/votes/${i.id}/${sub}` }),
+            );
+          }
+        } catch (e) {
+          console.error('roadmap vote cleanup failed (non-fatal)', e);
         }
 
         await deletePrefix(`users/${sub}/`);
@@ -2134,6 +2183,22 @@ export const handler = async (
         ) {
           return json(400, { error: 'invalid push subscription' });
         }
+        // The reminder Lambda POSTs to this URL — restrict it to the push
+        // services real browsers actually use, so a stored endpoint can never
+        // aim our sender at an arbitrary host.
+        let host = '';
+        try {
+          host = new URL(endpoint).hostname;
+        } catch {
+          return json(400, { error: 'invalid push subscription' });
+        }
+        const allowedHost =
+          host === 'fcm.googleapis.com' ||
+          host === 'updates.push.services.mozilla.com' ||
+          host === 'web.push.apple.com' ||
+          host.endsWith('.push.apple.com') ||
+          host.endsWith('.notify.windows.com');
+        if (!allowedHost) return json(400, { error: 'unsupported push service' });
         const id = createHash('sha256').update(endpoint).digest('hex').slice(0, 32);
         await putJson(`users/${sub}/push/${id}.json`, {
           endpoint,
@@ -2312,21 +2377,33 @@ export const handler = async (
         if (typeof input.email === 'string' && input.email.trim() !== '' && !sentTo) {
           return json(400, { error: 'invalid email address' });
         }
-        const [raw, ent] = await Promise.all([readHousehold(sub), getEntitlements(sub)]);
-        const { h } = await pruneInvites(raw);
-        // Pending invites count against the cap — an invite is a promised seat.
-        if (h.members.length + h.invites.length >= ent.maxMembers) {
-          return json(409, { error: 'MEMBER_LIMIT_REACHED', maxMembers: ent.maxMembers });
-        }
+        // Prune expired invite token objects up front (their household entries
+        // are filtered inside the guarded update below).
+        const ent = await getEntitlements(sub);
+        await pruneInvites(await readHousehold(sub));
         const token = randomUUID();
         const createdAt = new Date().toISOString();
         const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
         const ownerEmail = await getUserEmail(sub);
         const url = `${APP_URL}/join/${token}`;
         await putJson(`invites/${token}.json`, { ownerSub: sub, ownerEmail, createdAt, expiresAt, sentTo });
-        h.invites.push({ token, createdAt, expiresAt, ...(sentTo ? { sentTo } : {}) });
-        await putJson(`users/${sub}/household.json`, h);
+        const added = await updateHousehold(sub, (h) => {
+          const now = Date.now();
+          h.invites = h.invites.filter((i) => Date.parse(i.expiresAt) > now);
+          // Pending invites count against the cap — an invite is a promised seat.
+          if (h.members.length + h.invites.length >= ent.maxMembers) return null;
+          h.invites.push({ token, createdAt, expiresAt, ...(sentTo ? { sentTo } : {}) });
+          return { result: true };
+        });
+        if (added === null) {
+          await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${token}.json` }));
+          return json(409, { error: 'MEMBER_LIMIT_REACHED', maxMembers: ent.maxMembers });
+        }
 
+        if (sentTo && !(await bumpInviteEmailQuota(sub))) {
+          // Invite exists and works as a link; only the email is refused.
+          return json(200, { token, url, expiresAt, sentTo, emailDelivered: false });
+        }
         if (sentTo) {
           // Send AFTER the invite exists; a failed send leaves a working
           // link the owner can still share by hand.
@@ -2410,13 +2487,7 @@ export const handler = async (
         if (ownFamily.members.length > 0) {
           return json(409, { error: 'HAS_OWN_FAMILY' });
         }
-        const [ownerHousehold, ownerEnt] = await Promise.all([
-          readHousehold(inv.ownerSub),
-          getEntitlements(inv.ownerSub),
-        ]);
-        if (ownerHousehold.members.length >= ownerEnt.maxMembers) {
-          return json(409, { error: 'MEMBER_LIMIT_REACHED' });
-        }
+        const ownerEnt = await getEntitlements(inv.ownerSub);
         const email = await getUserEmail(sub);
         const joinedAt = new Date().toISOString();
         // memberOf first: if the household.json write fails, the pointer is
@@ -2426,9 +2497,20 @@ export const handler = async (
           ownerEmail: inv.ownerEmail,
           joinedAt,
         });
-        ownerHousehold.members.push({ sub, email, joinedAt });
-        ownerHousehold.invites = ownerHousehold.invites.filter((i) => i.token !== token);
-        await putJson(`users/${inv.ownerSub}/household.json`, ownerHousehold);
+        const joined = await updateHousehold(inv.ownerSub, (h) => {
+          if (!h.members.some((m) => m.sub === sub)) {
+            if (h.members.length >= ownerEnt.maxMembers) return null;
+            h.members.push({ sub, email, joinedAt });
+          }
+          h.invites = h.invites.filter((i) => i.token !== token);
+          return { result: true };
+        });
+        if (joined === null) {
+          await s3.send(
+            new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${sub}/memberOf.json` }),
+          );
+          return json(409, { error: 'MEMBER_LIMIT_REACHED' });
+        }
         await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: `invites/${token}.json` }));
         return json(200, { ownerEmail: inv.ownerEmail });
       }
@@ -2436,22 +2518,25 @@ export const handler = async (
       case 'DELETE /household/members/{memberSub}': {
         const memberSub = event.pathParameters?.memberSub;
         if (!isUuid(memberSub)) return json(404, { error: 'not found' });
-        const h = await readHousehold(sub);
-        if (!h.members.some((m) => m.sub === memberSub)) return json(404, { error: 'not found' });
+        const removed = await updateHousehold(sub, (h) => {
+          if (!h.members.some((m) => m.sub === memberSub)) return null;
+          h.members = h.members.filter((m) => m.sub !== memberSub);
+          return { result: true };
+        });
+        if (removed === null) return json(404, { error: 'not found' });
         await s3.send(
           new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${memberSub}/memberOf.json` }),
         );
-        h.members = h.members.filter((m) => m.sub !== memberSub);
-        await putJson(`users/${sub}/household.json`, h);
         return { statusCode: 204 };
       }
 
       case 'POST /household/leave': {
         const membership = await readMemberOf(sub);
         if (!membership) return json(404, { error: 'not in a family' });
-        const ownerHousehold = await readHousehold(membership.ownerSub);
-        ownerHousehold.members = ownerHousehold.members.filter((m) => m.sub !== sub);
-        await putJson(`users/${membership.ownerSub}/household.json`, ownerHousehold);
+        await updateHousehold(membership.ownerSub, (h) => {
+          h.members = h.members.filter((m) => m.sub !== sub);
+          return { result: true };
+        });
         await s3.send(
           new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${sub}/memberOf.json` }),
         );

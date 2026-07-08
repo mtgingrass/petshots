@@ -132,6 +132,16 @@ export interface Med {
   dismissed?: boolean;
 }
 
+// ---- web push ----
+
+export function subscribePush(subscription: unknown): Promise<{ ok: true }> {
+  return request('POST', '/push/subscribe', { subscription });
+}
+
+export function unsubscribePush(endpoint: string): Promise<void> {
+  return request('POST', '/push/unsubscribe', { endpoint });
+}
+
 // ---- public roadmap ----
 
 export interface RoadmapItem {

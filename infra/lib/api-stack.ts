@@ -201,9 +201,19 @@ export class ApiStack extends cdk.Stack {
         UPLOADS_BUCKET: uploads.bucketName,
         FROM_EMAIL: 'no-reply@petshots.app',
         APP_URL: 'https://petshots.app',
+        // Web Push VAPID keypair (private half) — public half ships in the SPA.
+        VAPID_SECRET_NAME: 'petshots/vapid',
       },
       bundling: { externalModules: [], minify: true, target: 'node20' },
     });
+    reminderFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/vapid-*`,
+        ],
+      }),
+    );
     // ReadWrite (not just read): the reminder run lazily persists a per-user
     // unsubToken into settings.json for accounts created before unsubscribe
     // links existed.
@@ -251,6 +261,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.PUT, '/settings'],
       [HttpMethod.GET, '/roadmap/votes'],
       [HttpMethod.POST, '/roadmap/vote'],
+      [HttpMethod.POST, '/push/subscribe'],
+      [HttpMethod.POST, '/push/unsubscribe'],
       [HttpMethod.GET, '/household'],
       [HttpMethod.POST, '/household/invites'],
       [HttpMethod.DELETE, '/household/invites/{token}'],

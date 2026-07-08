@@ -343,6 +343,18 @@ async function main() {
   v = await api(token, 'POST', '/roadmap/vote', { itemId: 'no-such-item' });
   check(v.status === 404, 'unknown item 404s');
 
+  console.log('\n[8h] push subscription routes');
+  const fakeSub = {
+    endpoint: `https://updates.push.example.com/wpush/v2/smoke-${Date.now()}`,
+    keys: { p256dh: 'BFakeP256dhKeyForSmokeTestingPurposesOnly000000000000000000000000000000000000000000000', auth: 'FakeAuthSecret16' },
+  };
+  r = await api(token, 'POST', '/push/subscribe', { subscription: fakeSub });
+  check(r.status === 200, 'valid subscription stored');
+  r = await api(token, 'POST', '/push/subscribe', { subscription: { endpoint: 'http://not-https', keys: {} } });
+  check(r.status === 400, 'malformed subscription rejected');
+  r = await api(token, 'POST', '/push/unsubscribe', { endpoint: fakeSub.endpoint });
+  check(r.status === 204, 'unsubscribe removes it');
+
   console.log('\n[9] DELETE pet removes it and its docs');
   del = await api(token, 'DELETE', `/pets/${petId}`);
   check(del.status === 204, `pet delete returns 204 (got ${del.status})`);

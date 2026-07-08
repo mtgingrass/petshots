@@ -74,3 +74,38 @@ self.addEventListener('fetch', (event) => {
     );
   }
 });
+
+// ---- web push ----
+// Payload: { title, body, url } from the reminder Lambda.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    /* non-JSON payload */
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'Petshots', {
+      body: data.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      data: { url: data.url || '/dashboard' },
+    }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url || '/dashboard';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
+      for (const win of wins) {
+        if ('focus' in win) {
+          win.navigate(url);
+          return win.focus();
+        }
+      }
+      return clients.openWindow(url);
+    }),
+  );
+});

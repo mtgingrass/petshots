@@ -57,6 +57,7 @@ import {
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
+import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
 import {
   computeNotices,
   isDismissed,
@@ -4171,6 +4172,8 @@ function SettingsScreen({
                   <span className="toggle__track" />
                 </label>
               </div>
+
+              <PushRow onError={onError} />
               </div>
             </fieldset>
 
@@ -4244,6 +4247,88 @@ function SettingsScreen({
         )}
       </div>
     </div>
+  );
+}
+
+// ---- push notifications (Settings row) ----
+// Per-DEVICE toggle: the subscription lives in this browser; other devices
+// have their own. Hidden where push can't work at all, with an install hint
+// for iOS Safari (push needs the home-screen app there).
+function PushRow({ onError }: { onError: (msg: string | null) => void }) {
+  const [state, setState] = useState<PushState | 'loading'>('loading');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void getPushState().then(setState);
+  }, []);
+
+  if (state === 'loading') return null;
+  if (state === 'unsupported') {
+    if (!iosNeedsInstall()) return null;
+    return (
+      <>
+        <div className="settings-group__divider" />
+        <div className="settings-row">
+          <span className="settings-row__label">
+            Push notifications
+            <span className="subtle settings-row__sub">
+              Add Petshots to your Home Screen first (Share → Add to Home Screen), then
+              enable notifications here in the installed app.
+            </span>
+          </span>
+        </div>
+      </>
+    );
+  }
+
+  async function toggle(next: boolean) {
+    setBusy(true);
+    onError(null);
+    try {
+      if (next) {
+        await enablePush();
+        setState('on');
+      } else {
+        await disablePush();
+        setState('off');
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message === 'PERMISSION_DENIED') {
+        setState('denied');
+      } else {
+        onError(err instanceof Error ? err.message : 'Could not update notifications');
+        setState(await getPushState());
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="settings-group__divider" />
+      <div className="settings-row">
+        <span className="settings-row__label">
+          Push notifications
+          <span className="subtle settings-row__sub">
+            {state === 'denied'
+              ? 'Blocked in your browser — allow notifications for petshots.app in browser settings, then reload.'
+              : 'Reminders as notifications on this device, alongside email'}
+          </span>
+        </span>
+        {state !== 'denied' && (
+          <label className="toggle" aria-label="Toggle push notifications on this device">
+            <input
+              type="checkbox"
+              checked={state === 'on'}
+              disabled={busy}
+              onChange={(e) => void toggle(e.target.checked)}
+            />
+            <span className="toggle__track" />
+          </label>
+        )}
+      </div>
+    </>
   );
 }
 

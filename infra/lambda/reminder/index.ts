@@ -3,8 +3,11 @@ import {
   ListObjectsV2Command,
   GetObjectCommand,
   PutObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import webpush from 'web-push';
 import { randomUUID } from 'node:crypto';
 
 const s3 = new S3Client({
@@ -12,7 +15,78 @@ const s3 = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const ses = new SESv2Client({ region: 'us-east-1' });
+const sm = new SecretsManagerClient({});
 const BUCKET = process.env.UPLOADS_BUCKET!;
+const VAPID_SECRET_NAME = process.env.VAPID_SECRET_NAME ?? 'petshots/vapid';
+
+// ---- web push ----
+// VAPID keys from Secrets Manager, loaded lazily and cached per container.
+// Push mirrors the reminder email: same trigger, same headline, tap opens
+// the dashboard. A device the push service rejects (404/410 = expired or
+// revoked subscription) is deleted so we never keep knocking.
+interface PushSub {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+let vapidReady: boolean | null = null;
+async function ensureVapid(): Promise<boolean> {
+  if (vapidReady !== null) return vapidReady;
+  try {
+    const res = await sm.send(new GetSecretValueCommand({ SecretId: VAPID_SECRET_NAME }));
+    const cfg = JSON.parse(res.SecretString!) as {
+      publicKey: string;
+      privateKey: string;
+      subject: string;
+    };
+    webpush.setVapidDetails(cfg.subject, cfg.publicKey, cfg.privateKey);
+    vapidReady = true;
+  } catch (e) {
+    console.error('vapid secret unavailable — push disabled this run', e);
+    vapidReady = false;
+  }
+  return vapidReady;
+}
+
+async function listPushSubs(userPrefix: string): Promise<{ key: string; sub: PushSub }[]> {
+  const list = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}push/` }),
+  );
+  const out: { key: string; sub: PushSub }[] = [];
+  for (const it of list.Contents ?? []) {
+    const sub = await readJson<PushSub>(it.Key!);
+    if (sub?.endpoint && sub.keys?.p256dh && sub.keys?.auth) out.push({ key: it.Key!, sub });
+  }
+  return out;
+}
+
+async function sendPushes(
+  userPrefix: string,
+  title: string,
+  body: string,
+): Promise<number> {
+  if (!(await ensureVapid())) return 0;
+  const subs = await listPushSubs(userPrefix);
+  let sent = 0;
+  for (const { key, sub } of subs) {
+    try {
+      await webpush.sendNotification(
+        sub as webpush.PushSubscription,
+        JSON.stringify({ title, body, url: `${APP_URL}/dashboard` }),
+        { TTL: 12 * 3600 },
+      );
+      sent++;
+    } catch (e) {
+      const code = (e as { statusCode?: number }).statusCode;
+      if (code === 404 || code === 410) {
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+        console.log(`pruned expired push subscription ${key}`);
+      } else {
+        console.error(`push to ${key} failed`, e);
+      }
+    }
+  }
+  return sent;
+}
 const FROM_EMAIL = process.env.FROM_EMAIL ?? 'no-reply@petshots.app';
 const APP_URL = process.env.APP_URL ?? 'https://petshots.app';
 
@@ -406,6 +480,7 @@ export const handler = async (event?: {
   const dryRun = event?.dryRun === true;
   const digestDay = event?.forceDigest === true || new Date().getUTCDay() === 0;
   const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
+  const wouldPush: Array<{ email: string; subject: string; devices: number }> = [];
 
   // Discover all user prefixes via delimiter listing (users/{sub}/)
   const topList = await s3.send(
@@ -572,10 +647,16 @@ export const handler = async (event?: {
       if (dueDocs.length === 0 && dueMeds.length === 0 && birthdays.length === 0) continue;
 
       const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays, unsubUrl);
+      // Push body: the email's first couple of bullets, no boilerplate.
+      const pushBody =
+        body.split('\n').filter((l) => l.startsWith('•')).slice(0, 2).join('\n') ||
+        'Tap to review in Petshots.';
 
       if (dryRun) {
         wouldSend.push({ email: settings.email, subject, body });
-        console.log(`[dry run] would send to ${settings.email}: ${subject}`);
+        const devices = (await listPushSubs(userPrefix)).length;
+        if (devices > 0) wouldPush.push({ email: settings.email, subject, devices });
+        console.log(`[dry run] would send to ${settings.email}: ${subject} (+${devices} push)`);
         continue;
       }
 
@@ -591,8 +672,9 @@ export const handler = async (event?: {
           },
         }),
       );
+      const pushed = await sendPushes(userPrefix, subject, pushBody);
       console.log(
-        `Sent ${dueDocs.length + dueMeds.length} reminder(s) + ${birthdays.length} birthday(s) to ${settings.email}`,
+        `Sent ${dueDocs.length + dueMeds.length} reminder(s) + ${birthdays.length} birthday(s) to ${settings.email} (+${pushed} push)`,
       );
     } catch (e) {
       console.error(`Error processing ${userPrefix}:`, e);
@@ -600,5 +682,5 @@ export const handler = async (event?: {
     }
   }
 
-  return dryRun ? { dryRun: true, wouldSend } : undefined;
+  return dryRun ? { dryRun: true, wouldSend, wouldPush } : undefined;
 };

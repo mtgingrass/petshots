@@ -19,4 +19,7 @@ export const config = {
   apiBaseUrl: required('VITE_API_BASE_URL', import.meta.env.VITE_API_BASE_URL),
   // Cloudflare Turnstile site key (public). Currently the always-pass TEST key.
   turnstileSiteKey: required('VITE_TURNSTILE_SITE_KEY', import.meta.env.VITE_TURNSTILE_SITE_KEY),
+  // Web Push VAPID public key (public by definition). Optional: without it
+  // the push-notifications toggle simply doesn't render.
+  vapidPublicKey: (import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined) ?? '',
 };

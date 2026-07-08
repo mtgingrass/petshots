@@ -19,7 +19,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 import Stripe from 'stripe';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   APIGatewayProxyResultV2,
@@ -2110,6 +2110,46 @@ export const handler = async (
             Body: JSON.stringify(rest),
             ContentType: 'application/json',
           }),
+        );
+        return { statusCode: 204 };
+      }
+
+      // ---- web push subscriptions ----
+      // One object per device at users/{sub}/push/{sha256(endpoint)}.json —
+      // multi-device by construction, resubscribing the same browser just
+      // overwrites. The reminder Lambda reads these when it sends email and
+      // pushes the same headline; it deletes any the push service rejects.
+
+      case 'POST /push/subscribe': {
+        const input = JSON.parse(event.body ?? '{}');
+        const s = input.subscription;
+        const endpoint = typeof s?.endpoint === 'string' ? s.endpoint : '';
+        const p256dh = typeof s?.keys?.p256dh === 'string' ? s.keys.p256dh : '';
+        const auth = typeof s?.keys?.auth === 'string' ? s.keys.auth : '';
+        if (
+          !endpoint.startsWith('https://') ||
+          endpoint.length > 1024 ||
+          !p256dh || p256dh.length > 256 ||
+          !auth || auth.length > 256
+        ) {
+          return json(400, { error: 'invalid push subscription' });
+        }
+        const id = createHash('sha256').update(endpoint).digest('hex').slice(0, 32);
+        await putJson(`users/${sub}/push/${id}.json`, {
+          endpoint,
+          keys: { p256dh, auth },
+          createdAt: new Date().toISOString(),
+        });
+        return json(200, { ok: true });
+      }
+
+      case 'POST /push/unsubscribe': {
+        const input = JSON.parse(event.body ?? '{}');
+        const endpoint = typeof input.endpoint === 'string' ? input.endpoint : '';
+        if (!endpoint) return json(400, { error: 'endpoint required' });
+        const id = createHash('sha256').update(endpoint).digest('hex').slice(0, 32);
+        await s3.send(
+          new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${sub}/push/${id}.json` }),
         );
         return { statusCode: 204 };
       }

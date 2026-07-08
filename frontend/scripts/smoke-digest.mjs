@@ -80,7 +80,21 @@ async function main() {
   await api(token, 'POST', `/pets/${pet.id}/weights`, { date: ymd(-5), weight: 80, unit: 'lb' });
   await api(token, 'POST', `/pets/${pet.id}/weights`, { date: today, weight: 79, unit: 'lb' });
   await api(token, 'PUT', '/settings', { email, remindersEnabled: true, reminderDays: [7], weeklyDigest: true });
-  check(true, 'seeded checklist + mood + med + weights + settings');
+  // A reminder-enabled med due today makes a reminder email compose, and a
+  // fake push subscription makes the dry run report a would-push for it.
+  await api(token, 'PUT', `/pets/${pet.id}/meds`, {
+    meds: [
+      { name: 'Insulin', interval: 1, unit: 'day', nextDue: today, remindersEnabled: false },
+      { name: 'Bravecto', interval: 12, unit: 'week', nextDue: today, remindersEnabled: true },
+    ],
+  });
+  await api(token, 'POST', '/push/subscribe', {
+    subscription: {
+      endpoint: `https://updates.push.example.com/wpush/v2/digest-smoke-${Date.now()}`,
+      keys: { p256dh: 'BFakeKeyForDryRunCounting0000000000000000000000000000000000000000000000000000000000000', auth: 'FakeAuthSecret16' },
+    },
+  });
+  check(true, 'seeded checklist + mood + med + weights + settings + push sub');
 
   console.log('\n[2] forceDigest dry run composes the digest');
   let dry = invokeDryRun();
@@ -94,6 +108,8 @@ async function main() {
   check(/Meds given: 1/.test(body), 'meds-given count included');
   check(/79 lb/.test(body) && /▼ 1 lb/.test(body), 'weight + weekly delta included');
   check(/unsubscribe/i.test(body), 'unsubscribe link included');
+  const push = (dry.wouldPush ?? []).find((w) => w.email === email);
+  check(!!push && push.devices === 1, `reminder would also push to 1 device (got ${JSON.stringify(push)})`);
 
   console.log('\n[3] digest toggle off suppresses it');
   await api(token, 'PUT', '/settings', { email, remindersEnabled: true, reminderDays: [7], weeklyDigest: false });

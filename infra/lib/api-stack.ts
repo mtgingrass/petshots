@@ -241,6 +241,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.DELETE, '/pets/{petId}/passport'],
       [HttpMethod.GET, '/settings'],
       [HttpMethod.PUT, '/settings'],
+      [HttpMethod.GET, '/roadmap/votes'],
+      [HttpMethod.POST, '/roadmap/vote'],
       [HttpMethod.GET, '/household'],
       [HttpMethod.POST, '/household/invites'],
       [HttpMethod.DELETE, '/household/invites/{token}'],
@@ -258,6 +260,9 @@ export class ApiStack extends cdk.Stack {
     // Public passport endpoint — no Cognito token required; the Lambda checks the
     // passport token's validity itself.
     httpApi.addRoutes({ path: '/passport/{token}', methods: [HttpMethod.GET], integration });
+
+    // Public roadmap — curated items + vote counts; voting itself is authed.
+    httpApi.addRoutes({ path: '/roadmap', methods: [HttpMethod.GET], integration });
 
     // Public invite preview for the /join page (who invited you, is it live) —
     // possession of the unguessable token is the auth, same as passports.

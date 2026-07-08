@@ -9,6 +9,7 @@ import { PassportPage } from './pages/PassportPage';
 import { UnsubscribePage } from './pages/UnsubscribePage';
 import { DoorPage } from './pages/DoorPage';
 import { JoinPage } from './pages/JoinPage';
+import { RoadmapPage } from './pages/RoadmapPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
       <Route path="/unsubscribe" element={<UnsubscribePage />} />
       <Route path="/door" element={<DoorPage />} />
       <Route path="/join/:token" element={<JoinPage />} />
+      <Route path="/roadmap" element={<RoadmapPage />} />
       <Route
         path="/dashboard"
         element={

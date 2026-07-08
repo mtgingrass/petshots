@@ -132,6 +132,34 @@ export interface Med {
   dismissed?: boolean;
 }
 
+// ---- public roadmap ----
+
+export interface RoadmapItem {
+  id: string;
+  title: string;
+  description?: string;
+  status: 'planned' | 'in-progress' | 'complete';
+  votes: number;
+}
+
+// Public: anyone can see the board.
+export async function getRoadmap(): Promise<{ items: RoadmapItem[] }> {
+  const res = await friendlyFetch(`${config.apiBaseUrl}/roadmap`);
+  if (!res.ok) throw new Error('Could not load the roadmap.');
+  return (await res.json()) as { items: RoadmapItem[] };
+}
+
+// Authed: the caller's own votes (for chip state) and the vote toggle.
+export function getMyRoadmapVotes(): Promise<{ voted: string[] }> {
+  return request('GET', '/roadmap/votes');
+}
+
+export function toggleRoadmapVote(
+  itemId: string,
+): Promise<{ itemId: string; voted: boolean; votes: number }> {
+  return request('POST', '/roadmap/vote', { itemId });
+}
+
 // ---- weight log ----
 
 export interface WeightEntry {

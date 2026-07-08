@@ -457,6 +457,38 @@ function dailyMedItems(
     .map((m) => ({ id: `med:${m.id}`, name: m.name, med: true as const }));
 }
 
+// ---- public roadmap ----
+// Curated board at /roadmap: items live in roadmap/items.json (edited by the
+// operator with `aws s3 cp` — no deploy needed), votes as one empty object
+// per user per item under roadmap/votes/{itemId}/{sub}. Count = LIST, toggle
+// = put/delete your own key: no read-modify-write, no races. Logged-in users
+// vote; everyone sees counts.
+interface RoadmapItem {
+  id: string;
+  title: string;
+  description?: string;
+  status: 'planned' | 'in-progress' | 'complete';
+}
+const isRoadmapId = (v: unknown): v is string =>
+  typeof v === 'string' && /^[a-z0-9-]{1,60}$/.test(v);
+
+async function readRoadmapItems(): Promise<RoadmapItem[]> {
+  const file = await readJson<{ items?: RoadmapItem[] }>('roadmap/items.json');
+  return (file?.items ?? []).filter(
+    (i) =>
+      isRoadmapId(i?.id) &&
+      typeof i?.title === 'string' &&
+      ['planned', 'in-progress', 'complete'].includes(i?.status),
+  );
+}
+
+async function countVotes(itemId: string): Promise<number> {
+  const list = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `roadmap/votes/${itemId}/` }),
+  );
+  return list.KeyCount ?? 0;
+}
+
 // ---- weight log ----
 // Weight over time per pet (vets ask at every visit; sudden loss is often the
 // first symptom of something). One entry per date — re-logging a date
@@ -974,6 +1006,19 @@ export const handler = async (
       return json(200, { ownerEmail: inv.ownerEmail, expiresAt: inv.expiresAt });
     } catch (e) {
       console.error('invite info error', e);
+      return json(500, { error: 'internal error' });
+    }
+  }
+  // Public roadmap: curated items + vote counts, no login needed to look.
+  if (event.routeKey === 'GET /roadmap') {
+    try {
+      const items = await readRoadmapItems();
+      const withVotes = await Promise.all(
+        items.map(async (i) => ({ ...i, votes: await countVotes(i.id) })),
+      );
+      return json(200, { items: withVotes });
+    } catch (e) {
+      console.error('roadmap error', e);
       return json(500, { error: 'internal error' });
     }
   }
@@ -2130,6 +2175,48 @@ export const handler = async (
           await putJson(petKey, { ...pet, weight: latest ? formatWeight(latest) : undefined });
         }
         return json(200, { entries });
+      }
+
+      // ---- roadmap voting (authed) ----
+
+      case 'GET /roadmap/votes': {
+        // Which items has THIS user voted for (drives the active chip state).
+        const items = await readRoadmapItems();
+        const voted: string[] = [];
+        await Promise.all(
+          items.map(async (i) => {
+            try {
+              await s3.send(
+                new HeadObjectCommand({ Bucket: BUCKET, Key: `roadmap/votes/${i.id}/${sub}` }),
+              );
+              voted.push(i.id);
+            } catch {
+              /* no vote */
+            }
+          }),
+        );
+        return json(200, { voted });
+      }
+
+      case 'POST /roadmap/vote': {
+        const input = JSON.parse(event.body ?? '{}');
+        const itemId = input.itemId;
+        if (!isRoadmapId(itemId)) return json(400, { error: 'itemId required' });
+        const items = await readRoadmapItems();
+        if (!items.some((i) => i.id === itemId)) return json(404, { error: 'not found' });
+        const voteKey = `roadmap/votes/${itemId}/${sub}`;
+        let voted: boolean;
+        try {
+          await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: voteKey }));
+          await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: voteKey }));
+          voted = false;
+        } catch {
+          await s3.send(
+            new PutObjectCommand({ Bucket: BUCKET, Key: voteKey, Body: '', ContentType: 'text/plain' }),
+          );
+          voted = true;
+        }
+        return json(200, { itemId, voted, votes: await countVotes(itemId) });
       }
 
       // ---- family / household ----

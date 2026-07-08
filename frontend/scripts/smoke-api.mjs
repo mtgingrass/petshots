@@ -319,6 +319,30 @@ async function main() {
   r = await api(token, 'DELETE', `/pets/${petId}/weights/2020-01-01`);
   check(r.status === 404, 'deleting a missing date 404s');
 
+  console.log('\n[8g] public roadmap + authed voting');
+  const pubRoadmap = await fetch(`${API}/roadmap`);
+  const roadmapBody = await pubRoadmap.json();
+  check(
+    pubRoadmap.status === 200 && Array.isArray(roadmapBody.items) && roadmapBody.items.length > 0,
+    `public roadmap lists items (${roadmapBody.items?.length})`,
+  );
+  const rItem = roadmapBody.items[0];
+  check(typeof rItem.votes === 'number', 'items carry vote counts');
+  const unauthVote = await fetch(`${API}/roadmap/vote`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ itemId: rItem.id }),
+  });
+  check(unauthVote.status === 401, `unauthenticated vote 401 (got ${unauthVote.status})`);
+  let v = await api(token, 'POST', '/roadmap/vote', { itemId: rItem.id });
+  check(v.status === 200 && v.body.voted === true && v.body.votes === rItem.votes + 1, 'vote lands (+1)');
+  r = await api(token, 'GET', '/roadmap/votes');
+  check(r.body.voted.includes(rItem.id), 'my-votes reflects it');
+  v = await api(token, 'POST', '/roadmap/vote', { itemId: rItem.id });
+  check(v.body.voted === false && v.body.votes === rItem.votes, 'toggle removes the vote');
+  v = await api(token, 'POST', '/roadmap/vote', { itemId: 'no-such-item' });
+  check(v.status === 404, 'unknown item 404s');
+
   console.log('\n[9] DELETE pet removes it and its docs');
   del = await api(token, 'DELETE', `/pets/${petId}`);
   check(del.status === 204, `pet delete returns 204 (got ${del.status})`);

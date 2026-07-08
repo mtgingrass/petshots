@@ -4257,6 +4257,8 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
   const [copied, setCopied] = useState<string | null>(null); // invite token
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null); // member sub
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteNote, setInviteNote] = useState<string | null>(null);
 
   const load = useCallback(() => {
     getHousehold()
@@ -4270,8 +4272,18 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
   async function handleInvite() {
     setBusy(true);
     onError(null);
+    setInviteNote(null);
+    const email = inviteEmail.trim();
     try {
-      await createInvite();
+      const res = await createInvite(email || undefined);
+      if (email) {
+        setInviteNote(
+          res.emailDelivered === false
+            ? "The invite was created but the email couldn't be sent — share the link below instead."
+            : `Invite emailed to ${email}.`,
+        );
+      }
+      setInviteEmail('');
       load();
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
@@ -4412,7 +4424,7 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
       {household.invites.map((i) => (
         <div className="settings-row" key={i.token}>
           <span className="settings-row__label">
-            Invite link (pending)
+            {i.sentTo ? `Invite sent to ${i.sentTo}` : 'Invite link (pending)'}
             <span className="subtle settings-row__sub">Expires {formatDate(i.expiresAt.slice(0, 10))}</span>
           </span>
           <span className="actions">
@@ -4426,10 +4438,26 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
         </div>
       ))}
 
+      {inviteNote && <p className="subtle">{inviteNote}</p>}
       {seatsUsed < household.maxMembers ? (
-        <button className="btn btn--primary" type="button" disabled={busy} onClick={() => void handleInvite()}>
-          {busy ? 'Working…' : '+ Invite a family member'}
-        </button>
+        <form
+          className="family-invite"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleInvite();
+          }}
+        >
+          <input
+            type="email"
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            placeholder="their@email.com (optional)"
+            autoComplete="off"
+          />
+          <button className="btn btn--primary" type="submit" disabled={busy}>
+            {busy ? 'Working…' : inviteEmail.trim() ? 'Email invite' : 'Create invite link'}
+          </button>
+        </form>
       ) : (
         <p className="subtle">
           {household.maxMembers === 1

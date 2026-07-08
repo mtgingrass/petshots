@@ -2928,3 +2928,15 @@ a {
   font-size: 0.78rem;
   color: var(--ok-text, #34d399);
 }
+
+.family-invite {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.family-invite input {
+  flex: 1;
+  min-width: 12rem;
+}

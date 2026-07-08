@@ -11,6 +11,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import {
   CognitoIdentityProviderClient,
   AdminDeleteUserCommand,
@@ -36,6 +37,8 @@ const s3 = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const cognito = new CognitoIdentityProviderClient({});
+const ses = new SESv2Client({});
+const FROM_EMAIL = process.env.FROM_EMAIL ?? 'no-reply@petshots.app';
 const BUCKET = process.env.UPLOADS_BUCKET!;
 const USER_POOL_ID = process.env.USER_POOL_ID ?? '';
 const MAX_PETS = Number(process.env.MAX_PETS ?? '2');
@@ -298,6 +301,7 @@ interface HouseholdInvite {
   token: string;
   createdAt: string;
   expiresAt: string;
+  sentTo?: string; // set when the invite was emailed rather than link-shared
 }
 interface HouseholdFile {
   members: HouseholdMember[];
@@ -2247,6 +2251,7 @@ export const handler = async (
             token: i.token,
             url: `${APP_URL}/join/${i.token}`,
             expiresAt: i.expiresAt,
+            sentTo: i.sentTo,
           })),
           maxMembers: ent.maxMembers,
         });
@@ -2258,6 +2263,15 @@ export const handler = async (
         if (await readMemberOf(sub)) {
           return json(409, { error: 'ALREADY_IN_FAMILY' });
         }
+        // Optional: an email address to send the invite to directly.
+        const input = JSON.parse(event.body ?? '{}');
+        const sentTo =
+          typeof input.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email)
+            ? input.email.slice(0, 254)
+            : undefined;
+        if (typeof input.email === 'string' && input.email.trim() !== '' && !sentTo) {
+          return json(400, { error: 'invalid email address' });
+        }
         const [raw, ent] = await Promise.all([readHousehold(sub), getEntitlements(sub)]);
         const { h } = await pruneInvites(raw);
         // Pending invites count against the cap — an invite is a promised seat.
@@ -2268,10 +2282,55 @@ export const handler = async (
         const createdAt = new Date().toISOString();
         const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
         const ownerEmail = await getUserEmail(sub);
-        await putJson(`invites/${token}.json`, { ownerSub: sub, ownerEmail, createdAt, expiresAt });
-        h.invites.push({ token, createdAt, expiresAt });
+        const url = `${APP_URL}/join/${token}`;
+        await putJson(`invites/${token}.json`, { ownerSub: sub, ownerEmail, createdAt, expiresAt, sentTo });
+        h.invites.push({ token, createdAt, expiresAt, ...(sentTo ? { sentTo } : {}) });
         await putJson(`users/${sub}/household.json`, h);
-        return json(200, { token, url: `${APP_URL}/join/${token}`, expiresAt });
+
+        if (sentTo) {
+          // Send AFTER the invite exists; a failed send leaves a working
+          // link the owner can still share by hand.
+          try {
+            await ses.send(
+              new SendEmailCommand({
+                FromEmailAddress: FROM_EMAIL,
+                Destination: { ToAddresses: [sentTo] },
+                Content: {
+                  Simple: {
+                    Subject: {
+                      Data: `${ownerEmail} invited you to their Petshots family 🐾`,
+                      Charset: 'UTF-8',
+                    },
+                    Body: {
+                      Text: {
+                        Data: [
+                          `Hi,`,
+                          ``,
+                          `${ownerEmail} uses Petshots to keep their pets' vaccine records,`,
+                          `medications, and daily care in one place — and they'd like to share`,
+                          `it with you.`,
+                          ``,
+                          `Accept the invite (a free account takes a minute):`,
+                          url,
+                          ``,
+                          `This link expires in 7 days. If you weren't expecting this, you can`,
+                          `ignore it — nothing is shared until you accept.`,
+                          ``,
+                          `— The Petshots team`,
+                        ].join('\n'),
+                        Charset: 'UTF-8',
+                      },
+                    },
+                  },
+                },
+              }),
+            );
+          } catch (e) {
+            console.error(`invite email to ${sentTo} failed`, e);
+            return json(200, { token, url, expiresAt, sentTo, emailDelivered: false });
+          }
+        }
+        return json(200, { token, url, expiresAt, sentTo, emailDelivered: sentTo ? true : undefined });
       }
 
       case 'DELETE /household/invites/{token}': {

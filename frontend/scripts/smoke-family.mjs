@@ -139,15 +139,34 @@ async function main() {
   check(preview.status === 200 && preview.body.ownerEmail === ownerEmail, 'public invite preview shows owner email');
   const inv2 = await api(owner, 'POST', '/household/invites');
   check(inv2.status === 409 && inv2.body.error === 'MEMBER_LIMIT_REACHED', 'second invite blocked at free cap (pending counts)');
+
+  console.log('\n[3b] emailed invite (revoke the link one first to free the seat)');
+  await api(owner, 'DELETE', `/household/invites/${invToken}`);
+  // SES mailbox simulator: the send is REAL, the address never bounces.
+  const simAddr = `success+fam-invite-${Date.now()}@simulator.amazonses.com`;
+  const emailedInv = await api(owner, 'POST', '/household/invites', { email: simAddr });
+  check(
+    emailedInv.status === 200 && emailedInv.body.sentTo === simAddr && emailedInv.body.emailDelivered === true,
+    'invite emailed via SES (sentTo + delivered)',
+  );
+  let hhEmailed = await api(owner, 'GET', '/household');
+  check(hhEmailed.body.invites[0]?.sentTo === simAddr, 'pending list shows who it was sent to');
+  const badEmail = await api(owner, 'POST', '/household/invites', { email: 'not-an-email' });
+  check(badEmail.status === 400, 'malformed email rejected');
+  // Swap back to a plain link invite for the join flow below.
+  await api(owner, 'DELETE', `/household/invites/${emailedInv.body.token}`);
+  const relink = await api(owner, 'POST', '/household/invites');
+  check(relink.status === 200, 'link invite recreated for the join flow');
+  const joinToken = relink.body.token;
   const fakePreview = await api(null, 'GET', '/household/invites/00000000-0000-4000-8000-000000000000');
   check(fakePreview.status === 404, 'unknown invite token 404s');
 
   console.log('\n[4] member joins');
-  const selfJoin = await api(owner, 'POST', '/household/join', { token: invToken });
+  const selfJoin = await api(owner, 'POST', '/household/join', { token: joinToken });
   check(selfJoin.status === 409 && selfJoin.body.error === 'OWN_INVITE', "owner can't accept their own invite");
-  const join = await api(member, 'POST', '/household/join', { token: invToken });
+  const join = await api(member, 'POST', '/household/join', { token: joinToken });
   check(join.status === 200 && join.body.ownerEmail === ownerEmail, 'member joins the family');
-  const rejoin = await api(member, 'POST', '/household/join', { token: invToken });
+  const rejoin = await api(member, 'POST', '/household/join', { token: joinToken });
   check(rejoin.status === 200, 're-clicking the used link is idempotent');
   hh = await api(owner, 'GET', '/household');
   check(

@@ -336,6 +336,7 @@ export interface HouseholdInviteView {
   token: string;
   url: string;
   expiresAt: string;
+  sentTo?: string; // present when the invite was emailed
 }
 export type Household =
   | {
@@ -350,8 +351,13 @@ export function getHousehold(): Promise<Household> {
   return request('GET', '/household');
 }
 
-export function createInvite(): Promise<{ token: string; url: string; expiresAt: string }> {
-  return request('POST', '/household/invites');
+// With an email, Petshots sends the invite directly; without one you get a
+// link to share yourself. emailDelivered:false = invite created but the
+// send failed — share the link by hand.
+export function createInvite(
+  email?: string,
+): Promise<{ token: string; url: string; expiresAt: string; sentTo?: string; emailDelivered?: boolean }> {
+  return request('POST', '/household/invites', email ? { email } : {});
 }
 
 export function revokeInvite(token: string): Promise<void> {

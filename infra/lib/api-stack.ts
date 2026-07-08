@@ -143,6 +143,14 @@ export class ApiStack extends cdk.Stack {
       }),
     );
 
+    // Family invite emails (POST /household/invites with an email address).
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail', 'sesv2:SendEmail'],
+        resources: ['*'],
+      }),
+    );
+
     // Claude on Bedrock for document extraction. Scoped to Sonnet 4.6;
     // the inference-profile ARN covers the cross-region routing variant.
     // (Model access must also be enabled once in the Bedrock console.)

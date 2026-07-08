@@ -468,6 +468,7 @@ interface RoadmapItem {
   title: string;
   description?: string;
   status: 'planned' | 'in-progress' | 'complete';
+  completedAt?: string; // YYYY-MM-DD; drives "shipped" chips + the landing teaser
 }
 const isRoadmapId = (v: unknown): v is string =>
   typeof v === 'string' && /^[a-z0-9-]{1,60}$/.test(v);
@@ -1016,7 +1017,13 @@ export const handler = async (
       const withVotes = await Promise.all(
         items.map(async (i) => ({ ...i, votes: await countVotes(i.id) })),
       );
-      return json(200, { items: withVotes });
+      // The landing page fetches this on every visit — let browsers cache it
+      // for a few minutes rather than re-listing vote prefixes each load.
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' },
+        body: JSON.stringify({ items: withVotes }),
+      };
     } catch (e) {
       console.error('roadmap error', e);
       return json(500, { error: 'internal error' });

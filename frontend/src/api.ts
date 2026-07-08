@@ -139,6 +139,7 @@ export interface RoadmapItem {
   title: string;
   description?: string;
   status: 'planned' | 'in-progress' | 'complete';
+  completedAt?: string; // YYYY-MM-DD, present on shipped items
   votes: number;
 }
 

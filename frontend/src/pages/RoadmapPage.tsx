@@ -109,6 +109,15 @@ export function RoadmapPage() {
                         {item.description && (
                           <span className="subtle roadmap-card__desc">{item.description}</span>
                         )}
+                        {item.status === 'complete' && item.completedAt && (
+                          <span className="subtle roadmap-card__shipped">
+                            Shipped{' '}
+                            {new Date(`${item.completedAt}T00:00:00`).toLocaleDateString('en-US', {
+                              month: 'short',
+                              day: 'numeric',
+                            })}
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))}

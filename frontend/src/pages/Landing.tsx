@@ -1,10 +1,41 @@
+import { useEffect, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
+import { getRoadmap } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { SiteHeader } from '../components/SiteHeader';
 import { SiteFooter } from '../components/SiteFooter';
 
+// Static fallback for the roadmap teaser — shown until (or if never) the
+// live board loads. Keep it plausible but generic.
+const TEASER_FALLBACK = 'family sharing, daily care checklists, and weight tracking';
+
+// "Weekly digest email" reads fine at sentence start but not mid-sentence —
+// lowercase the first word unless it looks like an acronym (AI, QR…).
+function inSentence(title: string): string {
+  return /^[A-Z][a-z]/.test(title) ? title.charAt(0).toLowerCase() + title.slice(1) : title;
+}
+
+// The 3 most recently shipped roadmap items as an "x, y, and z" phrase.
+function recentShipsPhrase(items: { status: string; title: string; completedAt?: string }[]): string | null {
+  const shipped = items
+    .filter((i) => i.status === 'complete' && i.completedAt)
+    .sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? ''))
+    .slice(0, 3)
+    .map((i) => inSentence(i.title));
+  if (shipped.length === 0) return null;
+  if (shipped.length === 1) return shipped[0];
+  return `${shipped.slice(0, -1).join(', ')}${shipped.length > 2 ? ',' : ''} and ${shipped[shipped.length - 1]}`;
+}
+
 export function Landing() {
   const { email } = useAuth();
+  const [recentShips, setRecentShips] = useState<string | null>(null);
+
+  useEffect(() => {
+    getRoadmap()
+      .then((r) => setRecentShips(recentShipsPhrase(r.items)))
+      .catch(() => {}); // fallback copy stays
+  }, []);
 
   if (email) return <Navigate to="/dashboard" replace />;
 
@@ -63,9 +94,8 @@ export function Landing() {
         </div>
 
         <p className="roadmap-teaser subtle">
-          Petshots ships every week — family sharing, daily care checklists,
-          and weight tracking all landed recently.{' '}
-          <Link to="/roadmap">See what's next on the roadmap →</Link>
+          Petshots ships every week — {recentShips ?? TEASER_FALLBACK} all landed
+          recently. <Link to="/roadmap">See what's next on the roadmap →</Link>
         </p>
       </main>
       <SiteFooter />

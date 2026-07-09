@@ -1149,6 +1149,15 @@ a {
   opacity: 0.6;
 }
 
+/* Share menu entries stay on one line ("▶ Present Rabies Shots"). */
+.share-menu .profile-menu__dropdown {
+  min-width: 220px;
+}
+
+.share-menu .profile-menu__dropdown button[role="menuitem"] {
+  white-space: nowrap;
+}
+
 .avatar-chip {
   display: flex;
   align-items: center;
@@ -1554,18 +1563,6 @@ a {
 
 [data-theme="light"] .tab-bar__tab--active {
   box-shadow: 0 1px 4px rgba(17, 24, 39, 0.14);
-}
-
-/* Passport tab: small "has a live link" indicator (a ✓ suffix overflows
-   five segments on a 320px phone). */
-.tab-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 0.25rem;
-  border-radius: 50%;
-  background: var(--ok);
-  vertical-align: middle;
 }
 
 /* ---------- Profile view ---------- */
@@ -2238,24 +2235,12 @@ a {
   padding-left: calc(10px + 0.75rem);
 }
 
-.med-give {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--ok-text);
-  border-color: var(--border);
-  white-space: nowrap;
-}
-
 /* The cadence/next-due line carries real information — let it wrap instead of
    inheriting the doc list's single-line ellipsis. */
 .med-item .doc-meta .subtle {
   white-space: normal;
   overflow: visible;
   text-overflow: unset;
-}
-
-.med-give:hover {
-  border-color: var(--ok);
 }
 
 .med-remind {
@@ -2904,12 +2889,6 @@ a {
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.5rem;
-}
-
-.med-given-today {
-  color: var(--ok-text, #34d399);
-  font-weight: 600;
-  padding: 0.5rem 0.25rem;
 }
 
 /* ---- weight log ---- */

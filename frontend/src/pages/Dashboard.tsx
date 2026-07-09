@@ -259,11 +259,14 @@ function initialsFromEmail(email: string): string {
   return init.toUpperCase();
 }
 
-type PetTab = 'records' | 'daily' | 'meds' | 'profile' | 'passport';
+// Passport is NOT a segment — it opens from the header share menu as its
+// own pushed screen (DashView 'passport').
+type PetTab = 'records' | 'daily' | 'meds' | 'profile';
 
 type DashView =
   | { type: 'overview' }
-  | { type: 'detail'; petId: string; tab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport' }
+  | { type: 'detail'; petId: string; tab?: PetTab }
+  | { type: 'passport'; petId: string }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
@@ -399,6 +402,7 @@ export function Dashboard() {
       ? 0
       : dashView.type === 'edit-pet' ||
           dashView.type === 'change-password' ||
+          dashView.type === 'passport' || // pushed from pet detail
           (dashView.type === 'detail' && editView.type !== 'list')
         ? 2
         : 1;
@@ -407,7 +411,9 @@ export function Dashboard() {
       ? 'loading'
       : dashView.type === 'detail'
         ? `detail:${dashView.petId}:${editView.type}`
-        : dashView.type;
+        : dashView.type === 'passport'
+          ? `passport:${dashView.petId}`
+          : dashView.type;
   const animRef = useRef<{ key: string; dir: 'push' | 'pop' | 'none'; depth: number }>({
     key: viewKey,
     dir: 'none',
@@ -426,9 +432,9 @@ export function Dashboard() {
     };
   }
 
-  // Pet currently being viewed in detail/edit-pet screens.
+  // Pet currently being viewed in detail/edit-pet/passport screens.
   const detailPet =
-    dashView.type === 'detail' || dashView.type === 'edit-pet'
+    dashView.type === 'detail' || dashView.type === 'edit-pet' || dashView.type === 'passport'
       ? (pets?.find((p) => p.id === dashView.petId) ?? null)
       : null;
 
@@ -656,18 +662,17 @@ export function Dashboard() {
               {theme === 'dark' ? '☀️' : '🌙'}
             </button>
             <div className="hdr-pill">
-              <button
-                type="button"
-                className="share-btn"
-                aria-label="Share Petshots"
-                onClick={() => void handleShareApp()}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M12 3v12" />
-                  <path d="M8 6.5 12 3l4 3.5" />
-                  <path d="M6 10H5.5A1.5 1.5 0 0 0 4 11.5v8A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 18.5 10H18" />
-                </svg>
-              </button>
+              <ShareMenu
+                onShareApp={() => void handleShareApp()}
+                onPresent={
+                  detailPet && detailDocs.length > 0 ? () => setPresenting(true) : null
+                }
+                onPassport={
+                  detailPet && dashView.type !== 'passport'
+                    ? () => setDashView({ type: 'passport', petId: detailPet.id })
+                    : null
+                }
+              />
               <AccountMenu
                 email={email ?? ''}
                 onSettings={openSettings}
@@ -775,6 +780,27 @@ export function Dashboard() {
             }
             onAddPet={() => setDashView({ type: 'add-pet' })}
           />
+        ) : dashView.type === 'passport' && detailPet ? (
+          <div className="screen-view">
+            <nav className="screen-nav">
+              <button
+                className="screen-nav__back btn btn--link"
+                type="button"
+                onClick={() => setDashView({ type: 'detail', petId: detailPet.id })}
+              >
+                ‹ {detailPet.name}
+              </button>
+              <span className="screen-nav__title">Passport</span>
+            </nav>
+            <div className="screen-view__body">
+              <PassportTabSection
+                pet={detailPet}
+                onPassportChanged={() => void loadPets()}
+                onNotice={showNotice}
+                onError={setError}
+              />
+            </div>
+          </div>
         ) : dashView.type === 'detail' && detailPet ? (
           editView.type === 'edit' ? (
             <EditDocScreen
@@ -835,7 +861,6 @@ export function Dashboard() {
               }
               limits={limits}
               onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
-              onPresent={() => setPresenting(true)}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
               onPetChanged={() => void loadPets()}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
@@ -852,7 +877,6 @@ export function Dashboard() {
                 })
               }
               onDocsChanged={() => loadPetDocs(detailPet.id)}
-              onPassportChanged={() => void loadPets()}
               onUpgrade={() => setDashView({ type: 'settings' })}
               onError={setError}
               onNotice={showNotice}
@@ -966,6 +990,81 @@ export function Dashboard() {
 }
 
 // ---- account menu (header avatar chip) ----
+
+// Header share menu: app-level sharing plus the pet-specific door actions
+// (Present, Passport) whenever a pet is open — "for which pet?" is always
+// answered by context: the one on screen.
+function ShareMenu({
+  onShareApp,
+  onPresent,
+  onPassport,
+}: {
+  onShareApp: () => void;
+  onPresent: (() => void) | null;
+  onPassport: (() => void) | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent | TouchEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="profile-menu share-menu" ref={ref}>
+      <button
+        type="button"
+        className="share-btn"
+        aria-label="Share"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => { hapticTap(); setOpen((v) => !v); }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 3v12" />
+          <path d="M8 6.5 12 3l4 3.5" />
+          <path d="M6 10H5.5A1.5 1.5 0 0 0 4 11.5v8A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 18.5 10H18" />
+        </svg>
+      </button>
+      {open && (
+        <div className="profile-menu__dropdown" role="menu">
+          {onPresent && (
+            <button
+              role="menuitem"
+              className="present-trigger"
+              onClick={() => { setOpen(false); onPresent(); }}
+            >
+              ▶ Present Rabies Shots
+            </button>
+          )}
+          {onPassport && (
+            <button role="menuitem" onClick={() => { setOpen(false); onPassport(); }}>
+              Pet passport
+            </button>
+          )}
+          {(onPresent || onPassport) && <div className="profile-menu__divider" />}
+          <button role="menuitem" onClick={() => { setOpen(false); onShareApp(); }}>
+            Share the app
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Deliberately short: Settings and Log out. Change password lives inside
 // Settings (Account group), not here.
@@ -1469,14 +1568,12 @@ function PetDetailScreen({
   onMedsChanged,
   limits,
   onEditPet,
-  onPresent,
   onEditProfile,
   onPetChanged,
   onViewDoc,
   onEditDoc,
   onReviewExtraction,
   onDocsChanged,
-  onPassportChanged,
   onUpgrade,
   onError,
   onNotice,
@@ -1491,7 +1588,6 @@ function PetDetailScreen({
   onMedsChanged: (meds: Med[]) => void;
   limits: Limits;
   onEditPet: () => void;
-  onPresent: () => void;
   onEditProfile: () => void;
   onPetChanged: () => void; // weight log syncs the profile's display weight
   onViewDoc: (doc: Doc) => void;
@@ -1504,7 +1600,6 @@ function PetDetailScreen({
     duplicateOf?: DuplicateInfo,
   ) => void;
   onDocsChanged: () => Promise<void>;
-  onPassportChanged: () => void;
   onUpgrade: () => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
@@ -1526,28 +1621,21 @@ function PetDetailScreen({
 
   return (
     <div className="screen-view">
-      {/* Left slot: Present (records only). Right slot: Edit — always top-right,
-          scoped to the active tab (records = pet, profile = health profile). */}
-      <nav className="screen-nav">
-        {(tab === 'records' || tab === 'daily') && docs.length > 0 ? (
-          <button className="screen-nav__back btn btn--link present-trigger" type="button" onClick={onPresent}>
-            ▶ Present Rabies Shots
-          </button>
-        ) : (
+      {/* Edit row only where there's something to edit (records = pet,
+          profile = health profile). Present/Passport live in the header
+          share menu now — no dedicated row. */}
+      {(tab === 'records' || tab === 'profile') && (
+        <nav className="screen-nav">
           <span />
-        )}
-        {tab === 'records' ? (
-          <button className="screen-nav__action btn btn--link" type="button" onClick={onEditPet}>
+          <button
+            className="screen-nav__action btn btn--link"
+            type="button"
+            onClick={tab === 'records' ? onEditPet : onEditProfile}
+          >
             ✎ Edit
           </button>
-        ) : tab === 'profile' ? (
-          <button className="screen-nav__action btn btn--link" type="button" onClick={onEditProfile}>
-            ✎ Edit
-          </button>
-        ) : (
-          <span />
-        )}
-      </nav>
+        </nav>
+      )}
 
       <div className="screen-view__body">
         <div className="pet-detail__hero">
@@ -1599,13 +1687,6 @@ function PetDetailScreen({
           >
             Profile
           </button>
-          <button
-            className={`tab-bar__tab${tab === 'passport' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => { hapticTap(); setTab('passport'); }}
-          >
-            Passport
-            {pet.passportToken && <span className="tab-dot" aria-hidden="true" />}
-          </button>
         </div>
 
         {tab === 'records' ? (
@@ -1645,18 +1726,11 @@ function PetDetailScreen({
             onNotice={onNotice}
             onMedsChanged={onMedsChanged}
           />
-        ) : tab === 'profile' ? (
+        ) : (
           <>
             <ProfileSection pet={pet} onEdit={onEditProfile} />
             <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
           </>
-        ) : (
-          <PassportTabSection
-            pet={pet}
-            onPassportChanged={onPassportChanged}
-            onNotice={onNotice}
-            onError={onError}
-          />
         )}
       </div>
       {showPhoto && pet.avatarUrl && (
@@ -3301,16 +3375,6 @@ function MedsSection({
     }
   }
 
-  function handleMarkGiven(med: Med) {
-    hapticSuccess();
-    const today = todayYMD();
-    const nextDue = addInterval(today, med.interval, med.unit);
-    const next = (meds ?? []).map((m) =>
-      m.id === med.id ? { ...m, lastGiven: today, nextDue } : m,
-    );
-    void persist(next, `${med.name} marked as given — next due ${formatDate(nextDue)}`);
-  }
-
   function handleToggleReminders(med: Med, enabled: boolean) {
     const next = (meds ?? []).map((m) =>
       m.id === med.id ? { ...m, remindersEnabled: enabled } : m,
@@ -3383,7 +3447,6 @@ function MedsSection({
                 key={med.id}
                 med={med}
                 busy={busy}
-                onMarkGiven={() => handleMarkGiven(med)}
                 onToggleReminders={(enabled) => handleToggleReminders(med, enabled)}
                 onEdit={() => setForm({ mode: 'edit', med })}
                 onDelete={() => handleDelete(med)}
@@ -3442,7 +3505,6 @@ function MedsSection({
 function MedItem({
   med,
   busy,
-  onMarkGiven,
   onToggleReminders,
   onEdit,
   onDelete,
@@ -3450,7 +3512,6 @@ function MedItem({
 }: {
   med: Med;
   busy: boolean;
-  onMarkGiven: () => void;
   onToggleReminders: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -3549,15 +3610,8 @@ function MedItem({
       </div>
       {!dismissed && (
         <div className="med-item__actions">
-          {med.lastGiven === todayYMD() ? (
-            // Already given today — show it plainly instead of an armable
-            // button that would advance the schedule a second time.
-            <span className="med-given-today">✓ Given today</span>
-          ) : (
-            <button className="btn med-give" onClick={onMarkGiven} disabled={busy}>
-              ✓ Mark as given
-            </button>
-          )}
+          {/* Giving a med happens on the Daily tab (checking its row) — this
+              tab is schedule + reminders only, so the toggles line up. */}
           <label className="med-remind">
             <span className="med-remind__label subtle">
               {med.remindersEnabled ? '🔔 Reminders' : '🔕 Reminders'}

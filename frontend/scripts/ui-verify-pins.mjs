@@ -47,8 +47,10 @@ await page.waitForTimeout(400);
 await page.click('.tab-bar__tab:has-text("Profile")');
 await shot('detail-profile');
 
-// Passport tab (no stray affordances)
-await page.click('.tab-bar__tab:has-text("Passport")');
+// Passport screen — opens from the header share menu now (not a segment)
+await page.click('.share-btn');
+await page.click('.profile-menu__dropdown button:has-text("Pet passport")');
+await page.waitForTimeout(600);
 await shot('detail-share');
 
 await browser.close();

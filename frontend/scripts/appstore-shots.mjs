@@ -51,7 +51,8 @@ await page.click('.tab-bar__tab:has-text("Records")');
 await page.waitForTimeout(1500); // docs + thumbnails
 await shot('02-records');
 
-// Present at the door (the founder moment)
+// Present at the door (the founder moment) — via the header share menu
+await page.click('.share-btn');
 await page.click('.present-trigger');
 await page.waitForTimeout(2000); // doc image loads
 await shot('03-present');
@@ -68,7 +69,9 @@ await page.click('.tabbar__item:has-text("Pets")');
 await page.waitForSelector('.pet-pin', { timeout: 10000 });
 await page.click('.pet-pin:has-text("Bella")');
 await page.waitForSelector('.tab-bar__tab', { timeout: 10000 });
-await page.click('.tab-bar__tab:has-text("Passport")');
+// Passport opens from the header share menu now (not a segment)
+await page.click('.share-btn');
+await page.click('.profile-menu__dropdown button:has-text("Pet passport")');
 await page.waitForTimeout(800);
 const gen = page.locator('button:has-text("Generate passport")');
 if (await gen.count()) {

@@ -17,7 +17,7 @@ screenshots are needed.
 
 | Field | Value |
 |---|---|
-| Name | Petshots |
+| Name | Petshots Pet Passport |
 | Subtitle | Pet vaccine records & sharing |
 | Bundle ID | app.petshots.ios |
 | SKU | petshots-ios-1 |

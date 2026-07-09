@@ -92,6 +92,9 @@ for (const theme of ['dark', 'light']) {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
 
+  // The app opens on the Daily tab on phones — hop to Pets for the overview.
+  await page.click('.tabbar__item:has-text("Pets")');
+  await page.waitForTimeout(500);
   await page.click('text=Biscuit');
   await page.waitForTimeout(1000);
   await shot(`ai-records-${theme}`); // empty state (dark) / 3 records (light)

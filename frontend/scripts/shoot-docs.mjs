@@ -78,6 +78,9 @@ await page.fill('input[type="password"]', PASSWORD);
 await page.click('button[type="submit"]');
 await page.waitForURL('**/dashboard', { timeout: 20000 });
 await page.waitForTimeout(2000);
+// The app opens on the Daily tab on phones — hop to Pets for the overview.
+await page.click('.tabbar__item:has-text("Pets")');
+await page.waitForTimeout(500);
 
 // 1. Dashboard overview — pinned portraits with status rings
 await shot('app-dashboard');

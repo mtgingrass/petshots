@@ -260,6 +260,7 @@ interface Limits {
   maxDocs: number;
   maxMeds: number;
   maxMembers: number; // family members (besides the owner) this plan allows
+  dailyHistoryDays: number; // how far back the Daily tab can browse
 }
 type Entitlements = Limits & { plan: 'free' | 'paid' };
 const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
@@ -268,12 +269,14 @@ const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
     maxDocs: MAX_DOCS,
     maxMeds: MAX_MEDS,
     maxMembers: Number(process.env.MAX_MEMBERS ?? LIMITS_FREE.MAX_MEMBERS),
+    dailyHistoryDays: DAILY.HISTORY_DAYS_FREE,
   },
   paid: {
     maxPets: Number(process.env.PAID_MAX_PETS ?? LIMITS_PAID.MAX_PETS),
     maxDocs: Number(process.env.PAID_MAX_DOCS ?? LIMITS_PAID.MAX_DOCS),
     maxMeds: Number(process.env.PAID_MAX_MEDS ?? LIMITS_PAID.MAX_MEDS),
     maxMembers: Number(process.env.PAID_MAX_MEMBERS ?? LIMITS_PAID.MAX_MEMBERS),
+    dailyHistoryDays: DAILY.HISTORY_DAYS_PAID,
   },
 };
 const posInt = (v: unknown, fallback: number): number =>
@@ -290,6 +293,7 @@ async function getEntitlements(sub: string): Promise<Entitlements> {
     maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
     maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
     maxMembers: posInt(file?.limits?.maxMembers, base.maxMembers),
+    dailyHistoryDays: posInt(file?.limits?.dailyHistoryDays, base.dailyHistoryDays),
   };
 }
 
@@ -505,8 +509,10 @@ async function pruneDailyToArchive(
   }
 }
 
-// Accept only a real calendar day within DAILY.DATE_WINDOW_MS of server time —
-// enough for any timezone, too tight to backfill or forge history.
+// WRITE guard (check/mood/items): accept only a real calendar day within
+// DAILY.DATE_WINDOW_MS of server time — enough for any timezone, too tight to
+// backfill or forge history. Reads use the wider plan-gated window inline in
+// the GET route.
 function isDailyDate(v: unknown): v is string {
   if (!isStrictDay(v)) return false;
   return Math.abs(Date.parse(`${v}T00:00:00Z`) - Date.now()) <= DAILY.DATE_WINDOW_MS;
@@ -1785,9 +1791,22 @@ export const handler = async (
       // ---- daily care checklist (per pet) ----
 
       case 'GET /pets/{petId}/daily': {
+        // Reads accept dates back over the plan's history window (the Daily
+        // tab's swipe-back browsing); writes below stay on the tight
+        // anti-backfill DATE_WINDOW_MS. Household pets follow the owner's plan.
         const date = event.queryStringParameters?.date;
-        if (!isDailyDate(date)) {
-          return json(400, { error: 'date required (YYYY-MM-DD, near today)' });
+        if (!isStrictDay(date)) {
+          return json(400, { error: 'date required (YYYY-MM-DD)' });
+        }
+        const ageMs = Date.now() - Date.parse(`${date}T00:00:00Z`);
+        if (-ageMs > DAILY.DATE_WINDOW_MS) {
+          return json(400, { error: 'date required (YYYY-MM-DD, not in the future)' });
+        }
+        if (ageMs > DAILY.HISTORY_DAYS_FREE * 86_400_000 + DAILY.DATE_WINDOW_MS) {
+          const ent = await getEntitlements(dataSub);
+          if (ageMs > ent.dailyHistoryDays * 86_400_000 + DAILY.DATE_WINDOW_MS) {
+            return json(403, { error: 'HISTORY_LIMIT' });
+          }
         }
         const petInfo = await readJson<{ species?: string }>(petKey);
         if (petInfo === null) return json(404, { error: 'not found' });
@@ -1795,12 +1814,28 @@ export const handler = async (
           readJson<DailyFile>(`${petPrefix}daily.json`),
           readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
         ]);
-        const checks = file?.log?.[date] ?? {};
+        let checks = file?.log?.[date] ?? {};
+        let mood = file?.moods?.[date] ?? null;
+        // Days older than the in-file retention live in the per-month archive.
+        // Item definitions aren't archived: rows render with CURRENT item/med
+        // names, so checks on since-deleted items are omitted (same drift the
+        // live window already has).
+        if (
+          ageMs > (DAILY_LOG_RETENTION_DAYS - 1) * 86_400_000 &&
+          Object.keys(checks).length === 0 &&
+          mood === null
+        ) {
+          const arch = await readJson<{
+            days?: Record<string, { checks?: Record<string, DailyCheck>; mood?: DailyMood }>;
+          }>(`${petPrefix}daily-archive/${date.slice(0, 7)}.json`);
+          checks = arch?.days?.[date]?.checks ?? {};
+          mood = arch?.days?.[date]?.mood ?? null;
+        }
         const items = [
           ...(file?.items ?? dailyPresetsFor(petInfo.species)),
           ...dailyMedItems(medsStored?.meds ?? [], date, checks),
         ];
-        return json(200, { date, items, checks, mood: file?.moods?.[date] ?? null });
+        return json(200, { date, items, checks, mood });
       }
 
       case 'POST /pets/{petId}/daily/mood': {

@@ -193,9 +193,20 @@ export const DAILY = {
   /**
    * Check-offs are keyed by the CLIENT's local date; accept dates within this
    * window of server time — enough for any timezone, too tight to backfill
-   * or forge history.
+   * or forge history. Applies to WRITES (check/mood); reads may look further
+   * back — see HISTORY_DAYS_* below.
    */
   DATE_WINDOW_MS: 2.5 * 86_400_000, // ±2.5 days
+  /**
+   * How far back GET /pets/{petId}/daily accepts a date (the Daily tab's
+   * swipe-back / date-dropdown history), by plan. Free = the in-file
+   * LOG_RETENTION_DAYS window; paid reads reach into daily-archive/
+   * (append-only, never deleted). Household pets follow the owner's plan.
+   * plan.json `limits.dailyHistoryDays` can override per user. The frontend
+   * fallback (DEFAULT_LIMITS in frontend/src/api.ts) MUST MATCH the free value.
+   */
+  HISTORY_DAYS_FREE: 14, // keep == LOG_RETENTION_DAYS (free never reads the archive)
+  HISTORY_DAYS_PAID: 365,
 } as const;
 
 /** WEIGHT LOG */

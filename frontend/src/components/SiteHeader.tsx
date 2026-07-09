@@ -35,7 +35,7 @@ export function SiteHeader() {
             </Link>
           ) : (
             <>
-              <Link className="btn btn--link" to="/login">
+              <Link className="btn" to="/login">
                 Log in
               </Link>
               <Link className="btn btn--primary" to="/signup">

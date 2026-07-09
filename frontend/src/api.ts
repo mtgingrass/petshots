@@ -281,10 +281,13 @@ export interface Limits {
   maxDocs: number;
   maxMeds: number;
   maxMembers?: number; // family members besides the owner (absent on older API)
+  dailyHistoryDays?: number; // Daily-tab browse depth (absent on older API)
 }
 
 // Pre-fetch placeholder only — the server sends the real limits with GET /pets.
-export const DEFAULT_LIMITS: Limits = { plan: 'free', ...FREE_PLAN_LIMITS };
+// dailyHistoryDays MUST MATCH DAILY.HISTORY_DAYS_FREE in
+// infra/lambda/shared/config.ts (the free window).
+export const DEFAULT_LIMITS: Limits = { plan: 'free', dailyHistoryDays: 14, ...FREE_PLAN_LIMITS };
 
 // Family summary riding on GET /pets: enough for badges without an extra call.
 export interface FamilyInfo {

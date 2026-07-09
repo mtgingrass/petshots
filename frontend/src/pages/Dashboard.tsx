@@ -226,6 +226,39 @@ function vaccineBlurb(label: string): string | null {
 
 // ---- navigation state ----
 
+// ---- daily history dates ----
+// Pre-fetch fallback for how far back the Daily tab can browse; the real
+// depth is plan-gated and arrives with GET /pets limits (dailyHistoryDays).
+// MUST MATCH DAILY.HISTORY_DAYS_FREE in infra/lambda/shared/config.ts.
+const DAILY_HISTORY_FALLBACK_DAYS = 14;
+
+// Day arithmetic on local-calendar YYYY-MM-DD strings (same convention as
+// localToday(): the list is a LOCAL day).
+function addDays(day: string, n: number): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n);
+  const p = (v: number) => String(v).padStart(2, '0');
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+}
+
+// "Today, July 9" / "Yesterday, July 8" / "Monday, July 7"
+function dailyDateLabel(day: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const monthDay = dt.toLocaleDateString([], { month: 'long', day: 'numeric' });
+  const today = localToday();
+  if (day === today) return `Today, ${monthDay}`;
+  if (day === addDays(today, -1)) return `Yesterday, ${monthDay}`;
+  return `${dt.toLocaleDateString([], { weekday: 'long' })}, ${monthDay}`;
+}
+
+function initialsFromEmail(email: string): string {
+  const parts = email.split('@')[0].split(/[._+-]+/).filter(Boolean);
+  const init =
+    parts.length >= 2 ? parts[0][0] + parts[1][0] : (parts[0] ?? '?').slice(0, 2);
+  return init.toUpperCase();
+}
+
 type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport' }
@@ -263,7 +296,17 @@ export function Dashboard() {
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
-  const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
+  // The app opens on the Daily tab wherever the bottom tab bar exists (phones
+  // + native); desktop has no Daily tab, so it keeps the pets overview.
+  const [dashView, setDashView] = useState<DashView>(() =>
+    document.documentElement.dataset.native === 'true' ||
+    window.matchMedia('(max-width: 767px)').matches
+      ? { type: 'daily' }
+      : { type: 'overview' },
+  );
+  // Which day the Daily tab shows. Swipe right / the date dropdown walk it
+  // back through the retained history; re-entering the tab resets to today.
+  const [dailyDate, setDailyDate] = useState<string>(localToday);
   const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
   const [allMeds, setAllMeds] = useState<Record<string, Med[]>>({});
   const [allDocsLoading, setAllDocsLoading] = useState(false);
@@ -314,17 +357,27 @@ export function Dashboard() {
   const lastPetsViewRef = useRef<DashView>({ type: 'overview' });
   if (activeTab === 'pets') lastPetsViewRef.current = dashView;
 
+  // Where Settings should return to — it's reached from the avatar menu now,
+  // so remember which tab root the user came from.
+  const settingsReturnRef = useRef<DashView>({ type: 'overview' });
+  function openSettings() {
+    settingsReturnRef.current =
+      activeTab === 'daily' ? { type: 'daily' } : { type: 'overview' };
+    setDashView({ type: 'settings' });
+  }
+
   function handleTabSelect(tab: MainTab) {
     if (tab === activeTab) {
       // iOS convention: re-tapping the active tab pops its stack to the root.
       if (tab === 'pets' && dashView.type !== 'overview') backToOverview();
-      else if (tab === 'settings' && dashView.type !== 'settings')
-        setDashView({ type: 'settings' });
+      else if (tab === 'daily' && dailyDate !== localToday()) setDailyDate(localToday());
       return;
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
-    else if (tab === 'daily') setDashView({ type: 'daily' });
-    else setDashView({ type: 'settings' });
+    else if (tab === 'daily') {
+      setDailyDate(localToday());
+      setDashView({ type: 'daily' });
+    } else setDashView({ type: 'settings' });
   }
 
   // ---- screen transition direction (iOS push/pop) ----
@@ -493,6 +546,26 @@ export function Dashboard() {
     navigate('/', { replace: true });
   }
 
+  // Header share button: native share sheet where available, clipboard fallback.
+  async function handleShareApp() {
+    hapticTap();
+    const data = {
+      title: 'Petshots',
+      text: 'Pet vaccine records, ready at the door.',
+      url: 'https://petshots.app',
+    };
+    if (navigator.share) {
+      try {
+        await navigator.share(data);
+      } catch {
+        // user cancelled the sheet — nothing to do
+      }
+    } else {
+      await navigator.clipboard.writeText(data.url);
+      showNotice('Link copied');
+    }
+  }
+
   function backToOverview() {
     setDashView({ type: 'overview' });
     setEditView({ type: 'list' });
@@ -544,18 +617,17 @@ export function Dashboard() {
     <>
       <main className="page page--tabbed">
         <header className="dashboard-header">
-          {/* Tab roots (overview, daily, settings) show the wordmark; screens
-              pushed within the pets stack show a back button instead. */}
+          {/* The wordmark is desktop-only in the dashboard (mobile screens
+              carry their own large titles — the header stays lean, Bevel-style);
+              screens pushed within the pets stack show a back button on desktop. */}
           {dashView.type === 'overview' ||
           dashView.type === 'daily' ||
           dashView.type === 'settings' ||
           dashView.type === 'change-password' ? (
-            <Link className="wordmark" to="/">🐾 Petshots</Link>
+            <Link className="wordmark dashboard-header__wordmark-desktop" to="/">🐾 Petshots</Link>
           ) : (
             <>
-              {/* On mobile the bottom Pets tab is the way back, so the header
-                  back button is desktop-only; the wordmark shows instead. */}
-              <Link className="wordmark dashboard-header__wordmark-mobile" to="/">🐾 Petshots</Link>
+              <Link className="wordmark dashboard-header__wordmark-desktop" to="/">🐾 Petshots</Link>
               <button className="btn btn--link dashboard-header__back" onClick={backToOverview}>
                 ‹ Pets
               </button>
@@ -574,12 +646,26 @@ export function Dashboard() {
             >
               {theme === 'dark' ? '☀️' : '🌙'}
             </button>
-            <ProfileMenu
-              email={email ?? ''}
-              onSettings={() => setDashView({ type: 'settings' })}
-              onChangePassword={() => setDashView({ type: 'change-password' })}
-              onLogout={handleLogout}
-            />
+            <div className="hdr-pill">
+              <button
+                type="button"
+                className="share-btn"
+                aria-label="Share Petshots"
+                onClick={() => void handleShareApp()}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="M8 6.5 12 3l4 3.5" />
+                  <path d="M6 10H5.5A1.5 1.5 0 0 0 4 11.5v8A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 18.5 10H18" />
+                </svg>
+              </button>
+              <AccountMenu
+                email={email ?? ''}
+                onSettings={openSettings}
+                onChangePassword={() => setDashView({ type: 'change-password' })}
+                onLogout={handleLogout}
+              />
+            </div>
           </div>
         </header>
 
@@ -659,7 +745,7 @@ export function Dashboard() {
             limits={limits}
             theme={theme}
             onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
-            onDone={backToOverview}
+            onDone={() => setDashView(settingsReturnRef.current)}
             onChangePassword={() => setDashView({ type: 'change-password' })}
             onLogout={handleLogout}
             onError={setError}
@@ -674,6 +760,10 @@ export function Dashboard() {
         ) : dashView.type === 'daily' ? (
           <DailyAllScreen
             pets={pets}
+            date={dailyDate}
+            historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
+            onDateChange={setDailyDate}
+            onNotice={showNotice}
             onError={setError}
             onOpenPet={(petId) => setDashView({ type: 'detail', petId, tab: 'daily' })}
             onMedsChanged={(petId, meds) =>
@@ -868,9 +958,9 @@ export function Dashboard() {
   );
 }
 
-// ---- profile menu ----
+// ---- account menu (header avatar chip) ----
 
-function ProfileMenu({
+function AccountMenu({
   email,
   onSettings,
   onChangePassword,
@@ -906,15 +996,17 @@ function ProfileMenu({
     <div className="profile-menu" ref={ref}>
       <button
         className="profile-menu__trigger"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => { hapticTap(); setOpen((v) => !v); }}
         aria-expanded={open}
         aria-haspopup="menu"
+        aria-label="Account menu"
       >
-        <span className="profile-menu__email">{email}</span>
-        <span className="profile-menu__chevron" aria-hidden="true">{open ? '▴' : '▾'}</span>
+        <span className="avatar-chip" aria-hidden="true">{initialsFromEmail(email)}</span>
       </button>
       {open && (
         <div className="profile-menu__dropdown" role="menu">
+          <div className="profile-menu__header">{email}</div>
+          <div className="profile-menu__divider" />
           <button
             role="menuitem"
             onClick={() => { setOpen(false); onSettings(); }}
@@ -1572,20 +1664,141 @@ function whoAndWhen(by: string, at: string): string {
 
 // The bottom tab bar's "Daily" tab: every pet's checklist + mood in one
 // screen — open the app, check off breakfast, done. Reuses DailySection
-// per pet (it's self-contained: loads its own data by petId).
+// per pet (it's self-contained: loads its own data by petId). The title is a
+// date dropdown, and horizontal swipes step a day back/forward, so past days
+// are one gesture away (read-only; depth is plan-gated via historyDays).
+function DateNav({
+  date,
+  historyDays,
+  onChange,
+}: {
+  date: string;
+  historyDays: number;
+  onChange: (date: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const today = localToday();
+  const minDate = addDays(today, -(historyDays - 1));
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent | TouchEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  // The quick list covers the two retained weeks; deeper history (paid) is
+  // reachable through the date field at the bottom.
+  const quickDays = Array.from(
+    { length: Math.min(historyDays, 14) },
+    (_, i) => addDays(today, -i),
+  );
+
+  return (
+    <div className="date-nav" ref={ref}>
+      <button
+        type="button"
+        className="date-nav__btn large-title"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => { hapticTap(); setOpen((v) => !v); }}
+      >
+        {dailyDateLabel(date)}
+        <span className="date-nav__chevron" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="date-nav__dropdown" role="menu">
+          {quickDays.map((d) => (
+            <button
+              key={d}
+              type="button"
+              role="menuitem"
+              className={`date-nav__option${d === date ? ' date-nav__option--selected' : ''}`}
+              onClick={() => { hapticTap(); setOpen(false); onChange(d); }}
+            >
+              {dailyDateLabel(d)}
+              {d === date && <span aria-hidden="true">✓</span>}
+            </button>
+          ))}
+          {historyDays > 14 && (
+            <>
+              <div className="profile-menu__divider" />
+              <label className="date-nav__picker">
+                <span className="subtle">Older…</span>
+                <input
+                  type="date"
+                  value={date}
+                  min={minDate}
+                  max={today}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v && v >= minDate && v <= today) {
+                      setOpen(false);
+                      onChange(v);
+                    }
+                  }}
+                />
+              </label>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DailyAllScreen({
   pets,
+  date,
+  historyDays,
+  onDateChange,
+  onNotice,
   onError,
   onOpenPet,
   onMedsChanged,
   onAddPet,
 }: {
   pets: Pet[];
+  date: string;
+  historyDays: number;
+  onDateChange: (date: string) => void;
+  onNotice: (msg: string) => void;
   onError: (msg: string | null) => void;
   onOpenPet: (petId: string) => void;
   onMedsChanged: (petId: string, meds: Med[]) => void;
   onAddPet: () => void;
 }) {
+  const touchRef = useRef<{ x: number; y: number } | null>(null);
+  const today = localToday();
+  const minDate = addDays(today, -(historyDays - 1));
+
+  function step(delta: -1 | 1) {
+    const next = addDays(date, delta);
+    if (next > today) return; // already on today — nothing newer to show
+    if (next < minDate) {
+      onNotice(
+        historyDays > 14
+          ? 'That’s the end of the saved history.'
+          : 'Daily history goes back 2 weeks on your plan.',
+      );
+      return;
+    }
+    hapticTap();
+    onDateChange(next);
+  }
+
   if (pets.length === 0) {
     return (
       <div className="empty-overview">
@@ -1598,8 +1811,27 @@ function DailyAllScreen({
     );
   }
   return (
-    <div className="daily-all">
-      <h1 className="large-title">Daily</h1>
+    <div
+      className="daily-all"
+      onTouchStart={(e) => {
+        touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }}
+      onTouchEnd={(e) => {
+        const start = touchRef.current;
+        touchRef.current = null;
+        if (!start) return;
+        const dx = e.changedTouches[0].clientX - start.x;
+        const dy = e.changedTouches[0].clientY - start.y;
+        // Horizontal swipe: right = back a day, left = forward.
+        if (Math.abs(dx) > 60 && Math.abs(dy) < 50) step(dx > 0 ? -1 : 1);
+      }}
+    >
+      <DateNav date={date} historyDays={historyDays} onChange={onDateChange} />
+      {date !== today && (
+        <p className="daily-past-note" role="status">
+          Viewing a past day — swipe left or tap the date to get back to today.
+        </p>
+      )}
       {pets.map((pet) => (
         <section key={pet.id} className="daily-all__pet">
           <button
@@ -1613,6 +1845,7 @@ function DailyAllScreen({
           </button>
           <DailySection
             petId={pet.id}
+            date={date}
             onError={onError}
             onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
           />
@@ -1624,10 +1857,12 @@ function DailyAllScreen({
 
 function DailySection({
   petId,
+  date,
   onError,
   onMedsChanged,
 }: {
   petId: string;
+  date?: string; // defaults to today; past days render read-only
   onError: (msg: string | null) => void;
   onMedsChanged: (meds: Med[]) => void;
 }) {
@@ -1637,17 +1872,24 @@ function DailySection({
   const [newItem, setNewItem] = useState('');
   const [newIsCounter, setNewIsCounter] = useState(false);
   const [busy, setBusy] = useState(false);
-  const today = localToday();
+  const day = date ?? localToday();
+  // Past days are history, not a backfill surface — checks/mood are view-only.
+  const readOnly = day !== localToday();
 
   const load = useCallback(() => {
-    getDaily(petId, localToday())
+    setLoading(true);
+    getDaily(petId, day)
       .then(setState)
       .catch((err) => onError(err instanceof Error ? err.message : 'Could not load the daily list'))
       .finally(() => setLoading(false));
-  }, [petId, onError]);
+  }, [petId, day, onError]);
   useEffect(() => {
     load();
   }, [load]);
+  // Leaving today (swipe-back) closes an open list editor — history is view-only.
+  useEffect(() => {
+    if (readOnly) setEditing(false);
+  }, [readOnly]);
 
   // Med check-offs change the med schedule — keep the rest of the app in sync.
   const refreshMeds = useCallback(() => {
@@ -1658,12 +1900,12 @@ function DailySection({
 
   // Check rows toggle; counter rows pass an explicit +1 (true) / -1 (false).
   async function toggle(item: DailyItem, value?: boolean) {
-    if (!state) return;
+    if (!state || readOnly) return;
     const next = value ?? state.checks[item.id] === undefined;
     onError(null);
     if (next) hapticTap(); // native: light tap on check-off / count-up
     try {
-      const res = await checkDaily(petId, today, item.id, next);
+      const res = await checkDaily(petId, day, item.id, next);
       setState((s) => (s ? { ...s, checks: res.checks } : s));
       if (item.med) {
         if (next) hapticSuccess();
@@ -1676,10 +1918,11 @@ function DailySection({
   }
 
   async function pickMood(value: number) {
+    if (readOnly) return;
     onError(null);
     hapticTap();
     try {
-      const res = await setDailyMood(petId, today, value);
+      const res = await setDailyMood(petId, day, value);
       setState((s) => (s ? { ...s, mood: res.mood } : s));
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not save the mood');
@@ -1708,7 +1951,9 @@ function DailySection({
   return (
     <section className="card daily">
       <div className="daily__mood">
-        <span className="daily__mood-label">How's your pet today?</span>
+        <span className="daily__mood-label">
+          {readOnly ? 'Mood that day' : "How's your pet today?"}
+        </span>
         <div className="daily__mood-row" role="radiogroup" aria-label="Mood today">
           {MOODS.map((m) => (
             <button
@@ -1718,6 +1963,7 @@ function DailySection({
               aria-checked={state.mood?.value === m.value}
               className={`daily__mood-btn${state.mood?.value === m.value ? ' daily__mood-btn--active' : ''}`}
               title={m.label}
+              disabled={readOnly}
               onClick={() => void pickMood(m.value)}
             >
               {m.emoji}
@@ -1734,16 +1980,22 @@ function DailySection({
 
       <div className="daily__head">
         <h3 className="daily__title">
-          Today's list
+          {readOnly ? 'The list that day' : "Today's list"}
           <span className="subtle"> · {doneCount}/{state.items.length} done</span>
         </h3>
-        <button className="btn btn--link" type="button" onClick={() => setEditing((e) => !e)}>
-          {editing ? 'Done' : 'Edit list'}
-        </button>
+        {!readOnly && (
+          <button className="btn btn--link" type="button" onClick={() => setEditing((e) => !e)}>
+            {editing ? 'Done' : 'Edit list'}
+          </button>
+        )}
       </div>
 
       {state.items.length === 0 && (
-        <p className="subtle">Nothing on the list — add feeding times, walks, or meds.</p>
+        <p className="subtle">
+          {readOnly
+            ? 'Nothing recorded on this day.'
+            : 'Nothing on the list — add feeding times, walks, or meds.'}
+        </p>
       )}
 
       {state.items.map((item) => {
@@ -1773,27 +2025,28 @@ function DailySection({
                   </span>
                 )}
               </span>
-              {removeBtn || (
-                <span className="daily-item__counter-btns">
-                  <button
-                    type="button"
-                    className="btn daily-item__count-btn"
-                    aria-label={`Remove one ${item.name}`}
-                    disabled={count === 0}
-                    onClick={() => void toggle(item, false)}
-                  >
-                    −
-                  </button>
-                  <button
-                    type="button"
-                    className="btn daily-item__count-btn"
-                    aria-label={`Add one ${item.name}`}
-                    onClick={() => void toggle(item, true)}
-                  >
-                    +
-                  </button>
-                </span>
-              )}
+              {removeBtn ||
+                (!readOnly && (
+                  <span className="daily-item__counter-btns">
+                    <button
+                      type="button"
+                      className="btn daily-item__count-btn"
+                      aria-label={`Remove one ${item.name}`}
+                      disabled={count === 0}
+                      onClick={() => void toggle(item, false)}
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      className="btn daily-item__count-btn"
+                      aria-label={`Add one ${item.name}`}
+                      onClick={() => void toggle(item, true)}
+                    >
+                      +
+                    </button>
+                  </span>
+                ))}
             </div>
           );
         }
@@ -1805,6 +2058,7 @@ function DailySection({
               role="checkbox"
               aria-checked={!!checkInfo}
               aria-label={`${item.name}${checkInfo ? ' (done)' : ''}`}
+              disabled={readOnly}
               onClick={() => void toggle(item)}
             >
               {checkInfo ? '✓' : ''}
@@ -1856,7 +2110,7 @@ function DailySection({
             Count it (can happen several times a day)
           </label>
         </form>
-      ) : (
+      ) : readOnly ? null : (
         <p className="subtle daily__hint">
           Everyone in your family sees this list — and who checked what. Meds due today
           appear automatically; checking one marks it as given.
@@ -4145,13 +4399,14 @@ function SettingsScreen({
   return (
     <div className="screen-view screen-view--root">
       <nav className="screen-nav">
-        {/* Settings is a tab-bar root on mobile — the back button is desktop-only. */}
+        {/* Settings opens from the header avatar menu — the back button
+            returns to whichever tab root the user came from. */}
         <button
-          className="screen-nav__back screen-nav__back--desktop btn btn--link"
+          className="screen-nav__back btn btn--link"
           type="button"
           onClick={onDone}
         >
-          ‹ Pets
+          ‹ Back
         </button>
         <span className="screen-nav__title">Settings</span>
       </nav>

@@ -275,8 +275,13 @@ async function main() {
   check(!!poop && /Poop/.test(poop.name), 'poop counter preset present');
   const medItem = daily.body.items.find((i) => i.id.startsWith('med:'));
   check(!!medItem && medItem.name === 'Heartworm prevention', 'due med appears on the daily list');
+  // Reads are plan-gated history now (free = 2 weeks): far past → HISTORY_LIMIT,
+  // future days still a plain 400.
   const badDate = await api(owner, 'GET', `/pets/${pet.id}/daily?date=1999-01-01`);
-  check(badDate.status === 400, 'far-off date rejected');
+  check(badDate.status === 403 && badDate.body.error === 'HISTORY_LIMIT',
+    'far-past date blocked by plan history window');
+  const futureDate = await api(owner, 'GET', `/pets/${pet.id}/daily?date=2099-01-01`);
+  check(futureDate.status === 400, 'future date rejected');
 
   const breakfast = daily.body.items.find((i) => i.name === 'Breakfast');
   const ownerCheck = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, {

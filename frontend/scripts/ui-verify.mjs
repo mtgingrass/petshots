@@ -55,11 +55,15 @@ if (email && password) {
   for (const theme of ['dark', 'light']) {
     await setTheme(theme);
     await page.waitForTimeout(1200);
+    // The app opens on the Daily tab on phones — hop to Pets for the overview.
+    await page.click('.tabbar__item:has-text("Pets")');
+    await page.waitForTimeout(500);
     await shot(`dashboard-${theme}`);
 
-    // Open settings via the bottom tab bar (phone viewport — the profile
-    // menu is desktop-only since the native-feel redesign).
-    await page.click('.tabbar__item:has-text("Settings")');
+    // Open settings via the header avatar menu (Settings left the tab bar
+    // in the Bevel-style header redesign).
+    await page.click('.profile-menu__trigger');
+    await page.click('.profile-menu__dropdown button:has-text("Settings")');
     await page.waitForTimeout(800);
     await shot(`settings-${theme}`);
     await page.click('.tabbar__item:has-text("Pets")');

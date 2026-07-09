@@ -76,6 +76,9 @@ async function uiLogin(page, email, password) {
   await page.click('button[type="submit"]');
   await page.waitForURL('**/dashboard', { timeout: 20000 });
   await page.waitForTimeout(1200);
+  // The app opens on the Daily tab on phones — hop to Pets for the overview.
+  await page.click('.tabbar__item:has-text("Pets")');
+  await page.waitForTimeout(500);
 }
 
 async function main() {
@@ -92,8 +95,10 @@ async function main() {
   const ownerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const ownerPage = await ownerCtx.newPage();
   await uiLogin(ownerPage, ownerEmail, ownerPass);
-  // Phone viewport → Settings lives on the bottom tab bar, not the profile menu.
-  await ownerPage.click('.tabbar__item:has-text("Settings")');
+  // Settings opens from the header avatar menu (not a tab since the
+  // Bevel-style header redesign).
+  await ownerPage.click('.profile-menu__trigger');
+  await ownerPage.click('.profile-menu__dropdown button:has-text("Settings")');
   await ownerPage.waitForSelector('legend:has-text("Family")', { timeout: 15000 });
   check(true, 'Family card renders in Settings');
   await ownerPage.click('button:has-text("Create invite link")');
@@ -125,6 +130,9 @@ async function main() {
   await memberPage.click('button:has-text("Accept invite")');
   await memberPage.waitForURL('**/dashboard', { timeout: 20000 });
   check(true, 'accept lands on the dashboard');
+  // The app opens on the Daily tab on phones — hop to Pets for the overview.
+  await memberPage.click('.tabbar__item:has-text("Pets")');
+  await memberPage.waitForTimeout(500);
   await memberPage.waitForSelector('text=Maple', { timeout: 20000 });
   check(true, "member's dashboard shows the household pet");
   await memberPage.screenshot({ path: `${OUT}/member-dashboard.png`, fullPage: true });

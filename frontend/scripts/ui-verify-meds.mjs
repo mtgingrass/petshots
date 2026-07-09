@@ -101,6 +101,10 @@ for (const theme of ['dark', 'light']) {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
 
+  // The app opens on the Daily tab on phones — hop to Pets for the overview.
+  await page.click('.tabbar__item:has-text("Pets")');
+  await page.waitForTimeout(500);
+
   // Biscuit: full med list with mixed statuses.
   await page.click('text=Biscuit');
   await page.waitForTimeout(1000);
@@ -134,8 +138,10 @@ for (const theme of ['dark', 'light']) {
   await page.waitForTimeout(800);
 }
 
-// Settings hint line (one theme is enough). Phone viewport → bottom tab bar.
-await page.click('.tabbar__item:has-text("Settings")');
+// Settings hint line (one theme is enough). Settings opens from the header
+// avatar menu (it left the tab bar in the Bevel-style header redesign).
+await page.click('.profile-menu__trigger');
+await page.click('.profile-menu__dropdown button:has-text("Settings")');
 await page.waitForTimeout(1000);
 await shot('settings-meds-hint');
 

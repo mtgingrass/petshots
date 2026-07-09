@@ -32,6 +32,9 @@ const ICONS: Record<MainTab, JSX.Element> = {
 
 const LABELS: Record<MainTab, string> = { pets: 'Pets', daily: 'Daily', settings: 'Settings' };
 
+// Settings is deliberately NOT a tab — it lives under the header avatar menu
+// (Bevel-style). 'settings' stays in MainTab so the dashboard can mark no tab
+// active while the Settings screen is up.
 export function TabBar({
   active,
   onSelect,
@@ -41,7 +44,7 @@ export function TabBar({
 }) {
   return (
     <nav className="tabbar" aria-label="Main">
-      {(['pets', 'daily', 'settings'] as const).map((tab) => (
+      {(['daily', 'pets'] as const).map((tab) => (
         <button
           key={tab}
           type="button"

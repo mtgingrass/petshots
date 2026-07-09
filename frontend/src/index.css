@@ -211,6 +211,23 @@ a {
   padding-right: 0.85rem;
 }
 
+/* Wordmark + theme toggle + two buttons must fit a 375px phone without
+   pushing the page into horizontal scroll. */
+@media (max-width: 480px) {
+  .site-header__inner {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+  .site-nav {
+    gap: 0.4rem;
+  }
+  .site-nav .btn {
+    padding-left: 0.65rem;
+    padding-right: 0.65rem;
+    font-size: 0.95rem;
+  }
+}
+
 /* ---------- Landing ---------- */
 
 .hero {
@@ -1092,6 +1109,56 @@ a {
   display: flex;
   align-items: center;
   gap: 0.25rem;
+  /* Keeps the pill pinned right even when the left side renders nothing
+     (mobile tab roots have no wordmark). */
+  margin-left: auto;
+}
+
+/* Share + avatar chip grouped in one rounded pill (Bevel-style). */
+.hdr-pill {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.share-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.share-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.share-btn:active {
+  opacity: 0.6;
+}
+
+.avatar-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .theme-btn {
@@ -1111,32 +1178,27 @@ a {
 .profile-menu__trigger {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
   background: none;
   border: none;
   cursor: pointer;
-  padding: 0.35rem 0.5rem;
-  border-radius: 8px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.profile-menu__trigger:hover .avatar-chip,
+.profile-menu__trigger:active .avatar-chip {
+  filter: brightness(1.12);
+}
+
+/* Email shown as a non-interactive header row inside the dropdown. */
+.profile-menu__header {
+  padding: 0.45rem 0.75rem 0.35rem;
+  font-size: 0.8rem;
   color: var(--subtle);
-  font-size: 0.875rem;
-  transition: background 0.15s;
-}
-
-.profile-menu__trigger:hover {
-  background: var(--panel);
-  color: var(--text);
-}
-
-.profile-menu__email {
-  max-width: 160px;
+  max-width: 230px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.profile-menu__chevron {
-  font-size: 0.65rem;
-  flex-shrink: 0;
 }
 
 .profile-menu__dropdown {
@@ -2899,15 +2961,42 @@ a {
 }
 
 .weight-add {
-  display: flex;
-  flex-wrap: wrap;
+  /* Weight + unit share the first row; date and the buttons each get their
+     own full row — no flex-wrap reflow jumps when the form first appears. */
+  display: grid;
+  grid-template-columns: 1fr auto;
   gap: 0.5rem;
-  align-items: center;
   margin-top: 0.5rem;
 }
 
-.weight-add input[type="number"] {
-  width: 6.5rem;
+/* Not nested in .form, so the fields need the app's input styling here. */
+.weight-add input,
+.weight-add select {
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 1rem; /* 16px+ prevents iOS Safari focus-zoom */
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+}
+
+.weight-add input:focus,
+.weight-add select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.weight-add input[type="date"],
+.weight-add .actions {
+  grid-column: 1 / -1;
+}
+
+.weight-add .actions {
+  margin-top: 0;
+  justify-content: flex-start;
 }
 
 /* ---- roadmap ---- */
@@ -3084,21 +3173,21 @@ a {
   opacity: 0.7;
 }
 
-/* Desktop shows the header back button on pushed views; mobile shows the
-   wordmark there instead (the bottom Pets tab is the way back). */
-.dashboard-header__wordmark-mobile {
-  display: none;
-}
-
 @media (max-width: 767px) {
   .tabbar {
     display: flex;
   }
+  /* The header goes Bevel-lean on phones: no wordmark (screens carry their
+     own large titles), no back button (the tab bar is the way back), no
+     theme toggle (it lives in Settings) — just the share + avatar pill. */
   .dashboard-header__back {
     display: none;
   }
-  .dashboard-header__wordmark-mobile {
-    display: inline;
+  .dashboard-header__wordmark-desktop {
+    display: none;
+  }
+  .dashboard-header .theme-btn {
+    display: none;
   }
   /* Tab-root screens (Settings) show an iOS large title instead of the
      centered mini-title + back button, and lose the desktop panel frame so
@@ -3125,16 +3214,19 @@ a {
   .page--tabbed {
     padding-bottom: calc(var(--tabbar-h) + max(env(safe-area-inset-bottom), 8px) + 1.25rem);
   }
-  /* The tab bar replaces the header profile menu and the dashboard footer;
-     Settings (a tab root) loses its desktop-style back button. */
-  .dashboard-header .profile-menu {
-    display: none;
-  }
+  /* The tab bar replaces the dashboard footer; footer links live on in
+     public pages and desktop. */
   .page--tabbed ~ .site-footer {
     display: none;
   }
   .screen-nav__back--desktop {
     display: none;
+  }
+  /* Settings' back button sits above its large title, iOS-style. */
+  .screen-view--root .screen-nav {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
   }
 }
 
@@ -3143,9 +3235,6 @@ html[data-native="true"] .tabbar {
 }
 html[data-native="true"] .page--tabbed {
   padding-bottom: calc(var(--tabbar-h) + max(env(safe-area-inset-bottom), 8px) + 1.25rem);
-}
-html[data-native="true"] .dashboard-header .profile-menu {
-  display: none;
 }
 html[data-native="true"] .page--tabbed ~ .site-footer {
   display: none;
@@ -3156,8 +3245,16 @@ html[data-native="true"] .screen-nav__back--desktop {
 html[data-native="true"] .dashboard-header__back {
   display: none;
 }
-html[data-native="true"] .dashboard-header__wordmark-mobile {
-  display: inline;
+html[data-native="true"] .dashboard-header__wordmark-desktop {
+  display: none;
+}
+html[data-native="true"] .dashboard-header .theme-btn {
+  display: none;
+}
+html[data-native="true"] .screen-view--root .screen-nav {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
 }
 html[data-native="true"] .screen-view--root {
   background: none;
@@ -3185,6 +3282,104 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  /* Horizontal swipes step days; keep vertical scrolling native. */
+  touch-action: pan-y;
+}
+
+/* ---------- Daily date navigation (dropdown title + past-day note) ---------- */
+
+.date-nav {
+  position: relative;
+}
+
+.date-nav__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.date-nav__btn:active {
+  opacity: 0.7;
+}
+
+.date-nav__chevron {
+  font-size: 0.9rem;
+  color: var(--subtle);
+  transform: translateY(2px);
+}
+
+.date-nav__dropdown {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 2px);
+  min-width: 230px;
+  max-height: 21rem;
+  overflow-y: auto;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.35rem;
+  z-index: 100;
+  box-shadow: var(--shadow-menu);
+}
+
+.date-nav__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.date-nav__option:hover {
+  background: var(--panel);
+}
+
+.date-nav__option--selected {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.date-nav__picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+}
+
+.date-nav__picker input {
+  font-size: 0.9rem;
+  padding: 0.3rem 0.45rem;
+}
+
+/* Past days are view-only — quiet the untouched mood buttons. */
+.daily__mood-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.daily-past-note {
+  margin: -0.5rem 0 0.25rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  color: var(--subtle);
+  font-size: 0.85rem;
 }
 
 .daily-all__pet {

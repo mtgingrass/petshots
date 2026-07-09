@@ -1,7 +1,10 @@
 // UI verification of the Daily tab: presets + due-med rows render, a
-// check-off persists with attribution, mood buttons record who pressed.
+// check-off persists with attribution, mood buttons record who pressed,
+// and the date-nav history browsing (dropdown + swipe + read-only past days).
+// Needs AWS CLI creds (writes a plan.json history override for the throwaway).
 //   node scripts/ui-verify-daily.mjs <email> <password>   (THROWAWAY ONLY)
 import { chromium } from 'playwright';
+import { execSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -57,6 +60,9 @@ async function main() {
   await page.waitForURL('**/dashboard', { timeout: 20000 });
   await page.waitForTimeout(1200);
 
+  // The app opens on the Daily tab on phones — hop to Pets for the overview.
+  await page.click('.tabbar__item:has-text("Pets")');
+  await page.waitForTimeout(500);
   // Click the pet PIN, not `text=Clover` — the med-due notice strip also
   // contains the pet name and deep-links to the Meds tab.
   await page.click('.pet-pin:has-text("Clover")');
@@ -91,11 +97,75 @@ async function main() {
 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
+  await page.click('.tabbar__item:has-text("Pets")'); // reload lands on Daily
+  await page.waitForTimeout(500);
   await page.click('.pet-pin:has-text("Clover")');
   await page.click('.tab-bar__tab:has-text("Daily")'); // detail defaults to Records now
   await page.waitForSelector('.daily', { timeout: 15000 });
   check(await page.locator('.daily-item--done', { hasText: 'Breakfast' }).isVisible().catch(() => false), 'check persists across reload');
   check(await page.locator('.daily__mood-btn--active').isVisible().catch(() => false), 'mood persists across reload');
+
+  // ---- date navigation on the app-level Daily tab ----
+  await page.click('.tabbar__item:has-text("Daily")');
+  await page.waitForSelector('.date-nav__btn', { timeout: 15000 });
+  check((await page.locator('.date-nav__btn').textContent()).startsWith('Today,'), 'date nav shows Today');
+
+  // Swipe right (synthetic touch — React reads touches/changedTouches) → yesterday.
+  const swipe = (fromX, toX) => page.evaluate(([x1, x2]) => {
+    const el = document.querySelector('.daily-all');
+    const mk = (x) => new Touch({ identifier: 1, target: el, clientX: x, clientY: 300 });
+    el.dispatchEvent(new TouchEvent('touchstart', { touches: [mk(x1)], changedTouches: [mk(x1)], bubbles: true }));
+    el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [mk(x2)], bubbles: true }));
+  }, [fromX, toX]);
+  await swipe(80, 260);
+  await page.waitForSelector('.daily-past-note', { timeout: 10000 });
+  check((await page.locator('.date-nav__btn').textContent()).startsWith('Yesterday,'), 'swipe right goes to yesterday');
+  await page.waitForSelector('.daily .daily-item', { timeout: 10000 });
+  check(await page.locator('.daily-item__check[disabled]').first().isVisible(), 'past-day checks are read-only');
+  check(!(await page.locator('.daily button:has-text("Edit list")').first().isVisible().catch(() => false)), 'no Edit list on a past day');
+  await page.screenshot({ path: `${OUT}/daily-yesterday.png`, fullPage: true });
+
+  // Swipe left → back to today, editable again.
+  await swipe(260, 80);
+  await page.waitForFunction(
+    () => document.querySelector('.date-nav__btn')?.textContent.startsWith('Today,'),
+    { timeout: 10000 },
+  );
+  check(true, 'swipe left returns to today');
+
+  // Dropdown: 14 quick days, picking one navigates.
+  await page.click('.date-nav__btn');
+  await page.waitForSelector('.date-nav__dropdown', { timeout: 10000 });
+  check((await page.locator('.date-nav__option').count()) === 14, 'dropdown lists 14 days');
+  await page.locator('.date-nav__option').nth(2).click();
+  await page.waitForSelector('.daily-past-note', { timeout: 10000 });
+  check(true, 'dropdown picks a past day');
+  await page.click('.date-nav__btn');
+  await page.locator('.date-nav__option').first().click();
+  await page.waitForFunction(
+    () => document.querySelector('.date-nav__btn')?.textContent.startsWith('Today,'),
+    { timeout: 10000 },
+  );
+  check(true, 'dropdown returns to today');
+
+  // ---- history window enforcement (API level) ----
+  const sub = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub;
+  const back10 = await api(token, 'GET', `/pets/${pet.id}/daily?date=${ymd(-10)}`);
+  check(back10.status === 200, 'free plan reads 10 days back');
+  const back20 = await api(token, 'GET', `/pets/${pet.id}/daily?date=${ymd(-20)}`);
+  check(back20.status === 403 && back20.body.error === 'HISTORY_LIMIT', 'free plan blocked past 2 weeks');
+  // Writes keep the tight anti-backfill window — a past-dated check must 400.
+  const oldCheck = await api(token, 'POST', `/pets/${pet.id}/daily/check`, { date: ymd(-10), itemId: 'preset-breakfast', checked: true });
+  check(oldCheck.status === 400, 'past-day check-off still rejected (no backfill)');
+  // Paid-depth override: plan.json limits.dailyHistoryDays → archive-path read.
+  execSync(`aws s3 cp - s3://petshots-uploads/users/${sub}/plan.json`, {
+    input: JSON.stringify({ plan: 'free', limits: { dailyHistoryDays: 365 } }),
+  });
+  const back100 = await api(token, 'GET', `/pets/${pet.id}/daily?date=${ymd(-100)}`);
+  check(back100.status === 200 && back100.body.mood === null, 'year history override reads 100 days back (archive path)');
+  const back400 = await api(token, 'GET', `/pets/${pet.id}/daily?date=${ymd(-400)}`);
+  check(back400.status === 403, 'beyond the plan window still blocked');
+  execSync(`aws s3 rm s3://petshots-uploads/users/${sub}/plan.json`);
 
   await browser.close();
   const after = await api(token, 'GET', '/pets');

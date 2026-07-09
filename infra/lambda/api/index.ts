@@ -24,6 +24,21 @@ import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
+// All product-tunable numbers (limits, caps, TTLs, windows) live in one
+// documented file — edit values there, not here. Env vars (set from the same
+// file by api-stack.ts) still win over the code fallbacks.
+import {
+  LIMITS_FREE,
+  LIMITS_PAID,
+  UPLOADS,
+  REMINDERS,
+  DAILY,
+  WEIGHTS,
+  MEDS,
+  FAMILY,
+  AI,
+  EMAIL,
+} from '../shared/config';
 
 // One Lambda fronts every route (a tiny router on event.routeKey). Fewer moving
 // parts than a function per route, and IAM is identical across them anyway.
@@ -38,13 +53,13 @@ const s3 = new S3Client({
 });
 const cognito = new CognitoIdentityProviderClient({});
 const ses = new SESv2Client({});
-const FROM_EMAIL = process.env.FROM_EMAIL ?? 'no-reply@petshots.app';
+const FROM_EMAIL = process.env.FROM_EMAIL ?? EMAIL.FROM_EMAIL;
 const BUCKET = process.env.UPLOADS_BUCKET!;
 const USER_POOL_ID = process.env.USER_POOL_ID ?? '';
-const MAX_PETS = Number(process.env.MAX_PETS ?? '2');
-const MAX_DOCS = Number(process.env.MAX_DOCS ?? '8');
-const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? String(10 * 1024 * 1024));
-const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const MAX_PETS = Number(process.env.MAX_PETS ?? LIMITS_FREE.MAX_PETS);
+const MAX_DOCS = Number(process.env.MAX_DOCS ?? LIMITS_FREE.MAX_DOCS);
+const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? UPLOADS.MAX_FILE_BYTES);
+const MAX_AVATAR_BYTES = UPLOADS.MAX_AVATAR_BYTES;
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
@@ -106,8 +121,8 @@ interface Med {
   // reminders — a dismissed med is no longer considered due at all.
   dismissed?: boolean;
 }
-const MAX_MEDS = Number(process.env.MAX_MEDS ?? '4');
-const MED_UNIT_MAX: Record<Med['unit'], number> = { day: 365, week: 52, month: 24 };
+const MAX_MEDS = Number(process.env.MAX_MEDS ?? LIMITS_FREE.MAX_MEDS);
+const MED_UNIT_MAX: Record<Med['unit'], number> = MEDS.UNIT_MAX;
 
 // Strict calendar date: correct shape AND a real day. Round-trip through Date
 // components — V8 string parsing silently rolls Feb 30 over to Mar 2, so a
@@ -252,13 +267,13 @@ const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
     maxPets: MAX_PETS,
     maxDocs: MAX_DOCS,
     maxMeds: MAX_MEDS,
-    maxMembers: Number(process.env.MAX_MEMBERS ?? '1'),
+    maxMembers: Number(process.env.MAX_MEMBERS ?? LIMITS_FREE.MAX_MEMBERS),
   },
   paid: {
-    maxPets: Number(process.env.PAID_MAX_PETS ?? '10'),
-    maxDocs: Number(process.env.PAID_MAX_DOCS ?? '999'),
-    maxMeds: Number(process.env.PAID_MAX_MEDS ?? '20'),
-    maxMembers: Number(process.env.PAID_MAX_MEMBERS ?? '5'),
+    maxPets: Number(process.env.PAID_MAX_PETS ?? LIMITS_PAID.MAX_PETS),
+    maxDocs: Number(process.env.PAID_MAX_DOCS ?? LIMITS_PAID.MAX_DOCS),
+    maxMeds: Number(process.env.PAID_MAX_MEDS ?? LIMITS_PAID.MAX_MEDS),
+    maxMembers: Number(process.env.PAID_MAX_MEMBERS ?? LIMITS_PAID.MAX_MEMBERS),
   },
 };
 const posInt = (v: unknown, fallback: number): number =>
@@ -312,7 +327,7 @@ interface MemberOf {
   ownerEmail: string;
   joinedAt: string;
 }
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INVITE_TTL_MS = FAMILY.INVITE_TTL_MS;
 const MEMBER_FORBIDDEN_ERROR =
   'Only the family owner can do that.';
 // Destructive-container actions members can never take on household pets.
@@ -354,7 +369,9 @@ async function updateHousehold<T>(
 // Daily cap on emailed invites: the invite CREATE is already seat-capped, but
 // create→revoke→create would otherwise loop unlimited SES sends to arbitrary
 // addresses from any account.
-const MAX_INVITE_EMAILS_PER_DAY = Number(process.env.MAX_INVITE_EMAILS ?? '10');
+const MAX_INVITE_EMAILS_PER_DAY = Number(
+  process.env.MAX_INVITE_EMAILS ?? FAMILY.MAX_INVITE_EMAILS_PER_DAY,
+);
 async function bumpInviteEmailQuota(sub: string): Promise<boolean> {
   const key = `users/${sub}/invite-emails.json`;
   const today = new Date().toISOString().slice(0, 10);
@@ -445,9 +462,9 @@ function dailyPresetsFor(species: string | undefined): DailyItem[] {
   }
   return meals;
 }
-const MAX_DAILY_ITEMS = 20;
-const MAX_COUNTER_PER_DAY = 30;
-const DAILY_LOG_RETENTION_DAYS = 14;
+const MAX_DAILY_ITEMS = DAILY.MAX_ITEMS;
+const MAX_COUNTER_PER_DAY = DAILY.MAX_COUNTER_PER_DAY;
+const DAILY_LOG_RETENTION_DAYS = DAILY.LOG_RETENTION_DAYS;
 
 // Days older than the retention window move from daily.json into per-month
 // archive objects instead of being dropped: mood + feeding history is the
@@ -488,11 +505,11 @@ async function pruneDailyToArchive(
   }
 }
 
-// Accept only a real calendar day within ±2 days of server time — enough for
-// any timezone, too tight to backfill or forge history.
+// Accept only a real calendar day within DAILY.DATE_WINDOW_MS of server time —
+// enough for any timezone, too tight to backfill or forge history.
 function isDailyDate(v: unknown): v is string {
   if (!isStrictDay(v)) return false;
-  return Math.abs(Date.parse(`${v}T00:00:00Z`) - Date.now()) <= 2.5 * 86_400_000;
+  return Math.abs(Date.parse(`${v}T00:00:00Z`) - Date.now()) <= DAILY.DATE_WINDOW_MS;
 }
 
 // Med items due on `date` (or already checked that day — a given med advances
@@ -556,7 +573,7 @@ interface WeightEntry {
   by: string; // who logged it, server-stamped
   at: string;
 }
-const MAX_WEIGHT_ENTRIES = 500;
+const MAX_WEIGHT_ENTRIES = WEIGHTS.MAX_ENTRIES;
 const formatWeight = (e: WeightEntry): string => `${e.weight} ${e.unit}`;
 
 // Any real past-or-today date is loggable (historical backfill from old vet
@@ -587,13 +604,14 @@ async function pruneInvites(h: HouseholdFile): Promise<{ h: HouseholdFile; chang
 // Mantle endpoint still doesn't work for this account — retested 2026-07-07:
 // every Sonnet 4.6 id 404s "model does not exist" on Mantle, and the Haiku
 // alias still 403s on entitlement. Stay on legacy AnthropicBedrock.)
-const BEDROCK_MODEL_ID =
-  process.env.BEDROCK_MODEL_ID ?? 'us.anthropic.claude-sonnet-4-6';
-const MAX_AI_SCANS = Number(process.env.MAX_AI_SCANS ?? '10');
-const PAID_MAX_AI_SCANS = Number(process.env.PAID_MAX_AI_SCANS ?? '50');
+const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID ?? AI.BEDROCK_MODEL_ID;
+const MAX_AI_SCANS = Number(process.env.MAX_AI_SCANS ?? LIMITS_FREE.MAX_AI_SCANS_PER_DAY);
+const PAID_MAX_AI_SCANS = Number(
+  process.env.PAID_MAX_AI_SCANS ?? LIMITS_PAID.MAX_AI_SCANS_PER_DAY,
+);
 // Bedrock InvokeModel caps the request body at 25 MB; base64 inflates 4/3, so
-// anything over ~15 MB can't be analyzed and falls back to manual entry.
-const MAX_AI_FILE_BYTES = 15 * 1024 * 1024;
+// anything over MAX_AI_FILE_BYTES can't be analyzed and falls back to manual entry.
+const MAX_AI_FILE_BYTES = UPLOADS.MAX_AI_FILE_BYTES;
 const AI_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 let claudeClient: AnthropicBedrock | null = null;
@@ -603,7 +621,7 @@ function getClaude(): AnthropicBedrock {
       awsRegion: process.env.AWS_REGION ?? 'us-east-1',
       // Finish (or fail) before API Gateway's ~30s integration cap so the
       // client always gets a real response it can fall back from.
-      timeout: 23_000,
+      timeout: AI.CLIENT_TIMEOUT_MS,
       maxRetries: 0,
     });
   }
@@ -723,7 +741,7 @@ function cleanExtraction(raw: unknown): Extraction {
   const pet = (r.pet ?? {}) as Record<string, unknown>;
   const vet = (r.vet ?? {}) as Record<string, unknown>;
   const vaccines = (Array.isArray(r.vaccines) ? r.vaccines : [])
-    .slice(0, 12)
+    .slice(0, AI.MAX_VACCINES_PER_EXTRACTION)
     .map((v: Record<string, unknown>) => {
       const dateGiven = day(v?.dateGiven);
       const expiry = day(v?.expiry);
@@ -840,7 +858,7 @@ const READ_ONLY_PET_ERROR =
 // lazily so non-billing routes never pay the lookup. plan.json is written
 // ONLY here (webhook) or by an operator — no user-authed route can touch it.
 const STRIPE_SECRET_NAME = process.env.STRIPE_SECRET_NAME ?? 'petshots/stripe';
-const APP_URL = process.env.APP_URL ?? 'https://petshots.app';
+const APP_URL = process.env.APP_URL ?? EMAIL.APP_URL;
 interface StripeConfig {
   secretKey: string;
   webhookSecret: string;
@@ -945,7 +963,7 @@ async function handlePublicPassport(
     avatarUrl = await getSignedUrl(
       s3,
       new GetObjectCommand({ Bucket: BUCKET, Key: avatarKey }),
-      { expiresIn: 3600 },
+      { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
     );
   } catch { /* no avatar */ }
 
@@ -968,7 +986,7 @@ async function handlePublicPassport(
       const url = await getSignedUrl(
         s3,
         new GetObjectCommand({ Bucket: BUCKET, Key: key }),
-        { expiresIn: 3600 },
+        { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
       );
       return {
         id: parts[5],
@@ -1165,7 +1183,7 @@ export const handler = async (
                 ? await getSignedUrl(
                     s3,
                     new GetObjectCommand({ Bucket: BUCKET, Key: `${poolPrefix}${id}/avatar` }),
-                    { expiresIn: 3600 },
+                    { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
                   )
                 : undefined;
               return { id, ...pet, avatarUrl };
@@ -1291,7 +1309,7 @@ export const handler = async (
             ['eq', '$Content-Type', contentType],
           ],
           Fields: { 'Content-Type': contentType },
-          Expires: 300,
+          Expires: UPLOADS.UPLOAD_URL_TTL_SECONDS,
         });
         return json(200, { url, fields });
       }
@@ -1315,7 +1333,7 @@ export const handler = async (
             const url = await getSignedUrl(
               s3,
               new GetObjectCommand({ Bucket: BUCKET, Key: key }),
-              { expiresIn: 3600 },
+              { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
             );
             return {
               id: parts[5],
@@ -1381,7 +1399,7 @@ export const handler = async (
             ['eq', '$Content-Type', contentType],
           ],
           Fields: { 'Content-Type': contentType },
-          Expires: 300,
+          Expires: UPLOADS.UPLOAD_URL_TTL_SECONDS,
         });
         return json(200, { url, fields, key });
       }
@@ -1421,7 +1439,7 @@ export const handler = async (
             ['eq', '$Content-Type', contentType],
           ],
           Fields: { 'Content-Type': contentType },
-          Expires: 300,
+          Expires: UPLOADS.UPLOAD_URL_TTL_SECONDS,
         });
         return json(200, { url, fields, uploadId });
       }
@@ -1965,12 +1983,15 @@ export const handler = async (
 
       case 'GET /settings': {
         const settings = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
-        return json(200, settings ?? { remindersEnabled: false, reminderDays: [7, 30] });
+        return json(200, settings ?? {
+          remindersEnabled: false,
+          reminderDays: REMINDERS.DEFAULT_REMINDER_DAYS,
+        });
       }
 
       case 'PUT /settings': {
         const input = JSON.parse(event.body ?? '{}');
-        const validDays = [1, 3, 7, 14, 30, 60];
+        const validDays = REMINDERS.VALID_REMINDER_DAYS;
         // unsubToken is server-managed: preserved from the stored file (never
         // trusted from the client) and minted here if absent, so every user
         // who saves settings gets a working unsubscribe link.
@@ -1982,7 +2003,7 @@ export const handler = async (
             ? (input.reminderDays as unknown[]).filter(
                 (d): d is number => typeof d === 'number' && validDays.includes(d),
               )
-            : [7, 30],
+            : REMINDERS.DEFAULT_REMINDER_DAYS,
           marketingOptIn: input.marketingOptIn === true,
           emailOptOut: input.emailOptOut === true,
           // Sunday summary of the week's care/mood/weight. Default ON (it

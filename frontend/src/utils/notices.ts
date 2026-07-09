@@ -1,4 +1,5 @@
 import type { Pet, Doc, Med } from '../api';
+import { NOTICES } from '../productConfig';
 
 // ---- types ----
 
@@ -23,14 +24,12 @@ export interface Notice {
   resetAfterDays: number; // how long a dismissal lasts; 0 = session-only
 }
 
-// ---- thresholds (tweak these to adjust cadence) ----
+// ---- thresholds ----
+// Values live in productConfig.ts (NOTICES) — edit them there. The
+// resetAfterDays per notice type below is UX texture and stays local.
 
-const CRITICAL_DAYS     = 7;   // ≤7 days: urgent, re-surfaces daily even if dismissed
-const WARNING_DAYS      = 30;  // 8–30 days: re-surfaces after 7 days
-const HEADSUP_DAYS      = 60;  // 31–60 days: re-surfaces after 14 days
-const BIRTHDAY_DAYS     = 14;  // show birthday notice within this window
-const DOB_NUDGE_DAYS    = 90;  // re-nudge about missing DOB after this many days
-export const MAX_NOTICES = 4;  // cap on visible notices at once
+const { CRITICAL_DAYS, WARNING_DAYS, HEADSUP_DAYS, BIRTHDAY_DAYS, DOB_NUDGE_DAYS } = NOTICES;
+export const MAX_NOTICES = NOTICES.MAX_NOTICES;
 
 // ---- date helpers ----
 

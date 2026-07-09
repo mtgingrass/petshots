@@ -10,6 +10,9 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import webpush from 'web-push';
 import { randomUUID, sign } from 'node:crypto';
 import * as http2 from 'node:http2';
+// All product-tunable numbers (cadences, windows, TTLs) live in one
+// documented file — edit values there, not here.
+import { REMINDERS, DIGEST, PUSH, EMAIL } from '../shared/config';
 
 const s3 = new S3Client({
   requestChecksumCalculation: 'WHEN_REQUIRED',
@@ -142,7 +145,7 @@ function apnsSend(
       'apns-topic': cfg.bundleId,
       'apns-push-type': 'alert',
       'apns-priority': '10',
-      'apns-expiration': String(Math.floor(Date.now() / 1000) + 12 * 3600),
+      'apns-expiration': String(Math.floor(Date.now() / 1000) + PUSH.APNS_EXPIRY_SECONDS),
     });
     req.setTimeout(10_000, () => {
       client.close();
@@ -214,7 +217,7 @@ async function sendPushes(
       await webpush.sendNotification(
         sub as webpush.PushSubscription,
         JSON.stringify({ title, body, url: `${APP_URL}/dashboard` }),
-        { TTL: 12 * 3600 },
+        { TTL: PUSH.WEB_PUSH_TTL_SECONDS },
       );
       sent++;
     } catch (e) {
@@ -229,8 +232,8 @@ async function sendPushes(
   }
   return sent;
 }
-const FROM_EMAIL = process.env.FROM_EMAIL ?? 'no-reply@petshots.app';
-const APP_URL = process.env.APP_URL ?? 'https://petshots.app';
+const FROM_EMAIL = process.env.FROM_EMAIL ?? EMAIL.FROM_EMAIL;
+const APP_URL = process.env.APP_URL ?? EMAIL.APP_URL;
 
 interface UserSettings {
   email?: string;
@@ -298,31 +301,39 @@ function phaseFor(days: number): Phase {
   return 'overdue';
 }
 
-// Shared overdue cadence for both vaccines and meds: weekly nags for the
-// first month, then taper to monthly so a long-neglected record doesn't nag
-// forever. NaN days (bad date) never matches.
+// Shared overdue cadence for both vaccines and meds: weekly nags at first,
+// then taper to monthly so a long-neglected record doesn't nag forever.
+// NaN days (bad date) never matches. Intervals live in shared/config.ts.
 function overdueCadenceMatch(overdueDays: number): boolean {
   if (overdueDays <= 0) return false;
-  if (overdueDays <= 30) return overdueDays % 7 === 0;
-  return overdueDays % 30 === 0;
+  if (overdueDays <= REMINDERS.OVERDUE_WEEKLY_WINDOW_DAYS) {
+    return overdueDays % REMINDERS.OVERDUE_WEEKLY_INTERVAL_DAYS === 0;
+  }
+  return overdueDays % REMINDERS.OVERDUE_MONTHLY_INTERVAL_DAYS === 0;
 }
 
 // Vaccine trigger days = whatever the user picked in Settings, PLUS a forced
-// "final countdown" (3 days and 1 day before) so the last-mile warning never
-// depends on the user having picked those specific milestones, PLUS the
+// "final countdown" (FINAL_COUNTDOWN_DAYS before) so the last-mile warning
+// never depends on the user having picked those specific milestones, PLUS the
 // expiry day itself. Once past expiry, hand off to the overdue cadence.
-function docShouldRemind(days: number, userDays: number[]): boolean {
-  if (days > 0) return userDays.includes(days) || days === 3 || days === 1;
+function docShouldRemind(days: number, userDays: readonly number[]): boolean {
+  if (days > 0) return userDays.includes(days) || REMINDERS.FINAL_COUNTDOWN_DAYS.includes(days);
   if (days === 0) return true;
   return overdueCadenceMatch(-days);
 }
 
 // A med reminder fires on the due day, then on the overdue cadence, plus (for
-// meds with a week-or-longer cadence) a single "due in 3 days" heads-up —
-// skipped for daily/short-cycle meds where "coming due" is meaningless.
+// meds with a week-or-longer cadence) a single heads-up MED_HEADSUP_DAYS
+// before — skipped for daily/short-cycle meds where "coming due" is
+// meaningless.
 function medShouldRemind(days: number, effectiveIntervalDays: number): boolean {
   if (days === 0) return true;
-  if (days > 0) return days === 3 && effectiveIntervalDays >= 7;
+  if (days > 0) {
+    return (
+      days === REMINDERS.MED_HEADSUP_DAYS &&
+      effectiveIntervalDays >= REMINDERS.MED_HEADSUP_MIN_INTERVAL_DAYS
+    );
+  }
   return overdueCadenceMatch(-days);
 }
 
@@ -529,9 +540,11 @@ function digestPresetName(itemId: string, species: string | undefined): string |
   return undefined;
 }
 
-function last7Dates(today: Date): string[] {
+// The digest's date window (DIGEST.LOOKBACK_DAYS long, ending today),
+// oldest first.
+function digestWindowDates(today: Date): string[] {
   const out: string[] = [];
-  for (let i = 6; i >= 0; i--) {
+  for (let i = DIGEST.LOOKBACK_DAYS - 1; i >= 0; i--) {
     const d = new Date(today.getTime() - i * 86_400_000);
     out.push(d.toISOString().slice(0, 10));
   }
@@ -619,12 +632,16 @@ function digestPetSection(
 // Passing { dryRun: true } via a manual invoke returns the would-send emails
 // instead of sending them — the smoke test's window into this logic.
 // { forceDigest: true } composes the weekly digest regardless of weekday.
+// { ignoreNewUploads: true } disables the first-scan already-overdue nag so
+// the smoke test can assert pure cadence behavior on freshly-seeded docs.
 export const handler = async (event?: {
   dryRun?: boolean;
   forceDigest?: boolean;
+  ignoreNewUploads?: boolean;
 }): Promise<unknown> => {
   const dryRun = event?.dryRun === true;
-  const digestDay = event?.forceDigest === true || new Date().getUTCDay() === 0;
+  const ignoreNewUploads = event?.ignoreNewUploads === true;
+  const digestDay = event?.forceDigest === true || new Date().getUTCDay() === DIGEST.DAY_UTC;
   const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
   const wouldPush: Array<{ email: string; subject: string; devices: number }> = [];
 
@@ -646,7 +663,9 @@ export const handler = async (event?: {
       // email" toggle) — skip before any scanning.
       if (settings.emailOptOut === true) continue;
       const vaccineRemindersOn = settings.remindersEnabled === true;
-      const reminderDays = settings.reminderDays?.length ? settings.reminderDays : [7, 30];
+      const reminderDays = settings.reminderDays?.length
+        ? settings.reminderDays
+        : REMINDERS.DEFAULT_REMINDER_DAYS;
 
       // Every email must carry a working unsubscribe link. Accounts that
       // predate unsubTokens get one minted and persisted here.
@@ -713,7 +732,18 @@ export const handler = async (event?: {
             if (!meta.expiry) continue;
             if (meta.remindersEnabled === false) continue;
             const days = daysUntil(meta.expiry);
-            if (docShouldRemind(days, reminderDays)) {
+            // A record uploaded ALREADY overdue may sit between taper ticks
+            // (e.g. 61 days overdue waits ~29 more for day 90) and would get
+            // no email for weeks. The first scan after the object appears
+            // fires a one-time nag: object age < 24h is true on exactly one
+            // daily run. Edits count too (PATCH rewrites the key, refreshing
+            // LastModified) — one extra nag after touching an overdue record.
+            const firstScanOverdue =
+              !ignoreNewUploads &&
+              days < 0 &&
+              it.LastModified !== undefined &&
+              Date.now() - it.LastModified.getTime() < REMINDERS.FIRST_SCAN_OVERDUE_WINDOW_MS;
+            if (docShouldRemind(days, reminderDays) || firstScanOverdue) {
               dueDocs.push({ petName: pet.name, label: meta.label, expiry: meta.expiry, days, phase: phaseFor(days) });
             }
           }
@@ -734,7 +764,7 @@ export const handler = async (event?: {
       // only to reminder-consented users who haven't turned the digest off,
       // and only when the week actually held activity.
       if (digestDay && vaccineRemindersOn && settings.weeklyDigest !== false) {
-        const dates = last7Dates(today);
+        const dates = digestWindowDates(today);
         const sections: string[] = [];
         const petNames: string[] = [];
         for (const { base, petId } of petSources) {

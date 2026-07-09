@@ -67,18 +67,23 @@ import {
   MAX_NOTICES,
   type Notice,
 } from '../utils/notices';
+import {
+  UPLOADS,
+  DASHBOARD as DASHBOARD_CONFIG,
+  PAID_PLAN_LIMITS,
+  REMINDER_DAY_OPTIONS,
+  VACCINE_CADENCES,
+} from '../productConfig';
 import { SiteFooter } from '../components/SiteFooter';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 const ALLOWED_EXTS = ['pdf', ...IMAGE_EXTS];
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
-
-// Mirror the server's paid-tier caps for fine-print disclosure.
-// Update if PAID_MAX_* env vars change in api-stack.ts.
-const PAID_PLAN_LIMITS = { maxPets: 10, maxDocs: 999, maxMeds: 20 };
-const MAX_AVATAR_BYTES = 5 * 1024 * 1024; // 5 MB
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const DUE_SOON_DAYS = 30;
+
+// Product-tunable values live in productConfig.ts — edit them there.
+const MAX_FILE_BYTES = UPLOADS.MAX_FILE_BYTES;
+const MAX_AVATAR_BYTES = UPLOADS.MAX_AVATAR_BYTES;
+const DUE_SOON_DAYS = DASHBOARD_CONFIG.DUE_SOON_DAYS;
 
 type Status = 'overdue' | 'due-soon' | 'current' | 'none';
 
@@ -1779,7 +1784,9 @@ function DocsSection({
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
-      onError(`That file is ${formatSize(file.size)} - the limit is 10 MB.`);
+      onError(
+        `That file is ${formatSize(file.size)} - the limit is ${Math.round(MAX_FILE_BYTES / (1024 * 1024))} MB.`,
+      );
       return;
     }
 
@@ -2208,19 +2215,8 @@ function EditDocScreen({
 
 // ---- AI extraction review ----
 
-// Typical booster cadences for tap-to-fill expiry suggestions when the
-// document printed neither a date nor a duration. Never auto-applied —
-// protocols genuinely vary (1yr vs 3yr rabies), so the user picks.
-const VACCINE_CADENCES: { match: RegExp; label: string; options: { text: string; months: number }[] }[] = [
-  { match: /rabies/i, label: 'Rabies', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
-  { match: /dhpp|da2pp|dapp|distemper|parvo/i, label: 'DHPP', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
-  { match: /bordetella|kennel cough/i, label: 'Bordetella', options: [{ text: '6 months', months: 6 }, { text: '1 year', months: 12 }] },
-  { match: /lepto/i, label: 'Leptospirosis', options: [{ text: '1 year', months: 12 }] },
-  { match: /lyme/i, label: 'Lyme', options: [{ text: '1 year', months: 12 }] },
-  { match: /influenza|canine.?flu/i, label: 'Influenza', options: [{ text: '1 year', months: 12 }] },
-  { match: /fvrcp|rhinotracheitis|calici/i, label: 'FVRCP', options: [{ text: '1 year', months: 12 }, { text: '3 years', months: 36 }] },
-  { match: /felv|feline.?leukemia/i, label: 'FeLV', options: [{ text: '1 year', months: 12 }] },
-];
+// Typical booster cadences for tap-to-fill expiry suggestions
+// (VACCINE_CADENCES) now live in productConfig.ts.
 
 // Vaccines are grouped by shared expiry date on the review screen.
 // Group-level fields (expiry, given, reminder) apply to all rows in the group.
@@ -2681,17 +2677,17 @@ function cadenceLabel(interval: number, unit: MedUnit): string {
 
 // Meds use a tighter urgency window than vaccines (a monthly med inside a
 // 30-day "due soon" window would never leave it) — and the lookahead must
-// also shrink with the cadence: a daily med is ALWAYS within 3 days of its
-// next dose, so a fixed 3-day window flagged it "due tomorrow" the moment it
-// was given. Lookahead = min(3, interval-1) days, so short-cycle meds only
-// alarm on their actual due day.
+// also shrink with the cadence: a daily med is ALWAYS within a few days of
+// its next dose, so a fixed window flagged it "due tomorrow" the moment it
+// was given. Lookahead = min(MED_LOOKAHEAD_MAX_DAYS, interval-1) days, so
+// short-cycle meds only alarm on their actual due day.
 function medStatus(
   med: Pick<Med, 'nextDue' | 'interval' | 'unit'>,
 ): { status: Status; pill: string | null } {
   const days = daysUntil(med.nextDue);
   const intervalDays =
     med.unit === 'day' ? med.interval : med.unit === 'week' ? med.interval * 7 : med.interval * 30;
-  const lookahead = Math.min(3, Math.max(0, intervalDays - 1));
+  const lookahead = Math.min(DASHBOARD_CONFIG.MED_LOOKAHEAD_MAX_DAYS, Math.max(0, intervalDays - 1));
   if (days < 0) return { status: 'overdue', pill: `Overdue ${-days}d` };
   if (days === 0) return { status: 'due-soon', pill: 'Due today' };
   if (days > lookahead) return { status: 'current', pill: null };
@@ -3857,15 +3853,8 @@ export function PresentScreen({
 }
 
 // ---- settings screen ----
-
-const REMINDER_DAY_OPTIONS: { value: number; label: string }[] = [
-  { value: 1, label: '1 day before' },
-  { value: 3, label: '3 days before' },
-  { value: 7, label: '1 week before' },
-  { value: 14, label: '2 weeks before' },
-  { value: 30, label: '1 month before' },
-  { value: 60, label: '2 months before' },
-];
+// (REMINDER_DAY_OPTIONS lives in productConfig.ts — must match the server's
+// accepted values.)
 
 function SettingsScreen({
   email,

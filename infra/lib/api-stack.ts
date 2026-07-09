@@ -11,6 +11,18 @@ import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { Construct } from 'constructs';
 import * as path from 'node:path';
+// Product-tunable values (limits, cadences, sizing) — one documented file
+// shared with both Lambda bundles, so env values and code fallbacks are
+// literally the same constants. Edit values THERE, then `cdk deploy`.
+import {
+  LIMITS_FREE,
+  LIMITS_PAID,
+  UPLOADS,
+  REMINDERS,
+  AI,
+  EMAIL,
+  INFRA,
+} from '../lambda/shared/config';
 
 interface ApiStackProps extends cdk.StackProps {
   userPool: cognito.IUserPool;
@@ -58,7 +70,7 @@ export class ApiStack extends cdk.Stack {
           // review screen; anything abandoned is swept after a day, free.
           id: 'ExpireTmpUploads',
           prefix: 'tmp/',
-          expiration: cdk.Duration.days(1),
+          expiration: cdk.Duration.days(UPLOADS.TMP_EXPIRY_DAYS),
         },
       ],
     });
@@ -70,41 +82,38 @@ export class ApiStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
-      // 1024 MB / 29s for the AI-extraction routes: base64-encoding a multi-MB
-      // upload needs the memory, and the Bedrock vision call needs the time
-      // (HTTP API caps the integration at 30s regardless). Normal routes still
-      // finish in <100ms, so the memory bump costs effectively nothing.
-      memorySize: 1024,
-      timeout: cdk.Duration.seconds(29),
+      // Sizing rationale documented on INFRA in lambda/shared/config.ts.
+      memorySize: INFRA.API_MEMORY_MB,
+      timeout: cdk.Duration.seconds(INFRA.API_TIMEOUT_SECONDS),
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
         // Free-tier caps. A user is paid when users/{sub}/plan.json says so
         // (written by billing tooling/operator only); paid users get PAID_*.
-        MAX_PETS: '2',
-        MAX_DOCS: '8',
-        MAX_MEDS: '4', // medications per pet
-        PAID_MAX_PETS: '10',
-        PAID_MAX_DOCS: '999',
-        PAID_MAX_MEDS: '20',
+        MAX_PETS: String(LIMITS_FREE.MAX_PETS),
+        MAX_DOCS: String(LIMITS_FREE.MAX_DOCS),
+        MAX_MEDS: String(LIMITS_FREE.MAX_MEDS), // medications per pet
+        PAID_MAX_PETS: String(LIMITS_PAID.MAX_PETS),
+        PAID_MAX_DOCS: String(LIMITS_PAID.MAX_DOCS),
+        PAID_MAX_MEDS: String(LIMITS_PAID.MAX_MEDS),
 
         // Family members (besides the owner). Pets stay under the owner's
         // prefix, so the owner's plan governs the shared pool.
-        MAX_MEMBERS: '1',
-        PAID_MAX_MEMBERS: '5',
+        MAX_MEMBERS: String(LIMITS_FREE.MAX_MEMBERS),
+        PAID_MAX_MEMBERS: String(LIMITS_PAID.MAX_MEMBERS),
 
-        MAX_FILE_BYTES: String(20 * 1024 * 1024), // 20 MB - enforced by the POST policy
+        // Enforced by the S3 POST policy.
+        MAX_FILE_BYTES: String(UPLOADS.MAX_FILE_BYTES),
 
-        // AI document extraction (Bedrock, Claude Sonnet 4.6). Daily per-user
-        // scan caps bound worst-case model spend to pennies per user.
-        // Cross-region inference-profile id (bare Mantle alias 403'd).
-        BEDROCK_MODEL_ID: 'us.anthropic.claude-sonnet-4-6',
-        MAX_AI_SCANS: '10',
-        PAID_MAX_AI_SCANS: '50',
+        // AI document extraction (Bedrock). Daily per-user scan caps bound
+        // worst-case model spend to pennies per user.
+        BEDROCK_MODEL_ID: AI.BEDROCK_MODEL_ID,
+        MAX_AI_SCANS: String(LIMITS_FREE.MAX_AI_SCANS_PER_DAY),
+        PAID_MAX_AI_SCANS: String(LIMITS_PAID.MAX_AI_SCANS_PER_DAY),
 
         // Stripe key/webhook-secret/price-ids live in this Secrets Manager
         // secret, maintained by infra/scripts/setup-stripe.mjs.
         STRIPE_SECRET_NAME: 'petshots/stripe',
-        APP_URL: 'https://petshots.app',
+        APP_URL: EMAIL.APP_URL,
 
         // DELETE /account removes the caller's own Cognito user (always the
         // verified JWT's sub, never a client-supplied name).
@@ -195,12 +204,12 @@ export class ApiStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_20_X,
       architecture: lambda.Architecture.ARM_64,
-      memorySize: 256,
-      timeout: cdk.Duration.minutes(5),
+      memorySize: INFRA.REMINDER_MEMORY_MB,
+      timeout: cdk.Duration.minutes(INFRA.REMINDER_TIMEOUT_MINUTES),
       environment: {
         UPLOADS_BUCKET: uploads.bucketName,
-        FROM_EMAIL: 'no-reply@petshots.app',
-        APP_URL: 'https://petshots.app',
+        FROM_EMAIL: EMAIL.FROM_EMAIL,
+        APP_URL: EMAIL.APP_URL,
         // Web Push VAPID keypair (private half) — public half ships in the SPA.
         VAPID_SECRET_NAME: 'petshots/vapid',
         // APNs token-auth config for the native iOS app. The secret does not
@@ -230,9 +239,15 @@ export class ApiStack extends cdk.Stack {
       }),
     );
 
-    // Runs at 9:00 AM UTC daily (5am Eastern in summer, 4am in winter).
+    // Daily run time is set in lambda/shared/config.ts (REMINDERS.CRON_*).
     const dailyRule = new events.Rule(this, 'DailyReminderRule', {
-      schedule: events.Schedule.cron({ minute: '0', hour: '9', day: '*', month: '*', year: '*' }),
+      schedule: events.Schedule.cron({
+        minute: String(REMINDERS.CRON_MINUTE),
+        hour: String(REMINDERS.CRON_HOUR_UTC),
+        day: '*',
+        month: '*',
+        year: '*',
+      }),
       description: 'Fires the Petshots vaccine reminder Lambda once per day',
     });
     dailyRule.addTarget(new eventsTargets.LambdaFunction(reminderFn));

@@ -5,6 +5,7 @@
 import { config } from './config';
 import { getAccessToken } from './auth/cognito';
 import { compressImage, normalizeForAnalysis } from './utils/compressImage';
+import { DEFAULT_REMINDER_DAYS, FREE_PLAN_LIMITS } from './productConfig';
 
 const COMPRESSIBLE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
@@ -49,7 +50,7 @@ export interface UserSettings {
 export const DEFAULT_SETTINGS: UserSettings = {
   email: '',
   remindersEnabled: true,
-  reminderDays: [7, 30],
+  reminderDays: [...DEFAULT_REMINDER_DAYS],
   marketingOptIn: true,
   emailOptOut: false,
   weeklyDigest: true,
@@ -282,7 +283,8 @@ export interface Limits {
   maxMembers?: number; // family members besides the owner (absent on older API)
 }
 
-export const DEFAULT_LIMITS: Limits = { plan: 'free', maxPets: 2, maxDocs: 8, maxMeds: 4, maxMembers: 1 };
+// Pre-fetch placeholder only — the server sends the real limits with GET /pets.
+export const DEFAULT_LIMITS: Limits = { plan: 'free', ...FREE_PLAN_LIMITS };
 
 // Family summary riding on GET /pets: enough for badges without an extra call.
 export interface FamilyInfo {

@@ -16,6 +16,11 @@
 //   - Meds: fire on the due day, then the same weekly-then-monthly overdue
 //     cadence, plus (for meds due weekly or less often) a single "due in 3
 //     days" heads-up — short-cycle (daily) meds skip that heads-up.
+//   - First-scan nag: a doc uploaded (or edited) ALREADY overdue fires once
+//     on the first run after the object appears (age < 24h), so it never
+//     waits silently for the next taper tick. The dry-run payload flag
+//     { ignoreNewUploads: true } disables this so freshly-seeded docs can
+//     still exercise the pure cadence rules above.
 //
 // Needs AWS CLI creds (lambda:InvokeFunction + cloudformation:ListStackResources
 // + s3 read/write on the uploads bucket — the script writes users/{sub}/plan.json
@@ -107,11 +112,12 @@ function resolveReminderFn() {
   return out;
 }
 
-function invokeDryRun(fnName) {
+function invokeDryRun(fnName, extra = {}) {
   const outfile = join(tmpdir(), `reminder-dryrun-${Date.now()}.json`);
+  const payload = JSON.stringify({ dryRun: true, ...extra });
   execSync(
     `aws lambda invoke --function-name ${fnName} --cli-binary-format raw-in-base64-out ` +
-      `--payload '{"dryRun":true}' ${outfile}`,
+      `--payload '${payload}' ${outfile}`,
     { encoding: 'utf8' },
   );
   const res = JSON.parse(readFileSync(outfile, 'utf8'));
@@ -254,8 +260,10 @@ async function main() {
   await uploadDoc(token, petId, 'VaxMilestoneSeven', daysFromToday(7));   // fires: user's reminderDays milestone
   check(true, 'eight docs uploaded at crafted offsets');
 
-  console.log('\n[5] dry run: docs fire per the new milestone/final-countdown/overdue-taper rules');
-  dry = invokeDryRun(fnName);
+  console.log('\n[5] dry run (ignoreNewUploads): docs fire per the milestone/final-countdown/overdue-taper rules');
+  // These docs were uploaded seconds ago, so without the flag the first-scan
+  // already-overdue nag would fire ALL the overdue ones — [5b] covers that.
+  dry = invokeDryRun(fnName, { ignoreNewUploads: true });
   msg = mine(dry);
   check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
   if (msg && !Array.isArray(msg)) {
@@ -271,6 +279,22 @@ async function main() {
     check(msg.body.includes("VaxDueToday — expires today"), 'due-today doc phrasing');
     check(msg.body.includes('(tomorrow)'), 'final-countdown doc (1 day) phrasing');
     check(msg.body.includes('(in 7 days)'), 'user-milestone doc (7 days) phrasing');
+  }
+
+  console.log('\n[5b] dry run (no flag): freshly-uploaded overdue docs get the first-scan nag');
+  // Same eight docs, real cron semantics: every overdue doc was uploaded
+  // within the last 24h, so the off-cadence ones (-35, -3) fire too. Docs
+  // that are merely upcoming are untouched by the rule.
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
+  if (msg && !Array.isArray(msg)) {
+    check(msg.subject === '⚠️ Petshots: 4 overdue reminders', `subject counts all 4 overdue ("${msg.subject}")`);
+    for (const name of ['VaxOverdueThirtyFive', 'VaxOverdueThree']) {
+      check(msg.body.includes(name), `${name} in body (first-scan nag despite off-cadence offset)`);
+    }
+    check(msg.body.includes('35 days overdue'), 'first-scan nag phrasing (35 days)');
+    check(!msg.body.includes('VaxUpcomingFive'), 'upcoming off-milestone doc still silent (rule is overdue-only)');
   }
 
   console.log('\n[6] cleanup docs + reset meds for the remaining single-item subject tests');

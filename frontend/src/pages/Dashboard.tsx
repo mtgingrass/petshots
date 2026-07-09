@@ -259,6 +259,8 @@ function initialsFromEmail(email: string): string {
   return init.toUpperCase();
 }
 
+type PetTab = 'records' | 'daily' | 'meds' | 'profile' | 'passport';
+
 type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport' }
@@ -300,6 +302,15 @@ export function Dashboard() {
   // the every-day surface is one tap away (Daily tab, or a pet's Daily —
   // its landing segment).
   const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
+  // Pet-detail's active segment, reported up so the header can show the
+  // date picker only while a pet's Daily tab is up (future: reports too).
+  const [petTab, setPetTab] = useState<PetTab>('daily');
+  const [dailyDate, setDailyDate] = useState<string>(localToday);
+  const handlePetTabChange = useCallback((t: PetTab) => {
+    setPetTab(t);
+    // Every fresh entry to a pet's Daily starts on today.
+    if (t === 'daily') setDailyDate(localToday());
+  }, []);
   const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
   const [allMeds, setAllMeds] = useState<Record<string, Med[]>>({});
   const [allDocsLoading, setAllDocsLoading] = useState(false);
@@ -623,6 +634,14 @@ export function Dashboard() {
               </button>
             </>
           )}
+          {/* Date picker rides the header while a pet's Daily tab is up. */}
+          {dashView.type === 'detail' && editView.type === 'list' && petTab === 'daily' && (
+            <DateNav
+              date={dailyDate}
+              historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
+              onChange={setDailyDate}
+            />
+          )}
           <div className="dashboard-header__right">
             <button
               className="btn btn--icon theme-btn"
@@ -806,6 +825,9 @@ export function Dashboard() {
             <PetDetailScreen
               pet={detailPet}
               initialTab={dashView.tab}
+              onTabChange={handlePetTabChange}
+              dailyDate={dailyDate}
+              onDailyDateChange={setDailyDate}
               docs={detailDocs}
               meds={allMeds[detailPet.id]}
               onMedsChanged={(meds) =>
@@ -1439,6 +1461,9 @@ function DashboardSkeleton() {
 function PetDetailScreen({
   pet,
   initialTab,
+  onTabChange,
+  dailyDate,
+  onDailyDateChange,
   docs,
   meds,
   onMedsChanged,
@@ -1457,7 +1482,10 @@ function PetDetailScreen({
   onNotice,
 }: {
   pet: Pet;
-  initialTab?: 'records' | 'daily' | 'meds' | 'profile' | 'passport';
+  initialTab?: PetTab;
+  onTabChange: (tab: PetTab) => void; // header shows the date picker on 'daily'
+  dailyDate: string;
+  onDailyDateChange: (date: string) => void;
   docs: Doc[];
   meds: Med[] | undefined;
   onMedsChanged: (meds: Med[]) => void;
@@ -1483,7 +1511,13 @@ function PetDetailScreen({
 }) {
   // Daily is the landing tab — opening a pet means today's care first;
   // records are one segment away.
-  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'daily');
+  const [tab, setTab] = useState<PetTab>(initialTab ?? 'daily');
+  // Report the active segment up (incl. on mount) — the dashboard header
+  // shows the date picker only while Daily is up. onTabChange is a stable
+  // useCallback, so this fires exactly on tab changes.
+  useEffect(() => {
+    onTabChange(tab);
+  }, [tab, onTabChange]);
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -1594,6 +1628,8 @@ function PetDetailScreen({
         ) : tab === 'daily' ? (
           <PetDailyHistory
             petId={pet.id}
+            date={dailyDate}
+            onDateChange={onDailyDateChange}
             historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
             onError={onError}
             onNotice={onNotice}
@@ -1748,18 +1784,21 @@ function DateNav({
 // (free 2 weeks, paid a year — server-enforced too).
 function PetDailyHistory({
   petId,
+  date,
+  onDateChange,
   historyDays,
   onError,
   onNotice,
   onMedsChanged,
 }: {
   petId: string;
+  date: string; // owned by the dashboard — the header's DateNav edits it too
+  onDateChange: (date: string) => void;
   historyDays: number;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
   onMedsChanged: (meds: Med[]) => void;
 }) {
-  const [date, setDate] = useState<string>(localToday);
   // One-time discoverability tip — touch devices only (desktop can't swipe),
   // gone forever once dismissed or once the user actually swipes.
   const [showHint, setShowHint] = useState(
@@ -1788,7 +1827,7 @@ function PetDailyHistory({
     }
     if (showHint) dismissHint(); // they found the gesture — tip served its purpose
     hapticTap();
-    setDate(next);
+    onDateChange(next);
   }
 
   // Whole-screen swipe while this tab is mounted: listeners live on document
@@ -1821,7 +1860,6 @@ function PetDailyHistory({
 
   return (
     <div className="pet-daily">
-      <DateNav date={date} historyDays={historyDays} onChange={setDate} />
       {showHint && (
         <p className="daily-swipe-hint" role="status">
           <span>Tip: swipe right anywhere on this screen to see yesterday — swipe left to come back.</span>

@@ -1089,7 +1089,9 @@ a {
   backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* Left items (wordmark/back/date picker) group together; the right pill
+     pins right via its own margin-left: auto. */
+  justify-content: flex-start;
   gap: 1rem;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
@@ -3293,11 +3295,14 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   touch-action: pan-y;
 }
 
-/* Inside pet detail the date title sits under the segmented control —
-   section-header size, not the screen-level large title. */
-.pet-daily .date-nav__btn {
-  font-size: 1.35rem;
-  margin: 0.25rem 0 0;
+/* The date picker rides the dashboard header (next to the share/avatar
+   pill) while a pet's Daily tab is up — header-row size, not the
+   screen-level large title. */
+.dashboard-header .date-nav__btn {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
 }
 
 /* ---------- Daily date navigation (dropdown title + past-day note) ---------- */

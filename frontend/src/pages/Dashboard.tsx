@@ -810,24 +810,33 @@ export function Dashboard() {
                 {pets.length - limits.maxPets === 1
                   ? 'one of your pets is'
                   : `${pets.length - limits.maxPets} of your pets are`}{' '}
-                read-only — everything stays viewable.{' '}
-                <button
-                  className="btn btn--link"
-                  onClick={() => setDashView({ type: 'settings' })}
-                >
-                  Upgrade to unlock →
-                </button>
+                read-only — everything stays viewable.
+                {/* App Store 3.1.1: no external-purchase steering on iOS */}
+                {!isNative && (
+                  <>
+                    {' '}
+                    <button
+                      className="btn btn--link"
+                      onClick={() => setDashView({ type: 'settings' })}
+                    >
+                      Upgrade to unlock →
+                    </button>
+                  </>
+                )}
               </p>
             ) : pets.length === limits.maxPets ? (
               <p className="pet-pins__limit">
                 You're at the {limits.maxPets}-pet limit.{' '}
                 {limits.plan === 'free' ? (
-                  <button
-                    className="btn btn--link"
-                    onClick={() => setDashView({ type: 'settings' })}
-                  >
-                    Upgrade for more →
-                  </button>
+                  // App Store 3.1.1: no external-purchase steering on iOS
+                  isNative ? null : (
+                    <button
+                      className="btn btn--link"
+                      onClick={() => setDashView({ type: 'settings' })}
+                    >
+                      Upgrade for more →
+                    </button>
+                  )
                 ) : (
                   'Remove a pet to add another.'
                 )}
@@ -4189,7 +4198,14 @@ function SettingsScreen({
               </div>
               <div className="plan-actions">
                 {isNative ? (
-                  <p className="subtle plan-fine-print">Manage your plan at petshots.app.</p>
+                  // App Store 3.1.1: never steer free users to an external
+                  // purchase from the iOS app. Paid users may be told where
+                  // their existing subscription is managed (account mgmt).
+                  limits.plan === 'paid' ? (
+                    <p className="subtle plan-fine-print">
+                      Your subscription is managed on the web at petshots.app.
+                    </p>
+                  ) : null
                 ) : limits.plan === 'free' ? (
                   <>
                     <button

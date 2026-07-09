@@ -5,6 +5,7 @@ import { Login } from './pages/Login';
 import { ResetPassword } from './pages/ResetPassword';
 import { Dashboard } from './pages/Dashboard';
 import { Privacy } from './pages/Privacy';
+import { Support } from './pages/Support';
 import { PassportPage } from './pages/PassportPage';
 import { UnsubscribePage } from './pages/UnsubscribePage';
 import { DoorPage } from './pages/DoorPage';
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/privacy" element={<Privacy />} />
+      <Route path="/support" element={<Support />} />
       <Route path="/p/:token" element={<PassportPage />} />
       <Route path="/unsubscribe" element={<UnsubscribePage />} />
       <Route path="/door" element={<DoorPage />} />

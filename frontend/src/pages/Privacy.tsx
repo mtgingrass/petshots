@@ -7,7 +7,7 @@ export function Privacy() {
       <SiteHeader />
       <main className="page privacy">
         <h1>Privacy Policy</h1>
-        <p className="subtle">Effective July 2, 2026</p>
+        <p className="subtle">Effective July 9, 2026</p>
 
         <section>
           <h2>What we collect</h2>
@@ -17,8 +17,18 @@ export function Privacy() {
             <li>Documents you upload: vaccine records, vet paperwork, and pet photos.</li>
           </ul>
           <p>
-            We don't collect your real name, address, payment information, or any
-            information about your pet's veterinarian.
+            We don't collect your real name, address, or payment card numbers. If you
+            upgrade to a paid plan, payment is handled entirely by{' '}
+            <a href="https://stripe.com/privacy" target="_blank" rel="noopener noreferrer">
+              Stripe
+            </a>{' '}
+            — we never see or store your card details.
+          </p>
+          <p>
+            If you turn on reminder notifications, we store a push token for your device
+            so we can deliver them. Documents you scan with the AI reader are processed
+            within AWS to extract vaccine names and dates; they are not used to train AI
+            models or shared with anyone.
           </p>
         </section>
 
@@ -91,10 +101,14 @@ export function Privacy() {
         <section>
           <h2>Deleting your account</h2>
           <p>
-            To delete your account and all associated records, email{' '}
+            You can delete your account yourself at any time: open{' '}
+            <em>Settings → Danger zone → Delete account</em>. Deletion is immediate and
+            permanent — your records, photos, and any active passport links are removed,
+            and any paid subscription is cancelled automatically. If you'd rather we do
+            it, email{' '}
             <a href="mailto:mark.gingrass@gmail.com">mark.gingrass@gmail.com</a> with
-            the subject <em>"Delete my Petshots account"</em>. We'll remove everything
-            within 7 days and confirm by email.
+            the subject <em>"Delete my Petshots account"</em> and we'll take care of it
+            within 7 days.
           </p>
         </section>
 

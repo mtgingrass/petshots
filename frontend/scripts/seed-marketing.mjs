@@ -346,7 +346,7 @@ console.log('Creating Bella (Golden Retriever)...');
 const { pet: bella } = await api(token, 'POST', '/pets', { name: 'Bella', species: 'dog' });
 await api(token, 'PUT', `/pets/${bella.id}`, {
   name: 'Bella', species: 'dog', breed: 'Golden Retriever',
-  dob: '2023-07-04', allergies: 'None known', notes: 'Demo pet for marketing',
+  dob: '2023-07-04', allergies: 'None known', notes: 'Friendly with other dogs. Treats are in the blue bin.',
 });
 
 console.log('  Downloading photo...');
@@ -376,7 +376,7 @@ console.log('\nCreating Luna (Domestic Shorthair Cat)...');
 const { pet: luna } = await api(token, 'POST', '/pets', { name: 'Luna', species: 'cat' });
 await api(token, 'PUT', `/pets/${luna.id}`, {
   name: 'Luna', species: 'cat', breed: 'Domestic Shorthair',
-  dob: '2024-03-12', allergies: 'None known', notes: 'Demo pet for marketing',
+  dob: '2024-03-12', allergies: 'None known', notes: 'Indoor cat. Shy with strangers — give her a minute.',
 });
 
 console.log('  Downloading photo...');

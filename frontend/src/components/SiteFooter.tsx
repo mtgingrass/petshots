@@ -9,7 +9,7 @@ export function SiteFooter() {
           <a href="mailto:mark.gingrass@gmail.com?subject=Petshots%20Feedback">
             Send us a note
           </a>{' '}
-          · <Link to="/roadmap">Roadmap</Link>
+          · <Link to="/support">Support</Link> · <Link to="/roadmap">Roadmap</Link>
         </p>
         <p className="site-footer__legal">
           © {new Date().getFullYear()} Petshots ·{' '}

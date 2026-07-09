@@ -95,10 +95,9 @@ async function main() {
   const ownerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const ownerPage = await ownerCtx.newPage();
   await uiLogin(ownerPage, ownerEmail, ownerPass);
-  // Settings opens from the header avatar menu (not a tab since the
-  // Bevel-style header redesign).
+  // Family is its own screen under the avatar menu now.
   await ownerPage.click('.profile-menu__trigger');
-  await ownerPage.click('.profile-menu__dropdown button:has-text("Settings")');
+  await ownerPage.click('.profile-menu__dropdown button:has-text("Family")');
   await ownerPage.waitForSelector('legend:has-text("Family")', { timeout: 15000 });
   check(true, 'Family card renders in Settings');
   await ownerPage.click('button:has-text("Create invite link")');

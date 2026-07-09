@@ -263,6 +263,8 @@ function initialsFromEmail(email: string): string {
 // own pushed screen (DashView 'passport').
 type PetTab = 'records' | 'daily' | 'meds' | 'profile';
 
+type SettingsSection = 'account' | 'notifications' | 'family';
+
 type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: PetTab }
@@ -270,7 +272,9 @@ type DashView =
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
-  | { type: 'settings' }
+  // Settings is split into three focused screens, all reached from the
+  // header avatar menu.
+  | { type: 'settings'; section: SettingsSection }
   // Combined every-pet daily view — the bottom tab bar's "Daily" tab.
   | { type: 'daily' };
 
@@ -321,7 +325,9 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [presenting, setPresenting] = useState(false);
+  // Which pet's records are fullscreen "at the door" — settable from any
+  // context (pet share menu, or the overview share menu's per-pet entries).
+  const [presentingPetId, setPresentingPetId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     pet: Pet;
     docs: Doc[];
@@ -367,10 +373,10 @@ export function Dashboard() {
   // Where Settings should return to — it's reached from the avatar menu now,
   // so remember which tab root the user came from.
   const settingsReturnRef = useRef<DashView>({ type: 'overview' });
-  function openSettings() {
+  function openSettings(section: SettingsSection) {
     settingsReturnRef.current =
       activeTab === 'daily' ? { type: 'daily' } : { type: 'overview' };
-    setDashView({ type: 'settings' });
+    setDashView({ type: 'settings', section });
   }
 
   function handleTabSelect(tab: MainTab) {
@@ -381,7 +387,7 @@ export function Dashboard() {
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
     else if (tab === 'daily') setDashView({ type: 'daily' });
-    else setDashView({ type: 'settings' });
+    else setDashView({ type: 'settings', section: 'account' });
   }
 
   // ---- screen transition direction (iOS push/pop) ----
@@ -440,6 +446,11 @@ export function Dashboard() {
 
   // Docs for the active detail pet, always sorted.
   const detailDocs = detailPet ? (allDocs[detailPet.id] ?? []) : [];
+
+  const presentingPet = presentingPetId
+    ? (pets?.find((p) => p.id === presentingPetId) ?? null)
+    : null;
+  const presentingDocs = presentingPet ? (allDocs[presentingPet.id] ?? []) : [];
 
   const loadPets = useCallback(async () => {
     setError(null);
@@ -664,9 +675,16 @@ export function Dashboard() {
             <div className="hdr-pill">
               <ShareMenu
                 onShareApp={() => void handleShareApp()}
-                onPresent={
-                  detailPet && detailDocs.length > 0 ? () => setPresenting(true) : null
+                presentItems={
+                  detailPet
+                    ? detailDocs.length > 0
+                      ? [{ petId: detailPet.id, label: '▶ Present Rabies Shots' }]
+                      : []
+                    : (pets ?? [])
+                        .filter((p) => (allDocs[p.id]?.length ?? 0) > 0)
+                        .map((p) => ({ petId: p.id, label: `▶ Present — ${p.name}` }))
                 }
+                onPresent={setPresentingPetId}
                 onPassport={
                   detailPet && dashView.type !== 'passport'
                     ? () => setDashView({ type: 'passport', petId: detailPet.id })
@@ -675,7 +693,7 @@ export function Dashboard() {
               />
               <AccountMenu
                 email={email ?? ''}
-                onSettings={openSettings}
+                onOpenSection={openSettings}
                 onLogout={handleLogout}
               />
             </div>
@@ -754,6 +772,7 @@ export function Dashboard() {
           </div>
         ) : dashView.type === 'settings' ? (
           <SettingsScreen
+            section={dashView.section}
             email={email ?? ''}
             limits={limits}
             theme={theme}
@@ -766,8 +785,8 @@ export function Dashboard() {
           />
         ) : dashView.type === 'change-password' ? (
           <ChangePasswordScreen
-            onDone={() => { setDashView({ type: 'settings' }); showNotice('Password changed'); }}
-            onCancel={() => setDashView({ type: 'settings' })}
+            onDone={() => { setDashView({ type: 'settings', section: 'account' }); showNotice('Password changed'); }}
+            onCancel={() => setDashView({ type: 'settings', section: 'account' })}
             onError={setError}
           />
         ) : dashView.type === 'daily' ? (
@@ -877,7 +896,7 @@ export function Dashboard() {
                 })
               }
               onDocsChanged={() => loadPetDocs(detailPet.id)}
-              onUpgrade={() => setDashView({ type: 'settings' })}
+              onUpgrade={() => setDashView({ type: 'settings', section: 'account' })}
               onError={setError}
               onNotice={showNotice}
             />
@@ -938,7 +957,7 @@ export function Dashboard() {
                     {' '}
                     <button
                       className="btn btn--link"
-                      onClick={() => setDashView({ type: 'settings' })}
+                      onClick={() => setDashView({ type: 'settings', section: 'account' })}
                     >
                       Upgrade to unlock →
                     </button>
@@ -953,7 +972,7 @@ export function Dashboard() {
                   isNative ? null : (
                     <button
                       className="btn btn--link"
-                      onClick={() => setDashView({ type: 'settings' })}
+                      onClick={() => setDashView({ type: 'settings', section: 'account' })}
                     >
                       Upgrade for more →
                     </button>
@@ -970,7 +989,7 @@ export function Dashboard() {
               onScanRecord={() =>
                 setDashView({ type: 'detail', petId: pets[0].id })
               }
-              onReminders={() => setDashView({ type: 'settings' })}
+              onReminders={() => setDashView({ type: 'settings', section: 'notifications' })}
             />
           </>
         )}
@@ -978,11 +997,11 @@ export function Dashboard() {
       </main>
       {pets !== null && <TabBar active={activeTab} onSelect={handleTabSelect} />}
       <SiteFooter />
-      {presenting && detailPet && detailDocs.length > 0 && (
+      {presentingPet && presentingDocs.length > 0 && (
         <PresentScreen
-          pet={detailPet}
-          docs={detailDocs}
-          onExit={() => setPresenting(false)}
+          pet={presentingPet}
+          docs={presentingDocs}
+          onExit={() => setPresentingPetId(null)}
         />
       )}
     </>
@@ -996,11 +1015,16 @@ export function Dashboard() {
 // answered by context: the one on screen.
 function ShareMenu({
   onShareApp,
+  presentItems,
   onPresent,
   onPassport,
 }: {
   onShareApp: () => void;
-  onPresent: (() => void) | null;
+  // Pet context → one "Present Rabies Shots" entry; overview → one entry
+  // per pet with records ("Present — Bella"), so the door moment is two
+  // taps from anywhere.
+  presentItems: { petId: string; label: string }[];
+  onPresent: (petId: string) => void;
   onPassport: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
@@ -1042,21 +1066,22 @@ function ShareMenu({
       </button>
       {open && (
         <div className="profile-menu__dropdown" role="menu">
-          {onPresent && (
+          {presentItems.map((it) => (
             <button
+              key={it.petId}
               role="menuitem"
               className="present-trigger"
-              onClick={() => { setOpen(false); onPresent(); }}
+              onClick={() => { setOpen(false); onPresent(it.petId); }}
             >
-              ▶ Present Rabies Shots
+              {it.label}
             </button>
-          )}
+          ))}
           {onPassport && (
             <button role="menuitem" onClick={() => { setOpen(false); onPassport(); }}>
               Pet passport
             </button>
           )}
-          {(onPresent || onPassport) && <div className="profile-menu__divider" />}
+          {(presentItems.length > 0 || onPassport) && <div className="profile-menu__divider" />}
           <button role="menuitem" onClick={() => { setOpen(false); onShareApp(); }}>
             Share the app
           </button>
@@ -1066,15 +1091,15 @@ function ShareMenu({
   );
 }
 
-// Deliberately short: Settings and Log out. Change password lives inside
-// Settings (Account group), not here.
+// The avatar menu is the settings hub: three focused screens instead of one
+// long page. Change password lives inside Account, not here.
 function AccountMenu({
   email,
-  onSettings,
+  onOpenSection,
   onLogout,
 }: {
   email: string;
-  onSettings: () => void;
+  onOpenSection: (section: SettingsSection) => void;
   onLogout: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1115,9 +1140,21 @@ function AccountMenu({
           <div className="profile-menu__divider" />
           <button
             role="menuitem"
-            onClick={() => { setOpen(false); onSettings(); }}
+            onClick={() => { setOpen(false); onOpenSection('account'); }}
           >
-            Settings
+            Account
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenSection('notifications'); }}
+          >
+            Notifications
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenSection('family'); }}
+          >
+            Family
           </button>
           <div className="profile-menu__divider" />
           <button
@@ -4021,6 +4058,7 @@ function PassportTabSection({
   onNotice: (msg: string) => void;
   onError: (msg: string | null) => void;
 }) {
+  const navigate = useNavigate(); // "View passport" opens the real public page in-app
   const [expiry, setExpiry] = useState('30d');
   const [busy, setBusy] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -4150,6 +4188,12 @@ function PassportTabSection({
         </button>
         <button className="btn" onClick={handleCopy}>
           {copied ? 'Copied!' : 'Copy link'}
+        </button>
+        <button
+          className="btn"
+          onClick={() => navigate(`/p/${pet.passportToken}?preview=1`)}
+        >
+          View passport
         </button>
       </div>
 
@@ -4413,7 +4457,17 @@ export function PresentScreen({
 // (REMINDER_DAY_OPTIONS lives in productConfig.ts — must match the server's
 // accepted values.)
 
+// One component, three focused screens (avatar menu → Account /
+// Notifications / Family) — the shared load/persist machinery stays in one
+// place, each screen renders only its groups.
+const SETTINGS_TITLES: Record<SettingsSection, string> = {
+  account: 'Account',
+  notifications: 'Notifications',
+  family: 'Family',
+};
+
 function SettingsScreen({
+  section,
   email,
   limits,
   theme,
@@ -4424,6 +4478,7 @@ function SettingsScreen({
   onError,
   onAccountDeleted,
 }: {
+  section: SettingsSection;
   email: string;
   limits: Limits;
   theme: Theme;
@@ -4495,12 +4550,18 @@ function SettingsScreen({
     }
   }
 
+  // Only the Notifications screen reads settings.json — the other two render
+  // immediately.
   useEffect(() => {
+    if (section !== 'notifications') {
+      setLoading(false);
+      return;
+    }
     getSettings()
       .then((s) => setSettings({ ...DEFAULT_SETTINGS, ...s, email: s.email || email }))
       .catch(() => setSettings({ ...DEFAULT_SETTINGS, email }))
       .finally(() => setLoading(false));
-  }, [email]);
+  }, [email, section]);
 
   // Auto-saves toggles/day-chips as they're changed — no explicit Save button.
   // Debounced so rapid-fire clicks (e.g. several day chips in a row) coalesce into one request.
@@ -4543,7 +4604,7 @@ function SettingsScreen({
         >
           ‹ Back
         </button>
-        <span className="screen-nav__title">Settings</span>
+        <span className="screen-nav__title">{SETTINGS_TITLES[section]}</span>
       </nav>
       <div className="screen-view__body">
         {loading ? (
@@ -4551,6 +4612,8 @@ function SettingsScreen({
         ) : (
           <div className="form settings-form">
 
+            {section === 'account' && (
+            <>
             <fieldset className="settings-group">
               <legend>Account</legend>
               <div className="settings-row">
@@ -4632,8 +4695,6 @@ function SettingsScreen({
               </div>
             </fieldset>
 
-            <FamilySection onError={onError} />
-
             <fieldset className="settings-group">
               <legend>Appearance</legend>
               <div className="settings-row">
@@ -4656,7 +4717,12 @@ function SettingsScreen({
                 </div>
               </div>
             </fieldset>
+            </>
+            )}
 
+            {section === 'family' && <FamilySection onError={onError} />}
+
+            {section === 'notifications' && (
             <fieldset className="settings-group">
               <legend>Email</legend>
               <div className="settings-row">
@@ -4773,7 +4839,9 @@ function SettingsScreen({
               <PushRow onError={onError} />
               </div>
             </fieldset>
+            )}
 
+            {section === 'account' && (
             <fieldset className="settings-group settings-group--danger">
               <legend>Danger zone</legend>
               {!deleteOpen ? (
@@ -4831,6 +4899,7 @@ function SettingsScreen({
                 </form>
               )}
             </fieldset>
+            )}
 
             <div className="actions">
               <button className="btn btn--primary" type="button" onClick={onDone} disabled={busy}>
@@ -4940,6 +5009,7 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null); // invite token
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null); // member sub
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null); // invite token
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteNote, setInviteNote] = useState<string | null>(null);
@@ -5083,42 +5153,73 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
       </p>
 
       {household.members.map((m) => (
-        <div className="settings-row" key={m.sub}>
-          <span className="settings-row__label">
-            {m.email}
-            <span className="subtle settings-row__sub">Member since {formatDate(m.joinedAt.slice(0, 10))}</span>
-          </span>
-          {confirmRemove === m.sub ? (
-            <span className="actions">
-              <button className="btn btn--danger" type="button" disabled={busy} onClick={() => void handleRemove(m.sub)}>
-                Remove
-              </button>
-              <button className="btn" type="button" disabled={busy} onClick={() => setConfirmRemove(null)}>
-                Keep
-              </button>
+        <div key={m.sub}>
+          <div className="settings-row">
+            <span className="settings-row__label">
+              {m.email}
+              <span className="subtle settings-row__sub">Member since {formatDate(m.joinedAt.slice(0, 10))}</span>
             </span>
-          ) : (
-            <button className="btn btn--link btn--danger" type="button" onClick={() => setConfirmRemove(m.sub)}>
-              Remove…
-            </button>
+            {confirmRemove !== m.sub && (
+              <button className="btn btn--link btn--danger" type="button" onClick={() => { hapticWarning(); setConfirmRemove(m.sub); }}>
+                Remove…
+              </button>
+            )}
+          </div>
+          {confirmRemove === m.sub && (
+            <div className="family-confirm" role="alert">
+              <p>
+                Remove <strong>{m.email}</strong> from your family? Their access to
+                your pets ends immediately.
+              </p>
+              <span className="actions">
+                <button className="btn" type="button" disabled={busy} onClick={() => setConfirmRemove(null)}>
+                  Keep
+                </button>
+                <button className="btn btn--danger" type="button" disabled={busy} onClick={() => void handleRemove(m.sub)}>
+                  Yes, remove
+                </button>
+              </span>
+            </div>
           )}
         </div>
       ))}
 
       {household.invites.map((i) => (
-        <div className="settings-row" key={i.token}>
-          <span className="settings-row__label">
-            {i.sentTo ? `Invite sent to ${i.sentTo}` : 'Invite link (pending)'}
-            <span className="subtle settings-row__sub">Expires {formatDate(i.expiresAt.slice(0, 10))}</span>
-          </span>
-          <span className="actions">
-            <button className="btn" type="button" onClick={() => void handleShare(i.url, i.token)}>
-              {copied === i.token ? 'Copied!' : 'Share'}
-            </button>
-            <button className="btn btn--link btn--danger" type="button" disabled={busy} onClick={() => void handleRevoke(i.token)}>
-              Revoke
-            </button>
-          </span>
+        <div key={i.token}>
+          <div className="settings-row">
+            <span className="settings-row__label">
+              {i.sentTo ? `Invite sent to ${i.sentTo}` : 'Invite link (pending)'}
+              <span className="subtle settings-row__sub">Expires {formatDate(i.expiresAt.slice(0, 10))}</span>
+            </span>
+            <span className="actions">
+              <button className="btn" type="button" onClick={() => void handleShare(i.url, i.token)}>
+                {copied === i.token ? 'Copied!' : 'Share'}
+              </button>
+              {confirmRevoke !== i.token && (
+                <button className="btn btn--link btn--danger" type="button" disabled={busy} onClick={() => { hapticWarning(); setConfirmRevoke(i.token); }}>
+                  Revoke…
+                </button>
+              )}
+            </span>
+          </div>
+          {confirmRevoke === i.token && (
+            <div className="family-confirm" role="alert">
+              <p>Revoke this invite? The link stops working immediately.</p>
+              <span className="actions">
+                <button className="btn" type="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>
+                  Keep
+                </button>
+                <button
+                  className="btn btn--danger"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { setConfirmRevoke(null); void handleRevoke(i.token); }}
+                >
+                  Yes, revoke
+                </button>
+              </span>
+            </div>
+          )}
         </div>
       ))}
 

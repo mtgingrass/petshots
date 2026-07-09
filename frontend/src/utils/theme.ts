@@ -14,7 +14,7 @@ export function applyTheme(theme: Theme) {
   // Keep the browser chrome (iOS status bar, Android toolbar) matching the app bg.
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute('content', theme === 'light' ? '#f4f5fa' : '#0f1220');
+    ?.setAttribute('content', theme === 'light' ? '#f4f5fa' : '#0a0a0c');
   // Native iOS status bar follows the theme too (no-op on web).
   void syncStatusBar(theme);
 }

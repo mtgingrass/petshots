@@ -145,11 +145,30 @@ export function PassportPage() {
   const hasProfile = pet.breed || pet.dob || pet.weight || pet.allergies || pet.behavior ||
     pet.vetName || pet.emergencyContact || pet.microchip || pet.fixed !== undefined || pet.notes;
 
+  // ?preview=1 = the owner peeking from inside the app (Passport screen's
+  // "View passport") — same page the public sees, plus a way back.
+  const isPreview = new URLSearchParams(window.location.search).get('preview') === '1';
+
   return (
     <div className="page passport-page">
       <header className="passport-page__header">
-        <a className="wordmark" href="/">🐾 Petshots</a>
+        {isPreview ? (
+          <button
+            className="btn btn--link"
+            type="button"
+            onClick={() => window.history.back()}
+          >
+            ‹ Back to your dashboard
+          </button>
+        ) : (
+          <a className="wordmark" href="/">🐾 Petshots</a>
+        )}
       </header>
+      {isPreview && (
+        <p className="daily-past-note" role="status">
+          Preview — this is exactly what anyone with the link sees.
+        </p>
+      )}
 
       <div className="pet-detail__hero">
         <span className="avatar" style={{ width: 72, height: 72 }} aria-hidden="true">

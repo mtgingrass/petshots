@@ -60,10 +60,10 @@ if (email && password) {
     await page.waitForTimeout(500);
     await shot(`dashboard-${theme}`);
 
-    // Open settings via the header avatar menu (Settings left the tab bar
-    // in the Bevel-style header redesign).
+    // Settings split into Account / Notifications / Family under the avatar
+    // menu — Account is the representative screenshot (plan card + danger zone).
     await page.click('.profile-menu__trigger');
-    await page.click('.profile-menu__dropdown button:has-text("Settings")');
+    await page.click('.profile-menu__dropdown button:has-text("Account")');
     await page.waitForTimeout(800);
     await shot(`settings-${theme}`);
     await page.click('.tabbar__item:has-text("Pets")');

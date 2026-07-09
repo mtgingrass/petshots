@@ -138,10 +138,10 @@ for (const theme of ['dark', 'light']) {
   await page.waitForTimeout(800);
 }
 
-// Settings hint line (one theme is enough). Settings opens from the header
-// avatar menu (it left the tab bar in the Bevel-style header redesign).
+// The med-reminders hint line lives on the Notifications screen now
+// (avatar menu → Notifications).
 await page.click('.profile-menu__trigger');
-await page.click('.profile-menu__dropdown button:has-text("Settings")');
+await page.click('.profile-menu__dropdown button:has-text("Notifications")');
 await page.waitForTimeout(1000);
 await shot('settings-meds-hint');
 

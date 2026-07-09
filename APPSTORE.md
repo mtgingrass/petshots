@@ -6,7 +6,8 @@ do that first (Developer Program → APNs key → archive/upload). This file
 covers the store listing and review.
 
 Screenshots: captured at 1320×2868 (6.9", the only required size) in
-`~/Desktop/petshots-appstore/`. Retake any time with
+`docs/launch-assets/appstore-6.9/` (gitignored; see the README there).
+Retake any time with
 `node frontend/scripts/appstore-shots.mjs demo@petshots.app <password>`
 (plus `appstore-retake.mjs` for the overview/public-passport variants).
 The app is iPhone-only (`TARGETED_DEVICE_FAMILY = 1`), so no iPad
@@ -166,7 +167,7 @@ The app is NOT a remote website in a shell — cite these if asked:
 3. TestFlight: install on your phone, verify login, camera scan, push,
    passport QR, offline mode. Add Darya as internal tester.
 4. Fill App Information + Pricing (Free) + App Privacy from this file.
-5. Version page: upload the 5 screenshots from ~/Desktop/petshots-appstore,
+5. Version page: upload the 5 screenshots from docs/launch-assets/appstore-6.9,
    paste promotional text/description/keywords, set the URLs, add the
    demo account + review notes, enable manual release.
 6. Submit for review. First reviews typically take 24–48h.

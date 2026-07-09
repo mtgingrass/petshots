@@ -44,7 +44,7 @@ export function TabBar({
 }) {
   return (
     <nav className="tabbar" aria-label="Main">
-      {(['daily', 'pets'] as const).map((tab) => (
+      {(['pets', 'daily'] as const).map((tab) => (
         <button
           key={tab}
           type="button"

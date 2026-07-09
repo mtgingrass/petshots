@@ -87,7 +87,10 @@ await shot('app-dashboard');
 
 // 2. Pet detail — Luna shows all four badge states in one records list
 await page.click(`.pet-pin:has-text("Luna")`);
-await page.waitForTimeout(1500);
+await page.waitForTimeout(1000);
+// Daily is the landing segment now — hop to Records for this shot.
+await page.click('.tab-bar__tab:has-text("Records")');
+await page.waitForTimeout(1000);
 await shot('app-pet-records');
 
 // 3. Public passport page (no login — new context to prove it)

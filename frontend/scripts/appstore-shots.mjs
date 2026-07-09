@@ -46,6 +46,8 @@ await shot('01-pets-overview');
 // Pet detail — Records (Luna has the full badge variety)
 await page.click('.pet-pin:has-text("Luna")');
 await page.waitForSelector('.tab-bar__tab', { timeout: 10000 });
+// Daily is the landing segment now — hop to Records for this shot.
+await page.click('.tab-bar__tab:has-text("Records")');
 await page.waitForTimeout(1500); // docs + thumbnails
 await shot('02-records');
 

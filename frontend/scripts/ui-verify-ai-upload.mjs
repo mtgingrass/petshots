@@ -97,6 +97,9 @@ for (const theme of ['dark', 'light']) {
   await page.waitForTimeout(500);
   await page.click('text=Biscuit');
   await page.waitForTimeout(1000);
+  // Daily is the landing segment now — the upload input lives on Records.
+  await page.click('.tab-bar__tab:has-text("Records")');
+  await page.waitForTimeout(600);
   await shot(`ai-records-${theme}`); // empty state (dark) / 3 records (light)
 
   // Feed the hidden file input directly (the + Add record button opens it).

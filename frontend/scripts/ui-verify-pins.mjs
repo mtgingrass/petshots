@@ -31,6 +31,9 @@ await shot('overview-pins');
 // Open Ollie (has photo + both doc states)
 await page.click('.pet-pin:has-text("Ollie")');
 await page.waitForSelector('.pet-detail__hero', { timeout: 10000 });
+// Daily is the landing segment now — hop to Records for this shot.
+await page.click('.tab-bar__tab:has-text("Records")');
+await page.waitForTimeout(600);
 await shot('detail-records');
 
 // Lightbox

@@ -3282,8 +3282,22 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+/* Pet-detail Daily tab: date-nav + swipe wrapper around the daily card. */
+.pet-daily {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
   /* Horizontal swipes step days; keep vertical scrolling native. */
   touch-action: pan-y;
+}
+
+/* Inside pet detail the date title sits under the segmented control —
+   section-header size, not the screen-level large title. */
+.pet-daily .date-nav__btn {
+  font-size: 1.35rem;
+  margin: 0.25rem 0 0;
 }
 
 /* ---------- Daily date navigation (dropdown title + past-day note) ---------- */

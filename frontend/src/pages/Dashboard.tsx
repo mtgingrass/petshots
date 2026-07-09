@@ -296,17 +296,10 @@ export function Dashboard() {
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
-  // The app opens on the Daily tab wherever the bottom tab bar exists (phones
-  // + native); desktop has no Daily tab, so it keeps the pets overview.
-  const [dashView, setDashView] = useState<DashView>(() =>
-    document.documentElement.dataset.native === 'true' ||
-    window.matchMedia('(max-width: 767px)').matches
-      ? { type: 'daily' }
-      : { type: 'overview' },
-  );
-  // Which day the Daily tab shows. Swipe right / the date dropdown walk it
-  // back through the retained history; re-entering the tab resets to today.
-  const [dailyDate, setDailyDate] = useState<string>(localToday);
+  // The app opens on the pets overview (the pinned circles) everywhere;
+  // the every-day surface is one tap away (Daily tab, or a pet's Daily —
+  // its landing segment).
+  const [dashView, setDashView] = useState<DashView>({ type: 'overview' });
   const [allDocs, setAllDocs] = useState<Record<string, Doc[]>>({});
   const [allMeds, setAllMeds] = useState<Record<string, Med[]>>({});
   const [allDocsLoading, setAllDocsLoading] = useState(false);
@@ -370,14 +363,11 @@ export function Dashboard() {
     if (tab === activeTab) {
       // iOS convention: re-tapping the active tab pops its stack to the root.
       if (tab === 'pets' && dashView.type !== 'overview') backToOverview();
-      else if (tab === 'daily' && dailyDate !== localToday()) setDailyDate(localToday());
       return;
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
-    else if (tab === 'daily') {
-      setDailyDate(localToday());
-      setDashView({ type: 'daily' });
-    } else setDashView({ type: 'settings' });
+    else if (tab === 'daily') setDashView({ type: 'daily' });
+    else setDashView({ type: 'settings' });
   }
 
   // ---- screen transition direction (iOS push/pop) ----
@@ -662,7 +652,6 @@ export function Dashboard() {
               <AccountMenu
                 email={email ?? ''}
                 onSettings={openSettings}
-                onChangePassword={() => setDashView({ type: 'change-password' })}
                 onLogout={handleLogout}
               />
             </div>
@@ -760,10 +749,6 @@ export function Dashboard() {
         ) : dashView.type === 'daily' ? (
           <DailyAllScreen
             pets={pets}
-            date={dailyDate}
-            historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
-            onDateChange={setDailyDate}
-            onNotice={showNotice}
             onError={setError}
             onOpenPet={(petId) => setDashView({ type: 'detail', petId, tab: 'daily' })}
             onMedsChanged={(petId, meds) =>
@@ -960,15 +945,15 @@ export function Dashboard() {
 
 // ---- account menu (header avatar chip) ----
 
+// Deliberately short: Settings and Log out. Change password lives inside
+// Settings (Account group), not here.
 function AccountMenu({
   email,
   onSettings,
-  onChangePassword,
   onLogout,
 }: {
   email: string;
   onSettings: () => void;
-  onChangePassword: () => void;
   onLogout: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1012,12 +997,6 @@ function AccountMenu({
             onClick={() => { setOpen(false); onSettings(); }}
           >
             Settings
-          </button>
-          <button
-            role="menuitem"
-            onClick={() => { setOpen(false); onChangePassword(); }}
-          >
-            Change password
           </button>
           <div className="profile-menu__divider" />
           <button
@@ -1502,9 +1481,9 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  // Records is the landing tab; the every-day surface moved to the app-level
-  // Daily tab in the bottom bar, so opening a specific pet means its records.
-  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
+  // Daily is the landing tab — opening a pet means today's care first;
+  // records are one segment away.
+  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'daily');
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -1562,16 +1541,16 @@ function PetDetailScreen({
 
         <div className="tab-bar">
           <button
-            className={`tab-bar__tab${tab === 'records' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => { hapticTap(); setTab('records'); }}
-          >
-            Records
-          </button>
-          <button
             className={`tab-bar__tab${tab === 'daily' ? ' tab-bar__tab--active' : ''}`}
             onClick={() => { hapticTap(); setTab('daily'); }}
           >
             Daily
+          </button>
+          <button
+            className={`tab-bar__tab${tab === 'records' ? ' tab-bar__tab--active' : ''}`}
+            onClick={() => { hapticTap(); setTab('records'); }}
+          >
+            Records
           </button>
           <button
             className={`tab-bar__tab${tab === 'meds' ? ' tab-bar__tab--active' : ''}`}
@@ -1613,7 +1592,13 @@ function PetDetailScreen({
             />
           </>
         ) : tab === 'daily' ? (
-          <DailySection petId={pet.id} onError={onError} onMedsChanged={onMedsChanged} />
+          <PetDailyHistory
+            petId={pet.id}
+            historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
+            onError={onError}
+            onNotice={onNotice}
+            onMedsChanged={onMedsChanged}
+          />
         ) : tab === 'meds' ? (
           <MedsSection
             petId={pet.id}
@@ -1662,11 +1647,9 @@ function whoAndWhen(by: string, at: string): string {
   return `${name} · ${time}`;
 }
 
-// The bottom tab bar's "Daily" tab: every pet's checklist + mood in one
-// screen — open the app, check off breakfast, done. Reuses DailySection
-// per pet (it's self-contained: loads its own data by petId). The title is a
-// date dropdown, and horizontal swipes step a day back/forward, so past days
-// are one gesture away (read-only; depth is plan-gated via historyDays).
+// Date dropdown title for the pet-detail Daily tab ("Today, July 9 ▾"):
+// quick list of the retained two weeks, plus a date field for the deeper
+// paid-plan history.
 function DateNav({
   date,
   historyDays,
@@ -1759,27 +1742,24 @@ function DateNav({
   );
 }
 
-function DailyAllScreen({
-  pets,
-  date,
+// Pet-detail Daily tab: the date dropdown + swipe-back history wrapped
+// around the self-contained DailySection. Swipe right = one day back,
+// swipe left = forward; past days render read-only; depth is plan-gated
+// (free 2 weeks, paid a year — server-enforced too).
+function PetDailyHistory({
+  petId,
   historyDays,
-  onDateChange,
-  onNotice,
   onError,
-  onOpenPet,
+  onNotice,
   onMedsChanged,
-  onAddPet,
 }: {
-  pets: Pet[];
-  date: string;
+  petId: string;
   historyDays: number;
-  onDateChange: (date: string) => void;
-  onNotice: (msg: string) => void;
   onError: (msg: string | null) => void;
-  onOpenPet: (petId: string) => void;
-  onMedsChanged: (petId: string, meds: Med[]) => void;
-  onAddPet: () => void;
+  onNotice: (msg: string) => void;
+  onMedsChanged: (meds: Med[]) => void;
 }) {
+  const [date, setDate] = useState<string>(localToday);
   const touchRef = useRef<{ x: number; y: number } | null>(null);
   const today = localToday();
   const minDate = addDays(today, -(historyDays - 1));
@@ -1796,23 +1776,12 @@ function DailyAllScreen({
       return;
     }
     hapticTap();
-    onDateChange(next);
+    setDate(next);
   }
 
-  if (pets.length === 0) {
-    return (
-      <div className="empty-overview">
-        <span className="empty-state__icon" aria-hidden="true">🐾</span>
-        <p>The daily checklist starts with a pet. Add yours to get going.</p>
-        <button className="btn btn--primary" onClick={onAddPet}>
-          Add your first pet
-        </button>
-      </div>
-    );
-  }
   return (
     <div
-      className="daily-all"
+      className="pet-daily"
       onTouchStart={(e) => {
         touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       }}
@@ -1826,12 +1795,48 @@ function DailyAllScreen({
         if (Math.abs(dx) > 60 && Math.abs(dy) < 50) step(dx > 0 ? -1 : 1);
       }}
     >
-      <DateNav date={date} historyDays={historyDays} onChange={onDateChange} />
+      <DateNav date={date} historyDays={historyDays} onChange={setDate} />
       {date !== today && (
         <p className="daily-past-note" role="status">
           Viewing a past day — swipe left or tap the date to get back to today.
         </p>
       )}
+      <DailySection petId={petId} date={date} onError={onError} onMedsChanged={onMedsChanged} />
+    </div>
+  );
+}
+
+// The bottom tab bar's "Daily" tab: every pet's TODAY checklist + mood in
+// one screen — open the app, check off breakfast, done. Reuses DailySection
+// per pet (it's self-contained: loads its own data by petId). History
+// browsing lives on the pet-detail Daily tab, not here.
+function DailyAllScreen({
+  pets,
+  onError,
+  onOpenPet,
+  onMedsChanged,
+  onAddPet,
+}: {
+  pets: Pet[];
+  onError: (msg: string | null) => void;
+  onOpenPet: (petId: string) => void;
+  onMedsChanged: (petId: string, meds: Med[]) => void;
+  onAddPet: () => void;
+}) {
+  if (pets.length === 0) {
+    return (
+      <div className="empty-overview">
+        <span className="empty-state__icon" aria-hidden="true">🐾</span>
+        <p>The daily checklist starts with a pet. Add yours to get going.</p>
+        <button className="btn btn--primary" onClick={onAddPet}>
+          Add your first pet
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="daily-all">
+      <h1 className="large-title">Daily</h1>
       {pets.map((pet) => (
         <section key={pet.id} className="daily-all__pet">
           <button
@@ -1845,7 +1850,6 @@ function DailyAllScreen({
           </button>
           <DailySection
             petId={pet.id}
-            date={date}
             onError={onError}
             onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
           />

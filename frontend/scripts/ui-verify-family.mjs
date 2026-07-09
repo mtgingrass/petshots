@@ -139,6 +139,8 @@ async function main() {
 
   console.log('\n[4] member: household pet restrictions in UI');
   await memberPage.click('text=Maple');
+  // Daily is the landing segment now — ✎ Edit lives on the Records tab.
+  await memberPage.click('.tab-bar__tab:has-text("Records")');
   await memberPage.waitForSelector('.pet-detail__hero', { timeout: 15000 });
   await memberPage.click('button:has-text("✎ Edit")');
   const deleteVisible = await memberPage

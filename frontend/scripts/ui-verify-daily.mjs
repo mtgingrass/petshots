@@ -105,14 +105,13 @@ async function main() {
   check(await page.locator('.daily-item--done', { hasText: 'Breakfast' }).isVisible().catch(() => false), 'check persists across reload');
   check(await page.locator('.daily__mood-btn--active').isVisible().catch(() => false), 'mood persists across reload');
 
-  // ---- date navigation on the app-level Daily tab ----
-  await page.click('.tabbar__item:has-text("Daily")');
+  // ---- date navigation on the pet-detail Daily tab (we're already on it) ----
   await page.waitForSelector('.date-nav__btn', { timeout: 15000 });
   check((await page.locator('.date-nav__btn').textContent()).startsWith('Today,'), 'date nav shows Today');
 
   // Swipe right (synthetic touch — React reads touches/changedTouches) → yesterday.
   const swipe = (fromX, toX) => page.evaluate(([x1, x2]) => {
-    const el = document.querySelector('.daily-all');
+    const el = document.querySelector('.pet-daily');
     const mk = (x) => new Touch({ identifier: 1, target: el, clientX: x, clientY: 300 });
     el.dispatchEvent(new TouchEvent('touchstart', { touches: [mk(x1)], changedTouches: [mk(x1)], bubbles: true }));
     el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [mk(x2)], bubbles: true }));

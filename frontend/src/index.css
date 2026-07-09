@@ -3386,6 +3386,31 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   cursor: default;
 }
 
+/* One-time swipe-discovery tip on the pet-detail Daily tab. */
+.daily-swipe-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.5rem 0.6rem 0.5rem 0.75rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.daily-swipe-hint__close {
+  background: none;
+  border: none;
+  color: var(--subtle);
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
 .daily-past-note {
   margin: -0.5rem 0 0.25rem;
   padding: 0.5rem 0.75rem;

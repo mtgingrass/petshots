@@ -1760,9 +1760,20 @@ function PetDailyHistory({
   onMedsChanged: (meds: Med[]) => void;
 }) {
   const [date, setDate] = useState<string>(localToday);
-  const touchRef = useRef<{ x: number; y: number } | null>(null);
+  // One-time discoverability tip — touch devices only (desktop can't swipe),
+  // gone forever once dismissed or once the user actually swipes.
+  const [showHint, setShowHint] = useState(
+    () =>
+      window.matchMedia('(pointer: coarse)').matches &&
+      !localStorage.getItem('petshots.dailySwipeHint'),
+  );
   const today = localToday();
   const minDate = addDays(today, -(historyDays - 1));
+
+  function dismissHint() {
+    localStorage.setItem('petshots.dailySwipeHint', '1');
+    setShowHint(false);
+  }
 
   function step(delta: -1 | 1) {
     const next = addDays(date, delta);
@@ -1775,27 +1786,55 @@ function PetDailyHistory({
       );
       return;
     }
+    if (showHint) dismissHint(); // they found the gesture — tip served its purpose
     hapticTap();
     setDate(next);
   }
 
+  // Whole-screen swipe while this tab is mounted: listeners live on document
+  // so the gesture works from the hero, the header, anywhere — not just the
+  // list card. Unmounting (switching segment/screen) removes them. No dep
+  // array on purpose: re-registering keeps the closures fresh per render.
+  useEffect(() => {
+    let start: { x: number; y: number } | null = null;
+    const onStart = (e: TouchEvent) => {
+      // Ignore multi-touch (pinch on the photo lightbox etc.).
+      start = e.touches.length === 1
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        : null;
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (!start) return;
+      const dx = e.changedTouches[0].clientX - start.x;
+      const dy = e.changedTouches[0].clientY - start.y;
+      start = null;
+      // Horizontal swipe: right = back a day, left = forward.
+      if (Math.abs(dx) > 60 && Math.abs(dy) < 50) step(dx > 0 ? -1 : 1);
+    };
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchend', onEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onStart);
+      document.removeEventListener('touchend', onEnd);
+    };
+  });
+
   return (
-    <div
-      className="pet-daily"
-      onTouchStart={(e) => {
-        touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      }}
-      onTouchEnd={(e) => {
-        const start = touchRef.current;
-        touchRef.current = null;
-        if (!start) return;
-        const dx = e.changedTouches[0].clientX - start.x;
-        const dy = e.changedTouches[0].clientY - start.y;
-        // Horizontal swipe: right = back a day, left = forward.
-        if (Math.abs(dx) > 60 && Math.abs(dy) < 50) step(dx > 0 ? -1 : 1);
-      }}
-    >
+    <div className="pet-daily">
       <DateNav date={date} historyDays={historyDays} onChange={setDate} />
+      {showHint && (
+        <p className="daily-swipe-hint" role="status">
+          <span>Tip: swipe right anywhere on this screen to see yesterday — swipe left to come back.</span>
+          <button
+            type="button"
+            className="daily-swipe-hint__close"
+            aria-label="Dismiss tip"
+            onClick={dismissHint}
+          >
+            ✕
+          </button>
+        </p>
+      )}
       {date !== today && (
         <p className="daily-past-note" role="status">
           Viewing a past day — swipe left or tap the date to get back to today.

@@ -3995,7 +3995,9 @@ function SettingsScreen({
                 </span>
               </div>
               <div className="plan-actions">
-                {limits.plan === 'free' ? (
+                {isNative ? (
+                  <p className="subtle plan-fine-print">Manage your plan at petshots.app.</p>
+                ) : limits.plan === 'free' ? (
                   <>
                     <button
                       type="button"

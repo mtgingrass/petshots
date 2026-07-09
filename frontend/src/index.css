@@ -24,6 +24,15 @@
   --radius: 14px;
   --radius-sm: 10px;
 
+  /* iOS-native chrome tokens (added in the native-feel pass). */
+  --accent: var(--primary);
+  --tabbar-h: 49px; /* bottom tab bar content height, excludes safe-area inset */
+  --hairline: 0.5px; /* iOS hairline separators; 1px fallback below for 1x screens */
+  --separator: var(--border);
+  /* Active chip of the segmented control — must sit LIGHTER than
+     --panel-raised in dark mode (iOS dark segmented controls do). */
+  --segment-active: #363d69;
+
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color: var(--text);
   background: var(--bg);
@@ -53,15 +62,48 @@
   --overdue: #dc2626;
   --overdue-text: #b91c1c;
   --ok-text: #15803d;
+  --segment-active: #ffffff;
 }
 
 * {
   box-sizing: border-box;
 }
 
+/* Sub-pixel hairlines render as nothing on non-retina screens. */
+@media (resolution < 2dppx) {
+  :root {
+    --hairline: 1px;
+  }
+}
+
+/* iOS body type is 17pt; everything downstream is rem-based so this scales
+   the whole app on phones. Desktop keeps the browser-default 16px. */
+@media (max-width: 767px) {
+  :root {
+    font-size: 17px;
+  }
+}
+
+html {
+  /* Native apps don't flash gray rectangles on tap — we style :active instead. */
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  /* No rubber-band past the page background (the app chrome isn't a web page). */
+  overscroll-behavior-y: none;
+}
+
+/* Controls shouldn't select their label text on long-press. */
+button,
+.btn,
+.tab-bar__tab,
+.pet-pin,
+.tabbar__item {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 #root {
@@ -93,6 +135,7 @@ h1 {
   margin: 0;
   font-size: clamp(1.6rem, 6vw, 2.25rem);
   line-height: 1.15;
+  letter-spacing: -0.02em; /* iOS display-type tightening */
 }
 
 h2 {
@@ -128,7 +171,8 @@ a {
   z-index: 10;
   background: var(--header-bg);
   backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: var(--hairline) solid var(--separator);
   /* Keep sticky headers clear of the iOS status bar — matters in the native
      app and the installed (standalone) PWA; 0 everywhere else. */
   padding-top: env(safe-area-inset-top, 0px);
@@ -157,6 +201,14 @@ a {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+/* Short labels ("Log in", "Get started") must never wrap mid-label; tighter
+   padding keeps all of them on one row at phone widths with 17px type. */
+.site-nav .btn {
+  white-space: nowrap;
+  padding-left: 0.85rem;
+  padding-right: 0.85rem;
 }
 
 /* ---------- Landing ---------- */
@@ -209,8 +261,9 @@ a {
 }
 
 .steps li {
+  /* Inset-group card (borderless fill, like the app's iOS lists). */
   background: var(--panel);
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 12px;
   padding: 1rem 1rem 1rem 3.1rem;
   position: relative;
@@ -388,14 +441,14 @@ a {
   gap: 0.4rem;
   padding: 0.65rem 1.15rem;
   min-height: 44px;
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
   font-size: 1rem;
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, transform 0.08s;
+  transition: background 0.15s, border-color 0.15s, transform 0.08s, opacity 0.08s;
 }
 
 .btn:hover {
@@ -403,7 +456,9 @@ a {
 }
 
 .btn:active:not(:disabled) {
+  /* iOS buttons dim on press, in addition to the slight squeeze. */
   transform: scale(0.97);
+  opacity: 0.8;
 }
 
 .btn--primary {
@@ -830,9 +885,17 @@ a {
 }
 
 .screen-nav__back {
-  font-size: 0.95rem;
+  font-size: 1rem;
   padding: 0.25rem 0;
   z-index: 1;
+  /* iOS back affordance: tinted, no underline. */
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.dashboard-header__back {
+  color: var(--accent);
+  text-decoration: none;
 }
 
 .screen-nav__title {
@@ -1184,7 +1247,7 @@ a {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--separator);
 }
 
 /* The tappable row body: dot + label + expiry, opens the detail view. */
@@ -1390,25 +1453,28 @@ a {
 
 /* ---------- Tab bar ---------- */
 
+/* iOS segmented control: pill track, raised active chip (no underline). */
 .tab-bar {
   display: flex;
-  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  background: var(--panel-raised);
+  border-radius: 10px;
+  padding: 2px;
   margin-bottom: 1.25rem;
-  gap: 0;
 }
 
 .tab-bar__tab {
   flex: 1;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  padding: 0.65rem 1rem;
-  font-size: 0.95rem;
+  border-radius: 8px;
+  padding: 0.45rem 0.25rem;
+  font-size: 0.78rem;
   font-weight: 500;
   color: var(--subtle);
+  white-space: nowrap;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 
 .tab-bar__tab:hover {
@@ -1417,8 +1483,25 @@ a {
 
 .tab-bar__tab--active {
   color: var(--text);
-  border-bottom-color: var(--primary);
+  background: var(--segment-active);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   font-weight: 600;
+}
+
+[data-theme="light"] .tab-bar__tab--active {
+  box-shadow: 0 1px 4px rgba(17, 24, 39, 0.14);
+}
+
+/* Passport tab: small "has a live link" indicator (a ✓ suffix overflows
+   five segments on a 320px phone). */
+.tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 0.25rem;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: middle;
 }
 
 /* ---------- Profile view ---------- */
@@ -1460,7 +1543,7 @@ a {
   align-items: flex-start;
   gap: 1rem;
   padding: 0.55rem 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--separator);
 }
 
 .profile-field:last-child {
@@ -1785,6 +1868,12 @@ a {
   gap: 0.75rem;
 }
 
+.passport-doc-item + .passport-doc-item {
+  border-top: var(--hairline) solid var(--separator);
+  padding-top: 0.6rem;
+  margin-top: 0.6rem;
+}
+
 .passport-doc-info {
   display: flex;
   align-items: flex-start;
@@ -1859,10 +1948,12 @@ a {
   padding: 1rem 0;
 }
 
+/* iOS inset-grouped card: filled, borderless, hairline rows. */
 .settings-group {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1rem 1rem 1.1rem;
+  border: none;
+  background: var(--panel-raised);
+  border-radius: 12px;
+  padding: 0.75rem 1rem 0.9rem;
   margin: 0;
 }
 
@@ -1911,7 +2002,7 @@ a {
 
 .settings-group__divider {
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: var(--hairline) solid var(--separator);
   margin: 0.75rem 0 0;
 }
 
@@ -1928,7 +2019,7 @@ a {
 }
 
 .settings-group--danger {
-  border-color: color-mix(in srgb, var(--error) 55%, var(--border));
+  background: color-mix(in srgb, var(--error) 7%, var(--panel-raised));
 }
 
 .settings-group--danger legend {
@@ -2056,19 +2147,12 @@ a {
 
 /* ---------- Medications ---------- */
 
-/* Four tabs (Records/Meds/Profile/Share) need tighter padding to fit a
-   320px-wide phone without overflowing. */
-.tab-bar__tab {
-  padding-left: 0.5rem;
-  padding-right: 0.5rem;
-}
-
 .med-item {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.85rem 0.25rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--separator);
 }
 
 .med-item:last-child {
@@ -2649,7 +2733,7 @@ a {
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--separator);
 }
 
 .daily-item:last-of-type {
@@ -2944,4 +3028,309 @@ a {
 .family-invite input {
   flex: 1;
   min-width: 12rem;
+}
+
+/* ---------- Bottom tab bar (mobile web + native iOS) ---------- */
+/* Hidden by default; shown under 768px and always in the native shell
+   (html[data-native], set by initNative — covers native iPad widths). */
+
+.tabbar {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  background: var(--header-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: var(--hairline) solid var(--separator);
+  /* Notch-less devices report env() = 0 — keep a minimum breathing room. */
+  padding: 0 0 max(env(safe-area-inset-bottom), 8px);
+}
+
+.tabbar__item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: var(--tabbar-h);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--subtle);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.tabbar__item svg {
+  width: 26px;
+  height: 26px;
+}
+
+.tabbar__label {
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.tabbar__item--active {
+  color: var(--accent);
+}
+
+.tabbar__item:active {
+  opacity: 0.7;
+}
+
+/* Desktop shows the header back button on pushed views; mobile shows the
+   wordmark there instead (the bottom Pets tab is the way back). */
+.dashboard-header__wordmark-mobile {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .tabbar {
+    display: flex;
+  }
+  .dashboard-header__back {
+    display: none;
+  }
+  .dashboard-header__wordmark-mobile {
+    display: inline;
+  }
+  /* Tab-root screens (Settings) show an iOS large title instead of the
+     centered mini-title + back button, and lose the desktop panel frame so
+     the inset-grouped cards sit directly on the page background. */
+  .screen-view--root {
+    background: none;
+    border: none;
+  }
+  .screen-view--root .screen-nav {
+    border-bottom: none;
+    padding: 0.85rem 0 0;
+    min-height: 0;
+  }
+  .screen-view--root .screen-nav__title {
+    position: static;
+    transform: none;
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .screen-view--root .screen-view__body {
+    padding: 1rem 0;
+  }
+  .page--tabbed {
+    padding-bottom: calc(var(--tabbar-h) + max(env(safe-area-inset-bottom), 8px) + 1.25rem);
+  }
+  /* The tab bar replaces the header profile menu and the dashboard footer;
+     Settings (a tab root) loses its desktop-style back button. */
+  .dashboard-header .profile-menu {
+    display: none;
+  }
+  .page--tabbed ~ .site-footer {
+    display: none;
+  }
+  .screen-nav__back--desktop {
+    display: none;
+  }
+}
+
+html[data-native="true"] .tabbar {
+  display: flex;
+}
+html[data-native="true"] .page--tabbed {
+  padding-bottom: calc(var(--tabbar-h) + max(env(safe-area-inset-bottom), 8px) + 1.25rem);
+}
+html[data-native="true"] .dashboard-header .profile-menu {
+  display: none;
+}
+html[data-native="true"] .page--tabbed ~ .site-footer {
+  display: none;
+}
+html[data-native="true"] .screen-nav__back--desktop {
+  display: none;
+}
+html[data-native="true"] .dashboard-header__back {
+  display: none;
+}
+html[data-native="true"] .dashboard-header__wordmark-mobile {
+  display: inline;
+}
+html[data-native="true"] .screen-view--root {
+  background: none;
+  border: none;
+}
+html[data-native="true"] .screen-view--root .screen-nav {
+  border-bottom: none;
+  padding: 0.85rem 0 0;
+  min-height: 0;
+}
+html[data-native="true"] .screen-view--root .screen-nav__title {
+  position: static;
+  transform: none;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+html[data-native="true"] .screen-view--root .screen-view__body {
+  padding: 1rem 0;
+}
+
+/* ---------- Combined Daily view (the Daily tab) ---------- */
+
+.daily-all {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.daily-all__pet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.daily-all__pet + .daily-all__pet {
+  margin-top: 1rem;
+}
+
+.daily-all__pet-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0.1rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 1.15rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+
+.daily-all__pet-header:active {
+  opacity: 0.7;
+}
+
+.daily-all__pet-name {
+  flex: 1;
+}
+
+.daily-all__chevron {
+  color: var(--subtle);
+  font-size: 1.3rem;
+  font-weight: 400;
+}
+
+/* ---------- iOS large titles ---------- */
+
+.large-title {
+  margin: 0.25rem 0 1rem;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+/* ---------- Screen transitions (iOS push/pop/sheet) ---------- */
+/* Keyed remount in Dashboard re-triggers these on navigation. A subtle
+   slide+fade (not a full-width slide — that needs a two-pane stack).
+   The global prefers-reduced-motion block zeroes all animations. */
+
+.view-anim[data-nav='push'] {
+  animation: nav-push 0.28s cubic-bezier(0.32, 0.72, 0.35, 1);
+}
+
+.view-anim[data-nav='pop'] {
+  animation: nav-pop 0.28s cubic-bezier(0.32, 0.72, 0.35, 1);
+}
+
+@keyframes nav-push {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes nav-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Sheet-presented screens (create/edit forms): slide up with a grabber. */
+.screen-view--sheet {
+  position: relative;
+  animation: sheet-up 0.32s cubic-bezier(0.32, 0.72, 0.35, 1);
+}
+
+.screen-view--sheet::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--separator);
+}
+
+.screen-view--sheet .screen-nav {
+  padding-top: 1.15rem;
+}
+
+@keyframes sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(40px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- Settings: tappable navigation rows (iOS style) ---------- */
+
+.settings-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.55rem 0.1rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 1rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.settings-nav-row:active {
+  opacity: 0.6;
+}
+
+.settings-nav-row__chevron {
+  color: var(--subtle);
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.settings-nav-row--danger {
+  color: var(--error);
+  font-weight: 600;
 }

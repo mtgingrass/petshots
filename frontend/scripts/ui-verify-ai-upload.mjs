@@ -119,7 +119,8 @@ for (const theme of ['dark', 'light']) {
     await page.waitForTimeout(800);
   }
 
-  await page.click('.dashboard-header__back');
+  // Phone viewport: the header back is hidden — the Pets tab pops to overview.
+  await page.click('.tabbar__item:has-text("Pets")');
   await page.waitForTimeout(800);
 }
 

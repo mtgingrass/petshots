@@ -58,7 +58,7 @@ import {
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
-import { isNative, hapticTap, hapticSuccess } from '../native';
+import { isNative, hapticTap, hapticSuccess, hapticWarning } from '../native';
 import {
   computeNotices,
   isDismissed,
@@ -75,6 +75,7 @@ import {
   VACCINE_CADENCES,
 } from '../productConfig';
 import { SiteFooter } from '../components/SiteFooter';
+import { TabBar, type MainTab } from '../components/TabBar';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 const ALLOWED_EXTS = ['pdf', ...IMAGE_EXTS];
@@ -231,7 +232,9 @@ type DashView =
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
-  | { type: 'settings' };
+  | { type: 'settings' }
+  // Combined every-pet daily view — the bottom tab bar's "Daily" tab.
+  | { type: 'daily' };
 
 type EditView =
   | { type: 'list' }
@@ -295,6 +298,79 @@ export function Dashboard() {
       }
     };
   }, []);
+
+  // ---- bottom tab bar (mobile + native; desktop keeps the ProfileMenu) ----
+  // Which tab owns the current view. The pets tab is a whole stack
+  // (overview → detail → edit screens); daily and settings are single screens.
+  const activeTab: MainTab =
+    dashView.type === 'settings' || dashView.type === 'change-password'
+      ? 'settings'
+      : dashView.type === 'daily'
+        ? 'daily'
+        : 'pets';
+
+  // Remember where the pets stack was so switching Daily → Pets restores the
+  // pet you were looking at (per-tab stacks, like a real iOS tab bar).
+  const lastPetsViewRef = useRef<DashView>({ type: 'overview' });
+  if (activeTab === 'pets') lastPetsViewRef.current = dashView;
+
+  function handleTabSelect(tab: MainTab) {
+    if (tab === activeTab) {
+      // iOS convention: re-tapping the active tab pops its stack to the root.
+      if (tab === 'pets' && dashView.type !== 'overview') backToOverview();
+      else if (tab === 'settings' && dashView.type !== 'settings')
+        setDashView({ type: 'settings' });
+      return;
+    }
+    if (tab === 'pets') setDashView(lastPetsViewRef.current);
+    else if (tab === 'daily') setDashView({ type: 'daily' });
+    else setDashView({ type: 'settings' });
+  }
+
+  // ---- screen transition direction (iOS push/pop) ----
+  // Depth 0 = tab roots, 1 = pushed screens, 2 = nested. Sheet-presented
+  // screens animate themselves (.screen-view--sheet slides up), so the
+  // horizontal push is suppressed for them. The dir lives in a ref keyed by
+  // the view so mid-animation re-renders can't cancel it.
+  const isSheetView =
+    dashView.type === 'add-pet' ||
+    dashView.type === 'edit-pet' ||
+    dashView.type === 'change-password' ||
+    (dashView.type === 'detail' &&
+      (editView.type === 'edit' ||
+        editView.type === 'edit-profile' ||
+        editView.type === 'review-extraction'));
+  const viewDepth =
+    dashView.type === 'overview' || dashView.type === 'daily' || dashView.type === 'settings'
+      ? 0
+      : dashView.type === 'edit-pet' ||
+          dashView.type === 'change-password' ||
+          (dashView.type === 'detail' && editView.type !== 'list')
+        ? 2
+        : 1;
+  const viewKey =
+    pets === null
+      ? 'loading'
+      : dashView.type === 'detail'
+        ? `detail:${dashView.petId}:${editView.type}`
+        : dashView.type;
+  const animRef = useRef<{ key: string; dir: 'push' | 'pop' | 'none'; depth: number }>({
+    key: viewKey,
+    dir: 'none',
+    depth: viewDepth,
+  });
+  if (animRef.current.key !== viewKey) {
+    animRef.current = {
+      key: viewKey,
+      dir:
+        isSheetView || viewDepth === animRef.current.depth
+          ? 'none'
+          : viewDepth > animRef.current.depth
+            ? 'push'
+            : 'pop',
+      depth: viewDepth,
+    };
+  }
 
   // Pet currently being viewed in detail/edit-pet screens.
   const detailPet =
@@ -426,6 +502,7 @@ export function Dashboard() {
     if (!pets) return;
     const pet = pets.find((p) => p.id === petId);
     if (!pet) return;
+    hapticWarning();
     const docs = allDocs[petId] ?? [];
 
     // Commit any previously pending delete before starting a new one.
@@ -465,20 +542,31 @@ export function Dashboard() {
 
   return (
     <>
-      <main className="page">
+      <main className="page page--tabbed">
         <header className="dashboard-header">
-          {dashView.type === 'overview' ? (
+          {/* Tab roots (overview, daily, settings) show the wordmark; screens
+              pushed within the pets stack show a back button instead. */}
+          {dashView.type === 'overview' ||
+          dashView.type === 'daily' ||
+          dashView.type === 'settings' ||
+          dashView.type === 'change-password' ? (
             <Link className="wordmark" to="/">🐾 Petshots</Link>
           ) : (
-            <button className="btn btn--link dashboard-header__back" onClick={backToOverview}>
-              ← Dashboard
-            </button>
+            <>
+              {/* On mobile the bottom Pets tab is the way back, so the header
+                  back button is desktop-only; the wordmark shows instead. */}
+              <Link className="wordmark dashboard-header__wordmark-mobile" to="/">🐾 Petshots</Link>
+              <button className="btn btn--link dashboard-header__back" onClick={backToOverview}>
+                ‹ Pets
+              </button>
+            </>
           )}
           <div className="dashboard-header__right">
             <button
               className="btn btn--icon theme-btn"
               aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               onClick={() => {
+                hapticTap();
                 const next: Theme = theme === 'dark' ? 'light' : 'dark';
                 applyTheme(next);
                 setTheme(next);
@@ -508,17 +596,20 @@ export function Dashboard() {
           </p>
         )}
 
+        {/* Keyed wrapper: remounting on view change re-triggers the CSS
+            push/pop animation (see .view-anim in index.css). */}
+        <div className="view-anim" data-nav={animRef.current.dir} key={viewKey}>
         {pets === null ? (
           <DashboardSkeleton />
         ) : dashView.type === 'add-pet' ? (
-          <div className="screen-view">
+          <div className="screen-view screen-view--sheet">
             <nav className="screen-nav">
               <button
                 className="screen-nav__back btn btn--link"
                 type="button"
                 onClick={backToOverview}
               >
-                ← Dashboard
+                ‹ Pets
               </button>
               <span className="screen-nav__title">New Pet</span>
             </nav>
@@ -536,14 +627,14 @@ export function Dashboard() {
             </div>
           </div>
         ) : dashView.type === 'edit-pet' && detailPet ? (
-          <div className="screen-view">
+          <div className="screen-view screen-view--sheet">
             <nav className="screen-nav">
               <button
                 className="screen-nav__back btn btn--link"
                 type="button"
                 onClick={() => setDashView({ type: 'detail', petId: detailPet.id })}
               >
-                ← {detailPet.name}
+                ‹ {detailPet.name}
               </button>
               <span className="screen-nav__title">Edit Pet</span>
             </nav>
@@ -569,14 +660,26 @@ export function Dashboard() {
             theme={theme}
             onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
             onDone={backToOverview}
+            onChangePassword={() => setDashView({ type: 'change-password' })}
+            onLogout={handleLogout}
             onError={setError}
             onAccountDeleted={() => { logout(); navigate('/'); }}
           />
         ) : dashView.type === 'change-password' ? (
           <ChangePasswordScreen
-            onDone={() => { backToOverview(); showNotice('Password changed'); }}
-            onCancel={backToOverview}
+            onDone={() => { setDashView({ type: 'settings' }); showNotice('Password changed'); }}
+            onCancel={() => setDashView({ type: 'settings' })}
             onError={setError}
+          />
+        ) : dashView.type === 'daily' ? (
+          <DailyAllScreen
+            pets={pets}
+            onError={setError}
+            onOpenPet={(petId) => setDashView({ type: 'detail', petId, tab: 'daily' })}
+            onMedsChanged={(petId, meds) =>
+              setAllMeds((prev) => ({ ...prev, [petId]: meds }))
+            }
+            onAddPet={() => setDashView({ type: 'add-pet' })}
           />
         ) : dashView.type === 'detail' && detailPet ? (
           editView.type === 'edit' ? (
@@ -677,7 +780,7 @@ export function Dashboard() {
               allMeds={allMeds}
               onNavigateToPet={(petId, tab) => setDashView({ type: 'detail', petId, tab })}
             />
-            <h2 className="section-title">Your Pets</h2>
+            <h1 className="large-title">Pets</h1>
             <div className="pet-pins">
               {pets.map((pet) => (
                 <PetPin
@@ -741,7 +844,9 @@ export function Dashboard() {
             />
           </>
         )}
+        </div>
       </main>
+      {pets !== null && <TabBar active={activeTab} onSelect={handleTabSelect} />}
       <SiteFooter />
       {presenting && detailPet && detailDocs.length > 0 && (
         <PresentScreen
@@ -1296,8 +1401,9 @@ function PetDetailScreen({
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  // Daily is the landing tab: it's the surface a household touches every day.
-  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'daily');
+  // Records is the landing tab; the every-day surface moved to the app-level
+  // Daily tab in the bottom bar, so opening a specific pet means its records.
+  const [tab, setTab] = useState<'records' | 'daily' | 'meds' | 'profile' | 'passport'>(initialTab ?? 'records');
   const [showPhoto, setShowPhoto] = useState(false);
   // Count on the Meds tab: meds needing action right now (due/overdue).
   const medsDue = trackedMeds(meds).filter(
@@ -1356,34 +1462,35 @@ function PetDetailScreen({
         <div className="tab-bar">
           <button
             className={`tab-bar__tab${tab === 'records' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('records')}
+            onClick={() => { hapticTap(); setTab('records'); }}
           >
             Records
           </button>
           <button
             className={`tab-bar__tab${tab === 'daily' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('daily')}
+            onClick={() => { hapticTap(); setTab('daily'); }}
           >
             Daily
           </button>
           <button
             className={`tab-bar__tab${tab === 'meds' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('meds')}
+            onClick={() => { hapticTap(); setTab('meds'); }}
           >
             Meds
             {medsDue > 0 && <span className="tab-badge">{medsDue}</span>}
           </button>
           <button
             className={`tab-bar__tab${tab === 'profile' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('profile')}
+            onClick={() => { hapticTap(); setTab('profile'); }}
           >
             Profile
           </button>
           <button
             className={`tab-bar__tab${tab === 'passport' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => setTab('passport')}
+            onClick={() => { hapticTap(); setTab('passport'); }}
           >
-            Passport{pet.passportToken ? ' ✓' : ''}
+            Passport
+            {pet.passportToken && <span className="tab-dot" aria-hidden="true" />}
           </button>
         </div>
 
@@ -1452,6 +1559,58 @@ function whoAndWhen(by: string, at: string): string {
   const name = by.split('@')[0];
   const time = new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return `${name} · ${time}`;
+}
+
+// The bottom tab bar's "Daily" tab: every pet's checklist + mood in one
+// screen — open the app, check off breakfast, done. Reuses DailySection
+// per pet (it's self-contained: loads its own data by petId).
+function DailyAllScreen({
+  pets,
+  onError,
+  onOpenPet,
+  onMedsChanged,
+  onAddPet,
+}: {
+  pets: Pet[];
+  onError: (msg: string | null) => void;
+  onOpenPet: (petId: string) => void;
+  onMedsChanged: (petId: string, meds: Med[]) => void;
+  onAddPet: () => void;
+}) {
+  if (pets.length === 0) {
+    return (
+      <div className="empty-overview">
+        <span className="empty-state__icon" aria-hidden="true">🐾</span>
+        <p>The daily checklist starts with a pet. Add yours to get going.</p>
+        <button className="btn btn--primary" onClick={onAddPet}>
+          Add your first pet
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="daily-all">
+      <h1 className="large-title">Daily</h1>
+      {pets.map((pet) => (
+        <section key={pet.id} className="daily-all__pet">
+          <button
+            type="button"
+            className="daily-all__pet-header"
+            onClick={() => onOpenPet(pet.id)}
+          >
+            <PetAvatar pet={pet} size={40} />
+            <span className="daily-all__pet-name">{pet.name}</span>
+            <span className="daily-all__chevron" aria-hidden="true">›</span>
+          </button>
+          <DailySection
+            petId={pet.id}
+            onError={onError}
+            onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
+          />
+        </section>
+      ))}
+    </div>
+  );
 }
 
 function DailySection({
@@ -2069,7 +2228,7 @@ function DocDetailScreen({
     <div className="screen-view">
       <nav className="screen-nav">
         <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
-          ← Records
+          ‹ Records
         </button>
         <span className="screen-nav__title">Record Details</span>
         <button className="screen-nav__action btn btn--link" type="button" onClick={onEdit}>
@@ -2159,10 +2318,10 @@ function EditDocScreen({
   }
 
   return (
-    <div className="screen-view">
+    <div className="screen-view screen-view--sheet">
       <nav className="screen-nav">
         <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
-          ← Records
+          ‹ Records
         </button>
         <span className="screen-nav__title">Edit Record</span>
       </nav>
@@ -2430,10 +2589,10 @@ function ReviewExtractionScreen({
   const isManual = vaccines.length === 0;
 
   return (
-    <div className="screen-view">
+    <div className="screen-view screen-view--sheet">
       <nav className="screen-nav">
         <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel} disabled={busy}>
-          ← Records
+          ‹ Records
         </button>
         <span className="screen-nav__title">Review &amp; Save</span>
       </nav>
@@ -3680,10 +3839,10 @@ function ProfileEditScreen({
   }
 
   return (
-    <div className="screen-view">
+    <div className="screen-view screen-view--sheet">
       <nav className="screen-nav">
         <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
-          ← {pet.name}
+          ‹ {pet.name}
         </button>
         <span className="screen-nav__title">Edit Profile</span>
       </nav>
@@ -3862,6 +4021,8 @@ function SettingsScreen({
   theme,
   onThemeChange,
   onDone,
+  onChangePassword,
+  onLogout,
   onError,
   onAccountDeleted,
 }: {
@@ -3870,6 +4031,8 @@ function SettingsScreen({
   theme: Theme;
   onThemeChange: (t: Theme) => void;
   onDone: () => void;
+  onChangePassword: () => void;
+  onLogout: () => void;
   onError: (msg: string | null) => void;
   onAccountDeleted: () => void;
 }) {
@@ -3885,6 +4048,7 @@ function SettingsScreen({
 
   async function handleDeleteAccount(e: FormEvent) {
     e.preventDefault();
+    hapticWarning();
     setDeleting(true);
     setDeleteErr(null);
     try {
@@ -3943,6 +4107,7 @@ function SettingsScreen({
   // Auto-saves toggles/day-chips as they're changed — no explicit Save button.
   // Debounced so rapid-fire clicks (e.g. several day chips in a row) coalesce into one request.
   function persist(next: UserSettings) {
+    hapticTap(); // every persist() call is a direct toggle/chip tap
     setSettings(next);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveStatus('saving');
@@ -3969,10 +4134,15 @@ function SettingsScreen({
   }
 
   return (
-    <div className="screen-view">
+    <div className="screen-view screen-view--root">
       <nav className="screen-nav">
-        <button className="screen-nav__back btn btn--link" type="button" onClick={onDone}>
-          ← Dashboard
+        {/* Settings is a tab-bar root on mobile — the back button is desktop-only. */}
+        <button
+          className="screen-nav__back screen-nav__back--desktop btn btn--link"
+          type="button"
+          onClick={onDone}
+        >
+          ‹ Pets
         </button>
         <span className="screen-nav__title">Settings</span>
       </nav>
@@ -3981,6 +4151,29 @@ function SettingsScreen({
           <p className="subtle">Loading…</p>
         ) : (
           <div className="form settings-form">
+
+            <fieldset className="settings-group">
+              <legend>Account</legend>
+              <div className="settings-row">
+                <span className="settings-row__label">
+                  Signed in as
+                  <span className="subtle settings-row__sub">{email}</span>
+                </span>
+              </div>
+              <div className="settings-group__divider" />
+              <button type="button" className="settings-nav-row" onClick={onChangePassword}>
+                <span>Change password</span>
+                <span className="settings-nav-row__chevron" aria-hidden="true">›</span>
+              </button>
+              <div className="settings-group__divider" />
+              <button
+                type="button"
+                className="settings-nav-row settings-nav-row--danger"
+                onClick={onLogout}
+              >
+                <span>Log out</span>
+              </button>
+            </fieldset>
 
             <fieldset className="settings-group">
               <legend>Plan</legend>
@@ -4587,10 +4780,10 @@ function ChangePasswordScreen({
   }
 
   return (
-    <div className="screen-view">
+    <div className="screen-view screen-view--sheet">
       <nav className="screen-nav">
         <button className="screen-nav__back btn btn--link" type="button" onClick={onCancel}>
-          ← Dashboard
+          ‹ Settings
         </button>
         <span className="screen-nav__title">Change Password</span>
       </nav>

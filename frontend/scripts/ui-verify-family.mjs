@@ -92,11 +92,11 @@ async function main() {
   const ownerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const ownerPage = await ownerCtx.newPage();
   await uiLogin(ownerPage, ownerEmail, ownerPass);
-  await ownerPage.click('.profile-menu__trigger');
-  await ownerPage.click('.profile-menu__dropdown >> text=Settings');
+  // Phone viewport → Settings lives on the bottom tab bar, not the profile menu.
+  await ownerPage.click('.tabbar__item:has-text("Settings")');
   await ownerPage.waitForSelector('legend:has-text("Family")', { timeout: 15000 });
   check(true, 'Family card renders in Settings');
-  await ownerPage.click('button:has-text("Invite a family member")');
+  await ownerPage.click('button:has-text("Create invite link")');
   await ownerPage.waitForSelector('text=Invite link (pending)', { timeout: 15000 });
   check(true, 'invite created and listed as pending');
   await ownerPage.screenshot({ path: `${OUT}/owner-family-card.png`, fullPage: true });

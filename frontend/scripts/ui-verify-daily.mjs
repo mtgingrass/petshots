@@ -60,9 +60,11 @@ async function main() {
   // Click the pet PIN, not `text=Clover` — the med-due notice strip also
   // contains the pet name and deep-links to the Meds tab.
   await page.click('.pet-pin:has-text("Clover")');
-  // Daily is the DEFAULT tab — no tab click needed.
+  // Records is the default tab since the bottom-bar redesign — the app-level
+  // Daily tab owns the every-day surface; click into the pet's Daily tab.
+  await page.click('.tab-bar__tab:has-text("Daily")');
   await page.waitForSelector('.daily', { timeout: 15000 });
-  check(true, 'pet detail lands on the Daily tab');
+  check(true, 'pet Daily tab renders');
   check(await page.locator('.daily-item__name', { hasText: 'Breakfast' }).isVisible(), 'Breakfast preset renders');
   check(await page.locator('.daily-item__name', { hasText: 'Walk' }).first().isVisible(), 'Walk preset renders');
   check(await page.locator('.daily-item__name', { hasText: 'Heartworm' }).isVisible(), 'due med appears on the list');
@@ -90,6 +92,7 @@ async function main() {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
   await page.click('.pet-pin:has-text("Clover")');
+  await page.click('.tab-bar__tab:has-text("Daily")'); // detail defaults to Records now
   await page.waitForSelector('.daily', { timeout: 15000 });
   check(await page.locator('.daily-item--done', { hasText: 'Breakfast' }).isVisible().catch(() => false), 'check persists across reload');
   check(await page.locator('.daily__mood-btn--active').isVisible().catch(() => false), 'mood persists across reload');

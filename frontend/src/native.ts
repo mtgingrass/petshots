@@ -15,6 +15,9 @@ export const isNative = Capacitor.isNativePlatform();
 // Called once from main.tsx before render.
 export function initNative(theme: Theme) {
   if (!isNative) return;
+  // CSS hook: lets native-only rules (bottom tab bar on an iPad-width
+  // viewport, hidden desktop chrome) apply regardless of media queries.
+  document.documentElement.dataset.native = 'true';
   void syncStatusBar(theme);
   void SplashScreen.hide();
   // Tapping a reminder notification deep-links into the app. The url comes
@@ -46,4 +49,10 @@ export function hapticTap() {
 export function hapticSuccess() {
   if (!isNative) return;
   void Haptics.notification({ type: NotificationType.Success }).catch(() => {});
+}
+
+// Warning feedback for destructive confirms (delete pet/account).
+export function hapticWarning() {
+  if (!isNative) return;
+  void Haptics.notification({ type: NotificationType.Warning }).catch(() => {});
 }

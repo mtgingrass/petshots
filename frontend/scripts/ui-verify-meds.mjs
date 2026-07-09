@@ -69,13 +69,14 @@ const dog = (await api(token, 'POST', '/pets', { name: 'Biscuit', species: 'dog'
 const cat = (await api(token, 'POST', '/pets', { name: 'Ziggy', species: 'cat' })).body.pet;
 await api(token, 'PUT', `/pets/${dog.id}/meds`, {
   meds: [
+    // Only 3 of the free tier's 4 med slots: the preset-chip step below needs
+    // a free slot, or the chips are replaced by the at-limit message.
     { name: 'Heartworm prevention', interval: 1, unit: 'month', nextDue: ymd(-3), remindersEnabled: true, lastGiven: ymd(-33) },
     { name: 'Bravecto', interval: 12, unit: 'week', nextDue: ymd(0), remindersEnabled: true, lastGiven: ymd(-84) },
-    { name: 'Flea & tick prevention', interval: 1, unit: 'month', nextDue: ymd(20), remindersEnabled: true, lastGiven: ymd(-10) },
     { name: 'Insulin', interval: 1, unit: 'day', nextDue: ymd(1), remindersEnabled: false },
   ],
 });
-console.log('seeded Biscuit (4 meds) + Ziggy (none)');
+console.log('seeded Biscuit (3 meds) + Ziggy (none)');
 
 // ---- walk UI ----
 const browser = await chromium.launch();
@@ -119,8 +120,9 @@ for (const theme of ['dark', 'light']) {
   await shot(`meds-menu-${theme}`);
   await page.keyboard.press('Escape');
 
-  // Ziggy: empty state with preset chips.
-  await page.click('.dashboard-header__back');
+  // Ziggy: empty state with preset chips. Phone viewport: the header back is
+  // hidden — the Pets tab pops to overview.
+  await page.click('.tabbar__item:has-text("Pets")');
   await page.waitForTimeout(800);
   await page.click('text=Ziggy');
   await page.waitForTimeout(1000);
@@ -128,14 +130,12 @@ for (const theme of ['dark', 'light']) {
   await page.waitForTimeout(800);
   await shot(`meds-empty-${theme}`);
 
-  await page.click('.dashboard-header__back');
+  await page.click('.tabbar__item:has-text("Pets")');
   await page.waitForTimeout(800);
 }
 
-// Settings hint line (one theme is enough).
-await page.click('.profile-menu__trigger');
-await page.waitForTimeout(300);
-await page.click('text=Settings');
+// Settings hint line (one theme is enough). Phone viewport → bottom tab bar.
+await page.click('.tabbar__item:has-text("Settings")');
 await page.waitForTimeout(1000);
 await shot('settings-meds-hint');
 

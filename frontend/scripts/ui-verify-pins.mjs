@@ -42,8 +42,8 @@ await page.waitForTimeout(400);
 await page.click('.tab-bar__tab:has-text("Profile")');
 await shot('detail-profile');
 
-// Share tab (no stray affordances)
-await page.click('.tab-bar__tab:has-text("Share")');
+// Passport tab (no stray affordances)
+await page.click('.tab-bar__tab:has-text("Passport")');
 await shot('detail-share');
 
 await browser.close();

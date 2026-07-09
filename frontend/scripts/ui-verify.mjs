@@ -57,13 +57,12 @@ if (email && password) {
     await page.waitForTimeout(1200);
     await shot(`dashboard-${theme}`);
 
-    // Open settings via profile menu.
-    await page.click('.profile-menu__trigger');
-    await page.waitForTimeout(300);
-    await page.click('text=Settings');
+    // Open settings via the bottom tab bar (phone viewport — the profile
+    // menu is desktop-only since the native-feel redesign).
+    await page.click('.tabbar__item:has-text("Settings")');
     await page.waitForTimeout(800);
     await shot(`settings-${theme}`);
-    await page.click('.dashboard-header__back');
+    await page.click('.tabbar__item:has-text("Pets")');
     await page.waitForTimeout(500);
   }
 }

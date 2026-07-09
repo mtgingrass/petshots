@@ -203,6 +203,10 @@ export class ApiStack extends cdk.Stack {
         APP_URL: 'https://petshots.app',
         // Web Push VAPID keypair (private half) — public half ships in the SPA.
         VAPID_SECRET_NAME: 'petshots/vapid',
+        // APNs token-auth config for the native iOS app. The secret does not
+        // exist yet (needs Mark's Apple Developer account — see IOS.md); the
+        // Lambda skips iOS pushes gracefully until it does.
+        APNS_SECRET_NAME: 'petshots/apns',
       },
       bundling: { externalModules: [], minify: true, target: 'node20' },
     });
@@ -211,6 +215,7 @@ export class ApiStack extends cdk.Stack {
         actions: ['secretsmanager:GetSecretValue'],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/vapid-*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/apns-*`,
         ],
       }),
     );

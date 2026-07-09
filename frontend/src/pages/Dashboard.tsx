@@ -58,6 +58,7 @@ import {
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
+import { isNative, hapticTap, hapticSuccess } from '../native';
 import {
   computeNotices,
   isDismissed,
@@ -1487,10 +1488,14 @@ function DailySection({
     if (!state) return;
     const next = value ?? state.checks[item.id] === undefined;
     onError(null);
+    if (next) hapticTap(); // native: light tap on check-off / count-up
     try {
       const res = await checkDaily(petId, today, item.id, next);
       setState((s) => (s ? { ...s, checks: res.checks } : s));
-      if (item.med) refreshMeds();
+      if (item.med) {
+        if (next) hapticSuccess();
+        refreshMeds();
+      }
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not update the list');
       load();
@@ -1499,6 +1504,7 @@ function DailySection({
 
   async function pickMood(value: number) {
     onError(null);
+    hapticTap();
     try {
       const res = await setDailyMood(petId, today, value);
       setState((s) => (s ? { ...s, mood: res.mood } : s));
@@ -2797,6 +2803,7 @@ function MedsSection({
   }
 
   function handleMarkGiven(med: Med) {
+    hapticSuccess();
     const today = todayYMD();
     const nextDue = addInterval(today, med.interval, med.unit);
     const next = (meds ?? []).map((m) =>
@@ -4312,7 +4319,9 @@ function PushRow({ onError }: { onError: (msg: string | null) => void }) {
           Push notifications
           <span className="subtle settings-row__sub">
             {state === 'denied'
-              ? 'Blocked in your browser — allow notifications for petshots.app in browser settings, then reload.'
+              ? isNative
+                ? 'Blocked — allow notifications for Petshots in iOS Settings, then come back here.'
+                : 'Blocked in your browser — allow notifications for petshots.app in browser settings, then reload.'
               : 'Reminders as notifications on this device, alongside email'}
           </span>
         </span>

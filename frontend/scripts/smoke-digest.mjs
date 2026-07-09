@@ -82,10 +82,15 @@ async function main() {
   await api(token, 'PUT', '/settings', { email, remindersEnabled: true, reminderDays: [7], weeklyDigest: true });
   // A reminder-enabled med due today makes a reminder email compose, and a
   // fake push subscription makes the dry run report a would-push for it.
+  // Bravecto's nextDue must be TODAY IN UTC, not local: ReminderFn computes
+  // due-day math on the UTC calendar, so seeding the local date after 8 PM
+  // Eastern lands the med at day -1 (matches no trigger) and the reminder
+  // email — and its would-push — never composes. (Bit us, 2026-07-08 ~10 PM.)
+  const utcToday = new Date().toISOString().slice(0, 10);
   await api(token, 'PUT', `/pets/${pet.id}/meds`, {
     meds: [
       { name: 'Insulin', interval: 1, unit: 'day', nextDue: today, remindersEnabled: false },
-      { name: 'Bravecto', interval: 12, unit: 'week', nextDue: today, remindersEnabled: true },
+      { name: 'Bravecto', interval: 12, unit: 'week', nextDue: utcToday, remindersEnabled: true },
     ],
   });
   await api(token, 'POST', '/push/subscribe', {

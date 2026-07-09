@@ -12,6 +12,14 @@
     "smoke": "node scripts/smoke-api.mjs"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/ios": "^8.4.1",
+    "@capacitor/push-notifications": "^8.1.1",
+    "@capacitor/splash-screen": "^8.0.1",
+    "@capacitor/status-bar": "^8.0.2",
     "amazon-cognito-identity-js": "^6.3.18",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",

@@ -36,6 +36,10 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item.
 
 - [ ] **Reminder email polish + expiry-date nudge** (2026-07-03) — deep links, pet name in subject, nudge at upload when no expiry set ("we can't remind you without a date"), and decide whether reminders should be ON by default for new signups (currently off = zero touchpoints unless they find Settings).
 
+- [ ] **iOS app: Apple-side manual steps** (2026-07-08, s20 shipped the app) — everything is in `IOS.md`, in order: simulator runtime ✅ (downloaded s20), run on a real iPhone w/ free Apple ID, **Apple Developer Program $99/yr** (recurring), APNs key → `petshots/apns` secret (+$0.40/mo; the code path is already deployed and skipping gracefully until the secret exists), TestFlight, App Store review assets. One-time: `sudo xcode-select -s /Applications/Xcode.app` (needs password).
+
+- [ ] **iOS app v2 ideas** (2026-07-08) — Face ID/biometric app lock (`capacitor-native-biometric`); universal links so `/p/{token}` + `/join/{token}` open the installed app (apple-app-site-association + Associated Domains); home-screen widget for the founder moment (needs a native WidgetKit extension); "scan record" App Shortcut.
+
 - [ ] **Family mode v2** (2026-07-08, s19 shipped v1) — deliberately deferred: (a) ~~merge/transfer picker~~ **KILLED per Mark 2026-07-08** ("disregard completely"); (b) member passport creation; (c) per-member notification preferences; (d) meds whole-list PUT is last-write-wins if two family members edit simultaneously (rare, accepted in v1 — noted in code; daily.json got conditional writes, meds could adopt the same).
 
 - [ ] **Daily-history reports** (2026-07-08, s19 started collecting the data) — Mark's idea: "what did you feed your pet the last week, because you said he was feeling slow most of this week." Every pet now accumulates `daily-archive/{YYYY-MM}.json` (check-offs + mood per day, who + when); nothing reads it yet. Build: trends view (mood over time, missed feedings), maybe AI-written weekly summary via Bedrock. The active `daily.json` keeps 14 days; archives are append-only and complete.

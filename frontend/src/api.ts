@@ -142,6 +142,15 @@ export function unsubscribePush(endpoint: string): Promise<void> {
   return request('POST', '/push/unsubscribe', { endpoint });
 }
 
+// Native iOS app: an APNs device token instead of a web push subscription.
+export function subscribeApnsPush(token: string): Promise<{ ok: true }> {
+  return request('POST', '/push/subscribe', { platform: 'ios', token });
+}
+
+export function unsubscribeApnsPush(token: string): Promise<void> {
+  return request('POST', '/push/unsubscribe', { token });
+}
+
 // ---- public roadmap ----
 
 export interface RoadmapItem {

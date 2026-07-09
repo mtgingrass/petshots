@@ -5,13 +5,17 @@ import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './auth/AuthContext'
 import { applyTheme, getSavedTheme } from './utils/theme'
+import { initNative, isNative } from './native'
 
 // Apply saved theme before first paint to avoid flash.
 applyTheme(getSavedTheme());
+initNative(getSavedTheme());
 
 // PWA: offline fallback + install support. Prod only — a worker on
 // localhost:5173 would cache dev-server output and confuse hot reload.
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+// Skipped in the native iOS app: the bundle is served locally (already
+// offline-capable) and WKWebView doesn't run service workers for app content.
+if (import.meta.env.PROD && !isNative && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     void navigator.serviceWorker.register('/sw.js').then(async () => {
       // The worker doesn't control this very first page load, so its

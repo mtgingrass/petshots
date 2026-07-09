@@ -129,6 +129,9 @@ a {
   background: var(--header-bg);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
+  /* Keep sticky headers clear of the iOS status bar — matters in the native
+     app and the installed (standalone) PWA; 0 everywhere else. */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .site-header__inner {
@@ -1011,6 +1014,8 @@ a {
   flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
   padding: 0.75rem 0;
+  /* iOS status bar clearance (native app + standalone PWA); 0 elsewhere. */
+  padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
   margin-bottom: 1.25rem;
 }
 

@@ -379,6 +379,14 @@ async function main() {
   check(r.status === 400, 'non-push-service endpoint rejected (SSRF guard)');
   r = await api(token, 'POST', '/push/unsubscribe', { endpoint: fakeSub.endpoint });
   check(r.status === 204, 'unsubscribe removes it');
+  // Native iOS shape: an APNs device token (hex) instead of a web endpoint.
+  const fakeApnsToken = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+  r = await api(token, 'POST', '/push/subscribe', { platform: 'ios', token: fakeApnsToken });
+  check(r.status === 200, 'APNs token subscription stored (native iOS app)');
+  r = await api(token, 'POST', '/push/subscribe', { platform: 'ios', token: 'not-hex!!' });
+  check(r.status === 400, 'malformed APNs token rejected');
+  r = await api(token, 'POST', '/push/unsubscribe', { token: fakeApnsToken });
+  check(r.status === 204, 'APNs unsubscribe removes it');
 
   console.log('\n[9] DELETE pet removes it and its docs');
   del = await api(token, 'DELETE', `/pets/${petId}`);

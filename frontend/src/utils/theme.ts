@@ -1,3 +1,5 @@
+import { syncStatusBar } from '../native';
+
 const KEY = 'petshots.theme';
 
 export type Theme = 'dark' | 'light';
@@ -13,4 +15,6 @@ export function applyTheme(theme: Theme) {
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute('content', theme === 'light' ? '#f4f5fa' : '#0f1220');
+  // Native iOS status bar follows the theme too (no-op on web).
+  void syncStatusBar(theme);
 }

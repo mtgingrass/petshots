@@ -2188,6 +2188,23 @@ export const handler = async (
 
       case 'POST /push/subscribe': {
         const input = JSON.parse(event.body ?? '{}');
+        // Native iOS app: an APNs device token instead of a web subscription.
+        // Tokens are hex; Apple says treat length as opaque, so allow a wide
+        // range. The reminder Lambda only ever sends these to Apple's APNs
+        // hosts, so no endpoint allowlisting applies.
+        if (input.platform === 'ios' || input.platform === 'apns') {
+          const token = typeof input.token === 'string' ? input.token.toLowerCase() : '';
+          if (!/^[0-9a-f]{32,512}$/.test(token)) {
+            return json(400, { error: 'invalid push token' });
+          }
+          const id = createHash('sha256').update(token).digest('hex').slice(0, 32);
+          await putJson(`users/${sub}/push/${id}.json`, {
+            platform: 'apns',
+            token,
+            createdAt: new Date().toISOString(),
+          });
+          return json(200, { ok: true });
+        }
         const s = input.subscription;
         const endpoint = typeof s?.endpoint === 'string' ? s.endpoint : '';
         const p256dh = typeof s?.keys?.p256dh === 'string' ? s.keys.p256dh : '';
@@ -2227,7 +2244,14 @@ export const handler = async (
 
       case 'POST /push/unsubscribe': {
         const input = JSON.parse(event.body ?? '{}');
-        const endpoint = typeof input.endpoint === 'string' ? input.endpoint : '';
+        // Web devices identify by endpoint URL, native iOS by APNs token —
+        // both were hashed the same way at subscribe time.
+        const endpoint =
+          typeof input.endpoint === 'string'
+            ? input.endpoint
+            : typeof input.token === 'string'
+              ? input.token.toLowerCase()
+              : '';
         if (!endpoint) return json(400, { error: 'endpoint required' });
         const id = createHash('sha256').update(endpoint).digest('hex').slice(0, 32);
         await s3.send(

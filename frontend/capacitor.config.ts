@@ -12,8 +12,7 @@ const config: CapacitorConfig = {
     // then matches the real site, so the Turnstile site key (domain-bound),
     // API Gateway CORS, and the uploads-bucket CORS all accept the app
     // without any server-side changes. Requests to this hostname are
-    // intercepted and served from the local bundle; the API/S3/Cognito
-    // hosts are different domains and go out over the network as usual.
+    // intercepted and served from the local bundle.
     hostname: 'petshots.app',
     iosScheme: 'https',
   },
@@ -23,6 +22,17 @@ const config: CapacitorConfig = {
     contentInset: 'never',
   },
   plugins: {
+    // Required because iosScheme is 'https': WKWebView registers Capacitor's
+    // local-asset handler for the ENTIRE https scheme (any host, not just
+    // `hostname` above), so unpatched fetch/XHR calls to the API Gateway/
+    // Cognito/S3 hosts get routed at the local bundle and fail with a
+    // generic "Load failed" TypeError. Enabling CapacitorHttp patches
+    // fetch/XHR to detect non-local-origin requests and send them through
+    // native networking instead — same-origin (petshots.app) requests are
+    // untouched and still resolve from the bundled files.
+    CapacitorHttp: {
+      enabled: true,
+    },
     PushNotifications: {
       // Show reminder notifications even while the app is foregrounded.
       presentationOptions: ['badge', 'sound', 'alert'],

@@ -79,6 +79,15 @@ After enrolling, in Xcode set the Team to the paid team. The bundle ID
 ### 4. APNs push key → Secrets Manager (unlocks iOS push)
 
 The entire code path is already live and skipping gracefully — the reminder
+> **✅ DONE 2026-07-10** — secret `petshots/apns` created (key `6479F9744G`,
+> team `8ST43C8H2Z`, scoped Sandbox & Production in Apple's portal,
+> `environment: production` for TestFlight builds). ReminderFn containers
+> recycled so the per-container "no secret" cache can't linger. The `.p8`
+> lives in Secrets Manager; the download copy was in `~/Downloads` — keep a
+> backup (Apple won't re-issue it) or delete it, Secrets Manager is the
+> operative copy. Remaining human steps: toggle push ON in the app on a
+> TestFlight build, then expect the next 9:00 UTC reminder as a notification.
+
 Lambda logs `apns secret unavailable — iOS push skipped` daily until this
 exists.
 

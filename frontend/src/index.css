@@ -1744,6 +1744,121 @@ a {
 
 /* ---------- Present mode ---------- */
 
+/* ---------- First-run onboarding tour ---------- */
+/* Full-screen swipeable cards over the dashboard; z-index above Present (200)
+   and below the lightbox (300). */
+
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: max(env(safe-area-inset-bottom), 12px);
+}
+
+.tour__skip {
+  position: absolute;
+  top: max(env(safe-area-inset-top), 10px);
+  right: 14px;
+  z-index: 2;
+  color: var(--subtle);
+}
+
+.tour__slides {
+  flex: 1;
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.tour__slides::-webkit-scrollbar {
+  display: none;
+}
+
+.tour__slide {
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 2.2rem;
+  gap: 1rem;
+}
+
+.tour__icon {
+  font-size: 4rem;
+  line-height: 1;
+  margin-bottom: 0.5rem;
+}
+
+.tour__title {
+  margin: 0;
+  font-size: 1.65rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.tour__body {
+  margin: 0;
+  color: var(--subtle);
+  line-height: 1.55;
+  max-width: 30rem;
+}
+
+.tour__push {
+  margin-top: 0.75rem;
+  min-height: 3rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tour__push-note {
+  margin: 0;
+  max-width: 26rem;
+  line-height: 1.5;
+}
+
+.tour__footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 2rem 1.25rem;
+}
+
+.tour__dots {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.tour__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.2s;
+}
+
+.tour__dot--active {
+  background: var(--accent);
+}
+
+.tour__next {
+  width: min(100%, 22rem);
+  min-height: 48px;
+}
+
+/* ---------- Present mode ---------- */
+
 .present {
   position: fixed;
   inset: 0;

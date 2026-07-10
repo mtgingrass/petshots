@@ -58,6 +58,7 @@ import {
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
+import { OnboardingTour, TOUR_DONE_KEY } from '../components/OnboardingTour';
 import { isNative, hapticTap, hapticSuccess, hapticWarning } from '../native';
 import {
   computeNotices,
@@ -343,6 +344,18 @@ export function Dashboard() {
     localStorage.setItem('petshots.presentHint', '1');
     setShowPresentHint(false);
   }
+  // First-run tour (once per device, phones + native): four cards ending in
+  // the push-notification ask — the system dialog only fires once on iOS, so
+  // the tour makes the case before spending it. navigator.webdriver skips it
+  // for every Playwright suite (fresh profiles would otherwise hit the
+  // overlay); a script that wants to SEE the tour launches chromium with
+  // --disable-blink-features=AutomationControlled.
+  const [showTour, setShowTour] = useState(
+    () =>
+      !navigator.webdriver &&
+      (isNative || window.matchMedia('(max-width: 767px)').matches) &&
+      !localStorage.getItem(TOUR_DONE_KEY),
+  );
   const showNotice = useCallback((msg: string) => {
     setNotice(msg);
     clearTimeout(noticeTimer.current);
@@ -979,6 +992,7 @@ export function Dashboard() {
           onExit={() => setPresentingPetId(null)}
         />
       )}
+      {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
     </>
   );
 }

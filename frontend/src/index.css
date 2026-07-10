@@ -558,6 +558,8 @@ a {
 }
 
 .pet-pin {
+  /* Long-press = Present at the door — suppress the iOS press callout. */
+  -webkit-touch-callout: none;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1151,6 +1153,33 @@ a {
   opacity: 0.6;
 }
 
+/* ---------- Passport tab (bottom bar): each pet's passport stacked ---------- */
+
+.passport-all {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.passport-all__pet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.passport-all__pet + .passport-all__pet {
+  margin-top: 1rem;
+}
+
+.passport-all__pet-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0.1rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
 /* Inline destructive-action confirm inside the Family screen. */
 .family-confirm {
   margin: 0.25rem 0 0.5rem;
@@ -1171,14 +1200,6 @@ a {
   justify-content: flex-end;
 }
 
-/* Share menu entries stay on one line ("▶ Present Rabies Shots"). */
-.share-menu .profile-menu__dropdown {
-  min-width: 220px;
-}
-
-.share-menu .profile-menu__dropdown button[role="menuitem"] {
-  white-space: nowrap;
-}
 
 .avatar-chip {
   display: flex;
@@ -1851,10 +1872,6 @@ a {
   text-align: right;
 }
 
-.present-trigger {
-  color: var(--primary);
-}
-
 /* ---------- Share / Passport tab ---------- */
 
 .share-tab {
@@ -1938,6 +1955,9 @@ a {
 
 .passport-page__header {
   margin-bottom: 1.5rem;
+  /* iOS status-bar clearance (native app + standalone PWA) — without it the
+     preview's back link sits under the clock and can't be tapped. */
+  padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
 }
 
 .passport-page__docs {

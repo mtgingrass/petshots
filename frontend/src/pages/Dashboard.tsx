@@ -259,8 +259,8 @@ function initialsFromEmail(email: string): string {
   return init.toUpperCase();
 }
 
-// Passport is NOT a segment — it opens from the header share menu as its
-// own pushed screen (DashView 'passport').
+// Passport is NOT a pet-detail segment — it's a bottom-bar tab listing every
+// pet's passport (DashView 'passports').
 type PetTab = 'records' | 'daily' | 'meds' | 'profile';
 
 type SettingsSection = 'account' | 'notifications' | 'family';
@@ -268,7 +268,7 @@ type SettingsSection = 'account' | 'notifications' | 'family';
 type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: PetTab }
-  | { type: 'passport'; petId: string }
+  | { type: 'passports' }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
@@ -363,7 +363,9 @@ export function Dashboard() {
       ? 'settings'
       : dashView.type === 'daily'
         ? 'daily'
-        : 'pets';
+        : dashView.type === 'passports'
+          ? 'passports'
+          : 'pets';
 
   // Remember where the pets stack was so switching Daily → Pets restores the
   // pet you were looking at (per-tab stacks, like a real iOS tab bar).
@@ -375,7 +377,11 @@ export function Dashboard() {
   const settingsReturnRef = useRef<DashView>({ type: 'overview' });
   function openSettings(section: SettingsSection) {
     settingsReturnRef.current =
-      activeTab === 'daily' ? { type: 'daily' } : { type: 'overview' };
+      activeTab === 'daily'
+        ? { type: 'daily' }
+        : activeTab === 'passports'
+          ? { type: 'passports' }
+          : { type: 'overview' };
     setDashView({ type: 'settings', section });
   }
 
@@ -387,6 +393,7 @@ export function Dashboard() {
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
     else if (tab === 'daily') setDashView({ type: 'daily' });
+    else if (tab === 'passports') setDashView({ type: 'passports' });
     else setDashView({ type: 'settings', section: 'account' });
   }
 
@@ -404,11 +411,13 @@ export function Dashboard() {
         editView.type === 'edit-profile' ||
         editView.type === 'review-extraction'));
   const viewDepth =
-    dashView.type === 'overview' || dashView.type === 'daily' || dashView.type === 'settings'
+    dashView.type === 'overview' ||
+    dashView.type === 'daily' ||
+    dashView.type === 'passports' ||
+    dashView.type === 'settings'
       ? 0
       : dashView.type === 'edit-pet' ||
           dashView.type === 'change-password' ||
-          dashView.type === 'passport' || // pushed from pet detail
           (dashView.type === 'detail' && editView.type !== 'list')
         ? 2
         : 1;
@@ -417,9 +426,7 @@ export function Dashboard() {
       ? 'loading'
       : dashView.type === 'detail'
         ? `detail:${dashView.petId}:${editView.type}`
-        : dashView.type === 'passport'
-          ? `passport:${dashView.petId}`
-          : dashView.type;
+        : dashView.type;
   const animRef = useRef<{ key: string; dir: 'push' | 'pop' | 'none'; depth: number }>({
     key: viewKey,
     dir: 'none',
@@ -438,9 +445,9 @@ export function Dashboard() {
     };
   }
 
-  // Pet currently being viewed in detail/edit-pet/passport screens.
+  // Pet currently being viewed in detail/edit-pet screens.
   const detailPet =
-    dashView.type === 'detail' || dashView.type === 'edit-pet' || dashView.type === 'passport'
+    dashView.type === 'detail' || dashView.type === 'edit-pet'
       ? (pets?.find((p) => p.id === dashView.petId) ?? null)
       : null;
 
@@ -579,8 +586,12 @@ export function Dashboard() {
         // user cancelled the sheet — nothing to do
       }
     } else {
-      await navigator.clipboard.writeText(data.url);
-      showNotice('Link copied');
+      try {
+        await navigator.clipboard.writeText(data.url);
+        showNotice('Link copied');
+      } catch {
+        showNotice('Share petshots.app with a friend');
+      }
     }
   }
 
@@ -673,24 +684,18 @@ export function Dashboard() {
               {theme === 'dark' ? '☀️' : '🌙'}
             </button>
             <div className="hdr-pill">
-              <ShareMenu
-                onShareApp={() => void handleShareApp()}
-                presentItems={
-                  detailPet
-                    ? detailDocs.length > 0
-                      ? [{ petId: detailPet.id, label: '▶ Present Rabies Shots' }]
-                      : []
-                    : (pets ?? [])
-                        .filter((p) => (allDocs[p.id]?.length ?? 0) > 0)
-                        .map((p) => ({ petId: p.id, label: `▶ Present — ${p.name}` }))
-                }
-                onPresent={setPresentingPetId}
-                onPassport={
-                  detailPet && dashView.type !== 'passport'
-                    ? () => setDashView({ type: 'passport', petId: detailPet.id })
-                    : null
-                }
-              />
+              <button
+                type="button"
+                className="share-btn"
+                aria-label="Share Petshots"
+                onClick={() => void handleShareApp()}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="M8 6.5 12 3l4 3.5" />
+                  <path d="M6 10H5.5A1.5 1.5 0 0 0 4 11.5v8A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 18.5 10H18" />
+                </svg>
+              </button>
               <AccountMenu
                 email={email ?? ''}
                 onOpenSection={openSettings}
@@ -799,27 +804,14 @@ export function Dashboard() {
             }
             onAddPet={() => setDashView({ type: 'add-pet' })}
           />
-        ) : dashView.type === 'passport' && detailPet ? (
-          <div className="screen-view">
-            <nav className="screen-nav">
-              <button
-                className="screen-nav__back btn btn--link"
-                type="button"
-                onClick={() => setDashView({ type: 'detail', petId: detailPet.id })}
-              >
-                ‹ {detailPet.name}
-              </button>
-              <span className="screen-nav__title">Passport</span>
-            </nav>
-            <div className="screen-view__body">
-              <PassportTabSection
-                pet={detailPet}
-                onPassportChanged={() => void loadPets()}
-                onNotice={showNotice}
-                onError={setError}
-              />
-            </div>
-          </div>
+        ) : dashView.type === 'passports' ? (
+          <PassportsAllScreen
+            pets={pets}
+            onPassportChanged={() => void loadPets()}
+            onNotice={showNotice}
+            onError={setError}
+            onAddPet={() => setDashView({ type: 'add-pet' })}
+          />
         ) : dashView.type === 'detail' && detailPet ? (
           editView.type === 'edit' ? (
             <EditDocScreen
@@ -930,6 +922,11 @@ export function Dashboard() {
                   meds={allMeds[pet.id]}
                   docsLoading={allDocsLoading}
                   onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
+                  onPresent={
+                    (allDocs[pet.id]?.length ?? 0) > 0
+                      ? () => setPresentingPetId(pet.id)
+                      : null
+                  }
                 />
               ))}
               {pets.length < limits.maxPets && (
@@ -1010,83 +1007,49 @@ export function Dashboard() {
 
 // ---- account menu (header avatar chip) ----
 
-// Header share menu: app-level sharing plus the pet-specific door actions
-// (Present, Passport) whenever a pet is open — "for which pet?" is always
-// answered by context: the one on screen.
-function ShareMenu({
-  onShareApp,
-  presentItems,
-  onPresent,
-  onPassport,
+// The bottom bar's Passport tab: every pet's share-ready passport in one
+// place — answers "which pet?" by listing them all.
+function PassportsAllScreen({
+  pets,
+  onPassportChanged,
+  onNotice,
+  onError,
+  onAddPet,
 }: {
-  onShareApp: () => void;
-  // Pet context → one "Present Rabies Shots" entry; overview → one entry
-  // per pet with records ("Present — Bella"), so the door moment is two
-  // taps from anywhere.
-  presentItems: { petId: string; label: string }[];
-  onPresent: (petId: string) => void;
-  onPassport: (() => void) | null;
+  pets: Pet[];
+  onPassportChanged: () => void;
+  onNotice: (msg: string) => void;
+  onError: (msg: string | null) => void;
+  onAddPet: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e: MouseEvent | TouchEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false);
-    }
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('touchstart', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('touchstart', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
+  if (pets.length === 0) {
+    return (
+      <div className="empty-overview">
+        <span className="empty-state__icon" aria-hidden="true">🐾</span>
+        <p>Passports start with a pet. Add yours to get going.</p>
+        <button className="btn btn--primary" onClick={onAddPet}>
+          Add your first pet
+        </button>
+      </div>
+    );
+  }
   return (
-    <div className="profile-menu share-menu" ref={ref}>
-      <button
-        type="button"
-        className="share-btn"
-        aria-label="Share"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => { hapticTap(); setOpen((v) => !v); }}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M12 3v12" />
-          <path d="M8 6.5 12 3l4 3.5" />
-          <path d="M6 10H5.5A1.5 1.5 0 0 0 4 11.5v8A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 18.5 10H18" />
-        </svg>
-      </button>
-      {open && (
-        <div className="profile-menu__dropdown" role="menu">
-          {presentItems.map((it) => (
-            <button
-              key={it.petId}
-              role="menuitem"
-              className="present-trigger"
-              onClick={() => { setOpen(false); onPresent(it.petId); }}
-            >
-              {it.label}
-            </button>
-          ))}
-          {onPassport && (
-            <button role="menuitem" onClick={() => { setOpen(false); onPassport(); }}>
-              Pet passport
-            </button>
-          )}
-          {(presentItems.length > 0 || onPassport) && <div className="profile-menu__divider" />}
-          <button role="menuitem" onClick={() => { setOpen(false); onShareApp(); }}>
-            Share the app
-          </button>
-        </div>
-      )}
+    <div className="passport-all">
+      <h1 className="large-title">Passport</h1>
+      {pets.map((pet) => (
+        <section key={pet.id} className="passport-all__pet">
+          <div className="passport-all__pet-header">
+            <PetAvatar pet={pet} size={40} />
+            <span>{pet.name}</span>
+          </div>
+          <PassportTabSection
+            pet={pet}
+            onPassportChanged={onPassportChanged}
+            onNotice={onNotice}
+            onError={onError}
+          />
+        </section>
+      ))}
     </div>
   );
 }
@@ -1402,21 +1365,63 @@ function PetPin({
   meds,
   docsLoading,
   onSelect,
+  onPresent,
 }: {
   pet: Pet;
   docs: Doc[] | undefined;
   meds: Med[] | undefined;
   docsLoading: boolean;
   onSelect: () => void;
+  onPresent: (() => void) | null; // long-press → fullscreen records (the door moment)
 }) {
   const status = docs ? petOverallStatus(docs, meds) : 'none';
   const subLine = docsLoading && !docs ? 'Loading…' : petPinStatus(docs ?? [], meds);
 
+  // Long-press = Present. Tap still opens the pet; moving the finger
+  // (scrolling) cancels; the click after a fired press is swallowed.
+  const pressTimer = useRef<number | undefined>(undefined);
+  const pressStart = useRef<{ x: number; y: number } | null>(null);
+  const pressFired = useRef(false);
+  function cancelPress() {
+    if (pressTimer.current !== undefined) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = undefined;
+    }
+    pressStart.current = null;
+  }
+
   return (
     <button
       className="pet-pin"
-      onClick={onSelect}
-      aria-label={`View ${pet.name}'s records — ${subLine}`}
+      onPointerDown={(e) => {
+        if (!onPresent) return;
+        pressFired.current = false;
+        pressStart.current = { x: e.clientX, y: e.clientY };
+        pressTimer.current = window.setTimeout(() => {
+          pressFired.current = true;
+          hapticSuccess();
+          onPresent();
+        }, 550);
+      }}
+      onPointerMove={(e) => {
+        const s = pressStart.current;
+        if (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) > 12) cancelPress();
+      }}
+      onPointerUp={cancelPress}
+      onPointerLeave={cancelPress}
+      onPointerCancel={cancelPress}
+      onContextMenu={(e) => {
+        // long-press shouldn't ALSO pop the browser context menu
+        if (onPresent) e.preventDefault();
+      }}
+      onClick={() => {
+        if (pressFired.current) {
+          pressFired.current = false;
+          return;
+        }
+        onSelect();
+      }}
+      aria-label={`View ${pet.name}'s records — ${subLine}${onPresent ? '. Hold to present at the door' : ''}`}
     >
       <span className={`pet-pin__ring pet-pin__ring--${status}`}>
         <PetAvatar pet={pet} size={88} />

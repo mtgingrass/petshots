@@ -41,13 +41,11 @@ await page.screenshot({ path: `${OUT}/01-pets-overview.png` });
 console.log('captured 01-pets-overview');
 
 // Public passport page: generate for Bella, visit /p/{token}, then revoke.
-await page.click('.pet-pin:has-text("Bella")');
-await page.waitForSelector('.tab-bar__tab', { timeout: 10000 });
-// Passport opens from the header share menu now (not a segment)
-await page.click('.share-btn');
-await page.click('.profile-menu__dropdown button:has-text("Pet passport")');
+// Passport lives on the bottom tab bar now — scope to Bella's section
+await page.click('.tabbar__item:has-text("Passport")');
 await page.waitForTimeout(800);
-const gen = page.locator('button:has-text("Generate passport")');
+const bellaPass = page.locator('.passport-all__pet:has-text("Bella")');
+const gen = bellaPass.locator('button:has-text("Generate passport")');
 if (await gen.count()) {
   await gen.click();
   console.log('generated passport');
@@ -65,13 +63,10 @@ await page.waitForTimeout(3500); // hero + docs load
 await page.screenshot({ path: `${OUT}/03-passport-public.png` });
 console.log('captured 03-passport-public');
 
-// Revoke: back to the passport screen via the header share menu
+// Revoke: back to the Passport tab
 await page.goto(BASE + '/dashboard', { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.pet-pin', { timeout: 15000 });
-await page.click('.pet-pin:has-text("Bella")');
-await page.waitForSelector('.tab-bar__tab', { timeout: 10000 });
-await page.click('.share-btn');
-await page.click('.profile-menu__dropdown button:has-text("Pet passport")');
+await page.click('.tabbar__item:has-text("Passport")');
 const revoke = page.locator('button:has-text("Revoke link")');
 await revoke.waitFor({ timeout: 10000 });
 await revoke.click();

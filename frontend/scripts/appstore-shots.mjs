@@ -51,9 +51,14 @@ await page.click('.tab-bar__tab:has-text("Records")');
 await page.waitForTimeout(1500); // docs + thumbnails
 await shot('02-records');
 
-// Present at the door (the founder moment) — via the header share menu
-await page.click('.share-btn');
-await page.click('.present-trigger');
+// Present at the door (the founder moment) — long-press Luna's circle
+await page.goto(BASE + '/dashboard', { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('.pet-pin', { timeout: 15000 });
+await page.locator('.pet-pin:has-text("Luna")').hover();
+await page.mouse.down();
+await page.waitForTimeout(800); // > the 550ms long-press threshold
+await page.mouse.up();
+await page.waitForSelector('.present__exit', { timeout: 10000 });
 await page.waitForTimeout(2000); // doc image loads
 await shot('03-present');
 
@@ -67,13 +72,11 @@ await shot('04-daily');
 // Passport with QR — generate for Bella, capture, then revoke
 await page.click('.tabbar__item:has-text("Pets")');
 await page.waitForSelector('.pet-pin', { timeout: 10000 });
-await page.click('.pet-pin:has-text("Bella")');
-await page.waitForSelector('.tab-bar__tab', { timeout: 10000 });
-// Passport opens from the header share menu now (not a segment)
-await page.click('.share-btn');
-await page.click('.profile-menu__dropdown button:has-text("Pet passport")');
+// Passport lives on the bottom tab bar now — scope to Bella's section
+await page.click('.tabbar__item:has-text("Passport")');
 await page.waitForTimeout(800);
-const gen = page.locator('button:has-text("Generate passport")');
+const bellaPass = page.locator('.passport-all__pet:has-text("Bella")');
+const gen = bellaPass.locator('button:has-text("Generate passport")');
 if (await gen.count()) {
   await gen.click();
   console.log('generated passport');

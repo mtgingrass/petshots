@@ -1,6 +1,8 @@
 import * as cdk from 'aws-cdk-lib/core';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ses from 'aws-cdk-lib/aws-ses';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -29,8 +31,32 @@ export class AuthStack extends cdk.Stack {
       hostedZoneId: 'Z09793663K82W8IATJUT',
       zoneName: DOMAIN,
     });
+
+    // Bounce/complaint visibility. The account-level suppression list already
+    // auto-suppresses hard-bounced/complaining addresses (verified on, BOUNCE
+    // + COMPLAINT); without this, though, the only notice is SES feedback
+    // forwarding to the SENDER (no-reply@) — a mailbox nobody reads. The
+    // default configuration set on the identity applies to every send from
+    // it (Cognito's included) and publishes those events to SNS → Mark's
+    // inbox. NOTE: the email subscription must be CONFIRMED once (AWS sends
+    // a "Subscription Confirmation" mail on first deploy).
+    const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
+      topicName: 'petshots-email-events',
+    });
+    emailEventsTopic.addSubscription(
+      new subscriptions.EmailSubscription('mark.gingrass@gmail.com'),
+    );
+    const configSet = new ses.ConfigurationSet(this, 'EmailConfigSet', {
+      configurationSetName: 'petshots-email',
+    });
+    configSet.addEventDestination('BounceComplaintToSns', {
+      destination: ses.EventDestination.snsTopic(emailEventsTopic),
+      events: [ses.EmailSendingEvent.BOUNCE, ses.EmailSendingEvent.COMPLAINT],
+    });
+
     new ses.EmailIdentity(this, 'DomainIdentity', {
       identity: ses.Identity.publicHostedZone(hostedZone),
+      configurationSet: configSet,
     });
 
     // PreSignUp trigger: verifies the Cloudflare Turnstile token before a
@@ -75,6 +101,17 @@ export class AuthStack extends cdk.Stack {
         requireSymbols: true,
       },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      // Cognito uses this ONE template for BOTH signup confirmation AND
+      // forgot-password codes — the default subject ("Verify your new
+      // account") is wrong half the time, so keep the copy neutral. A
+      // CustomMessage trigger could branch per flow if it ever matters.
+      userVerification: {
+        emailSubject: 'Your Petshots verification code',
+        emailBody:
+          'Your Petshots verification code is {####}. ' +
+          "If you didn't request this, you can safely ignore this email.",
+        emailStyle: cognito.VerificationEmailStyle.CODE,
+      },
       // Send via our SES domain instead of Cognito's flaky default sender.
       // In-place update of the pool's email config - does not replace the pool,
       // so the pool id (baked into the SPA) is preserved.

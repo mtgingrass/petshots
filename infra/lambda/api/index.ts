@@ -1342,6 +1342,10 @@ export const handler = async (
               remindersEnabled: meta.remindersEnabled !== false,
               filename: parts.slice(7).join('/'),
               size: it.Size,
+              // Content identity (MD5 for our single-part uploads/copies) —
+              // one AI-scanned certificate commits as N records backed by the
+              // SAME bytes, and Present mode uses this to show the file once.
+              etag: it.ETag,
               uploadedAt: it.LastModified,
               url,
             };

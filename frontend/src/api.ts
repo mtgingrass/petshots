@@ -114,6 +114,7 @@ export interface Doc {
   remindersEnabled: boolean; // per-record reminder opt-in; true by default
   filename: string;
   size: number;
+  etag?: string; // S3 content identity — same file committed as N records shares it
   uploadedAt: string;
   url: string; // short-lived presigned GET URL
 }

@@ -1021,6 +1021,33 @@ a {
   line-height: 1.2;
 }
 
+/* Tappable identity block on pet detail — name + species open the pet's
+   Profile screen. Same layout as the static hero-info, plus a chevron. */
+.pet-detail__hero-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  transition: opacity 0.12s;
+}
+
+.pet-detail__hero-open:active {
+  opacity: 0.6;
+}
+
+.pet-detail__hero-chevron {
+  color: var(--subtle);
+  font-weight: 400;
+  font-size: 1.15rem;
+}
+
 /* ---------- Record detail screen ---------- */
 
 .doc-detail {
@@ -1611,14 +1638,6 @@ a {
 }
 
 /* ---------- Profile view ---------- */
-
-/* Hero-row Profile entry (Profile left the segmented control). */
-.pet-detail__hero-profile {
-  margin-left: auto;
-  flex-shrink: 0;
-  font-weight: 600;
-  padding: 0.35rem 0.25rem;
-}
 
 /* Inline edit affordances — inside the content, never a nav row. */
 .profile-view__editrow {
@@ -3442,10 +3461,20 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   margin-top: 1rem;
 }
 
+/* Header row: avatar + name (opens the pet) on the left, a ▾ disclosure
+   (collapses that pet's agenda) on the right. */
 .daily-all__pet-header {
   display: flex;
   align-items: center;
+  gap: 0.25rem;
+}
+
+.daily-all__pet-open {
+  display: flex;
+  align-items: center;
   gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
   padding: 0.25rem 0.1rem;
   background: none;
   border: none;
@@ -3456,7 +3485,7 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   text-align: left;
 }
 
-.daily-all__pet-header:active {
+.daily-all__pet-open:active {
   opacity: 0.7;
 }
 
@@ -3464,10 +3493,33 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   flex: 1;
 }
 
-.daily-all__chevron {
+.daily-all__disclose {
+  background: none;
+  border: none;
   color: var(--subtle);
-  font-size: 1.3rem;
-  font-weight: 400;
+  font-size: 1.15rem;
+  cursor: pointer;
+  padding: 0.4rem 0.5rem;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.daily-all__disclose-chevron {
+  display: inline-block;
+  transition: transform 0.18s ease;
+}
+
+.daily-all__disclose-chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .daily-all__disclose-chevron {
+    transition: none;
+  }
 }
 
 /* ---------- iOS large titles ---------- */

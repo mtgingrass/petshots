@@ -43,8 +43,9 @@ await shot('lightbox');
 await page.keyboard.press('Escape');
 await page.waitForTimeout(400);
 
-// Profile opens from the hero row now (it left the segmented control)
-await page.click('.pet-detail__hero-profile');
+// Profile is its own pushed screen now — opened by tapping the hero name
+await page.click('.pet-detail__hero-open');
+await page.waitForSelector('.screen-nav__title:has-text("Profile")', { timeout: 5000 });
 await shot('detail-profile');
 
 // Passport lives on the bottom tab bar now (per-pet sections)

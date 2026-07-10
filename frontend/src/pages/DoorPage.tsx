@@ -40,7 +40,8 @@ export function DoorPage() {
           filename: d.filename,
           url,
           remindersEnabled: true,
-          size: 0,
+          size: d.size ?? 0,
+          etag: d.etag,
           uploadedAt: '',
         });
       }

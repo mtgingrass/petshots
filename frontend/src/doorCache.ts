@@ -21,6 +21,8 @@ export interface DoorDoc {
   label: string;
   expiry?: string;
   filename: string;
+  size?: number; // absent in caches written before file-identity dedupe
+  etag?: string;
 }
 
 export interface DoorPet {
@@ -72,11 +74,13 @@ export async function updateDoorCache(
         id: p.id,
         name: p.name,
         species: p.species,
-        docs: (allDocs[p.id] ?? []).map(({ id, label, expiry, filename }) => ({
+        docs: (allDocs[p.id] ?? []).map(({ id, label, expiry, filename, size, etag }) => ({
           id,
           label,
           expiry,
           filename,
+          size,
+          etag,
         })),
       })),
     };

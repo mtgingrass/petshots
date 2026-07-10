@@ -260,14 +260,18 @@ function initialsFromEmail(email: string): string {
 }
 
 // Passport is NOT a pet-detail segment — it's a bottom-bar tab listing every
-// pet's passport (DashView 'passports').
-type PetTab = 'records' | 'daily' | 'meds' | 'profile';
+// pet's passport (DashView 'passports'). Profile isn't a segment either: the
+// pet's identity gets its own pushed screen, opened by tapping the hero name.
+type PetTab = 'records' | 'daily' | 'meds';
 
 type SettingsSection = 'account' | 'notifications' | 'family';
 
 type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: PetTab }
+  // The pet's identity screen (health profile + weight log + name/photo edit),
+  // pushed from the detail hero.
+  | { type: 'profile'; petId: string }
   | { type: 'passports' }
   | { type: 'add-pet' }
   | { type: 'edit-pet'; petId: string }
@@ -417,10 +421,8 @@ export function Dashboard() {
     dashView.type === 'add-pet' ||
     dashView.type === 'edit-pet' ||
     dashView.type === 'change-password' ||
-    (dashView.type === 'detail' &&
-      (editView.type === 'edit' ||
-        editView.type === 'edit-profile' ||
-        editView.type === 'review-extraction'));
+    (dashView.type === 'detail' && (editView.type === 'edit' || editView.type === 'review-extraction')) ||
+    (dashView.type === 'profile' && editView.type === 'edit-profile');
   const viewDepth =
     dashView.type === 'overview' ||
     dashView.type === 'daily' ||
@@ -428,16 +430,21 @@ export function Dashboard() {
     dashView.type === 'settings'
       ? 0
       : dashView.type === 'edit-pet' ||
-          dashView.type === 'change-password' ||
-          (dashView.type === 'detail' && editView.type !== 'list')
-        ? 2
-        : 1;
+          (dashView.type === 'profile' && editView.type === 'edit-profile')
+        ? 3
+        : dashView.type === 'change-password' ||
+            dashView.type === 'profile' ||
+            (dashView.type === 'detail' && editView.type !== 'list')
+          ? 2
+          : 1;
   const viewKey =
     pets === null
       ? 'loading'
       : dashView.type === 'detail'
         ? `detail:${dashView.petId}:${editView.type}`
-        : dashView.type;
+        : dashView.type === 'profile'
+          ? `profile:${dashView.petId}:${editView.type}`
+          : dashView.type;
   const animRef = useRef<{ key: string; dir: 'push' | 'pop' | 'none'; depth: number }>({
     key: viewKey,
     dir: 'none',
@@ -456,9 +463,9 @@ export function Dashboard() {
     };
   }
 
-  // Pet currently being viewed in detail/edit-pet screens.
+  // Pet currently being viewed in detail/profile/edit-pet screens.
   const detailPet =
-    dashView.type === 'detail' || dashView.type === 'edit-pet'
+    dashView.type === 'detail' || dashView.type === 'profile' || dashView.type === 'edit-pet'
       ? (pets?.find((p) => p.id === dashView.petId) ?? null)
       : null;
 
@@ -765,7 +772,7 @@ export function Dashboard() {
               <button
                 className="screen-nav__back btn btn--link"
                 type="button"
-                onClick={() => setDashView({ type: 'detail', petId: detailPet.id })}
+                onClick={() => setDashView({ type: 'profile', petId: detailPet.id })}
               >
                 ‹ {detailPet.name}
               </button>
@@ -777,9 +784,9 @@ export function Dashboard() {
                 submitLabel="Save"
                 onDone={async () => {
                   await loadPets();
-                  setDashView({ type: 'detail', petId: detailPet.id });
+                  setDashView({ type: 'profile', petId: detailPet.id });
                 }}
-                onCancel={() => setDashView({ type: 'detail', petId: detailPet.id })}
+                onCancel={() => setDashView({ type: 'profile', petId: detailPet.id })}
                 onDeletePet={handleDeletePetWithUndo}
                 onError={setError}
                 onNotice={showNotice}
@@ -823,6 +830,25 @@ export function Dashboard() {
             onError={setError}
             onAddPet={() => setDashView({ type: 'add-pet' })}
           />
+        ) : dashView.type === 'profile' && detailPet ? (
+          editView.type === 'edit-profile' ? (
+            <ProfileEditScreen
+              pet={detailPet}
+              onDone={async () => { setEditView({ type: 'list' }); await loadPets(); }}
+              onCancel={() => setEditView({ type: 'list' })}
+              onError={setError}
+              onNotice={showNotice}
+            />
+          ) : (
+            <PetProfileScreen
+              pet={detailPet}
+              onBack={() => setDashView({ type: 'detail', petId: detailPet.id, tab: petTab })}
+              onEditProfile={() => setEditView({ type: 'edit-profile' })}
+              onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
+              onPetChanged={() => void loadPets()}
+              onError={setError}
+            />
+          )
         ) : dashView.type === 'detail' && detailPet ? (
           editView.type === 'edit' ? (
             <EditDocScreen
@@ -832,14 +858,6 @@ export function Dashboard() {
                 setEditView({ type: 'list' });
                 await loadPetDocs(editView.petId);
               }}
-              onCancel={() => setEditView({ type: 'list' })}
-              onError={setError}
-              onNotice={showNotice}
-            />
-          ) : editView.type === 'edit-profile' ? (
-            <ProfileEditScreen
-              pet={detailPet}
-              onDone={async () => { setEditView({ type: 'list' }); await loadPets(); }}
               onCancel={() => setEditView({ type: 'list' })}
               onError={setError}
               onNotice={showNotice}
@@ -882,9 +900,7 @@ export function Dashboard() {
                 setAllMeds((prev) => ({ ...prev, [detailPet.id]: meds }))
               }
               limits={limits}
-              onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
-              onEditProfile={() => setEditView({ type: 'edit-profile' })}
-              onPetChanged={() => void loadPets()}
+              onOpenProfile={() => setDashView({ type: 'profile', petId: detailPet.id })}
               onViewDoc={(doc) => setEditView({ type: 'doc', doc, petId: detailPet.id })}
               onEditDoc={(doc) => setEditView({ type: 'edit', doc, petId: detailPet.id })}
               onReviewExtraction={(uploadId, fileName, extraction, aiNote, duplicateOf) =>
@@ -921,7 +937,15 @@ export function Dashboard() {
               pets={pets}
               allDocs={allDocs}
               allMeds={allMeds}
-              onNavigateToPet={(petId, tab) => setDashView({ type: 'detail', petId, tab })}
+              onNavigateToPet={(petId, tab) =>
+                // Birthday/dob notices point at the pet's identity — its own
+                // pushed screen now, not a detail segment.
+                setDashView(
+                  tab === 'profile'
+                    ? { type: 'profile', petId }
+                    : { type: 'detail', petId, tab },
+                )
+              }
             />
             <h1 className="large-title">Pets</h1>
             {showPresentHint &&
@@ -1640,9 +1664,7 @@ function PetDetailScreen({
   meds,
   onMedsChanged,
   limits,
-  onEditPet,
-  onEditProfile,
-  onPetChanged,
+  onOpenProfile,
   onViewDoc,
   onEditDoc,
   onReviewExtraction,
@@ -1660,9 +1682,7 @@ function PetDetailScreen({
   meds: Med[] | undefined;
   onMedsChanged: (meds: Med[]) => void;
   limits: Limits;
-  onEditPet: () => void;
-  onEditProfile: () => void;
-  onPetChanged: () => void; // weight log syncs the profile's display weight
+  onOpenProfile: () => void; // hero name tap — the pet's identity screen
   onViewDoc: (doc: Doc) => void;
   onEditDoc: (doc: Doc) => void;
   onReviewExtraction: (
@@ -1710,21 +1730,22 @@ function PetDetailScreen({
           ) : (
             <PetAvatar pet={pet} size={72} />
           )}
-          <div className="pet-detail__hero-info">
-            <span className="pet-detail__hero-name">{pet.name}</span>
+          {/* The name IS the door to the pet's identity screen — a trailing
+              chevron signals it's tappable (iOS contact-card convention). */}
+          <button
+            type="button"
+            className="pet-detail__hero-open"
+            onClick={() => { hapticTap(); onOpenProfile(); }}
+            aria-label={`View ${pet.name}'s profile`}
+          >
+            <span className="pet-detail__hero-name">
+              {pet.name} <span className="pet-detail__hero-chevron" aria-hidden="true">›</span>
+            </span>
             <span className="subtle">
               {speciesEmoji(pet.species)}{' '}
               {pet.species.charAt(0).toUpperCase() + pet.species.slice(1)}
               {pet.breed ? ` · ${pet.breed}` : ''}
             </span>
-          </div>
-          {/* Profile lives here, not in the segments — the hero IS the pet. */}
-          <button
-            type="button"
-            className="btn btn--link pet-detail__hero-profile"
-            onClick={() => { hapticTap(); setTab('profile'); }}
-          >
-            Profile <span aria-hidden="true">›</span>
           </button>
         </div>
 
@@ -1777,7 +1798,7 @@ function PetDetailScreen({
             onNotice={onNotice}
             onMedsChanged={onMedsChanged}
           />
-        ) : tab === 'meds' ? (
+        ) : (
           <MedsSection
             petId={pet.id}
             maxMeds={limits.maxMeds}
@@ -1787,19 +1808,70 @@ function PetDetailScreen({
             onNotice={onNotice}
             onMedsChanged={onMedsChanged}
           />
-        ) : (
-          <>
-            <ProfileSection pet={pet} onEdit={onEditProfile} />
-            <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
-            <button
-              type="button"
-              className="btn profile-editpet"
-              onClick={onEditPet}
-            >
-              Edit name &amp; photo
-            </button>
-          </>
         )}
+      </div>
+      {showPhoto && pet.avatarUrl && (
+        <PhotoLightbox src={pet.avatarUrl} alt={pet.name} onClose={() => setShowPhoto(false)} />
+      )}
+    </div>
+  );
+}
+
+// ---- pet profile screen (the pet's identity, pushed from the detail hero) ----
+
+function PetProfileScreen({
+  pet,
+  onBack,
+  onEditProfile,
+  onEditPet,
+  onPetChanged,
+  onError,
+}: {
+  pet: Pet;
+  onBack: () => void;
+  onEditProfile: () => void;
+  onEditPet: () => void;
+  onPetChanged: () => void; // weight log syncs the profile's display weight
+  onError: (msg: string | null) => void;
+}) {
+  const [showPhoto, setShowPhoto] = useState(false);
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ‹ {pet.name}
+        </button>
+        <span className="screen-nav__title">Profile</span>
+      </nav>
+      <div className="screen-view__body">
+        <div className="pet-detail__hero">
+          {pet.avatarUrl ? (
+            <button
+              className="pet-detail__hero-photo"
+              type="button"
+              onClick={() => setShowPhoto(true)}
+              aria-label={`View ${pet.name}'s photo full screen`}
+            >
+              <PetAvatar pet={pet} size={72} />
+            </button>
+          ) : (
+            <PetAvatar pet={pet} size={72} />
+          )}
+          <div className="pet-detail__hero-info">
+            <span className="pet-detail__hero-name">{pet.name}</span>
+            <span className="subtle">
+              {speciesEmoji(pet.species)}{' '}
+              {pet.species.charAt(0).toUpperCase() + pet.species.slice(1)}
+              {pet.breed ? ` · ${pet.breed}` : ''}
+            </span>
+          </div>
+        </div>
+        <ProfileSection pet={pet} onEdit={onEditProfile} />
+        <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
+        <button type="button" className="btn profile-editpet" onClick={onEditPet}>
+          Edit name &amp; photo
+        </button>
       </div>
       {showPhoto && pet.avatarUrl && (
         <PhotoLightbox src={pet.avatarUrl} alt={pet.name} onClose={() => setShowPhoto(false)} />
@@ -2057,24 +2129,90 @@ function DailyAllScreen({
     <div className="daily-all">
       <h1 className="large-title">Daily</h1>
       {pets.map((pet) => (
-        <section key={pet.id} className="daily-all__pet">
-          <button
-            type="button"
-            className="daily-all__pet-header"
-            onClick={() => onOpenPet(pet.id)}
-          >
-            <PetAvatar pet={pet} size={40} />
-            <span className="daily-all__pet-name">{pet.name}</span>
-            <span className="daily-all__chevron" aria-hidden="true">›</span>
-          </button>
-          <DailySection
-            petId={pet.id}
-            onError={onError}
-            onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
-          />
-        </section>
+        <DailyPetSection
+          key={pet.id}
+          pet={pet}
+          onOpenPet={onOpenPet}
+          onError={onError}
+          onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
+        />
       ))}
     </div>
+  );
+}
+
+// One pet's block on the all-pets Daily screen: avatar + name open the pet
+// (detail with its tabs); the ▾ disclosure collapses that pet's agenda.
+// Collapsed pets are remembered per device.
+const DAILY_COLLAPSED_KEY = 'petshots.dailyCollapsed';
+
+function readDailyCollapsed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DAILY_COLLAPSED_KEY);
+    const ids = raw ? (JSON.parse(raw) as unknown) : [];
+    return new Set(Array.isArray(ids) ? ids.filter((x) => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function DailyPetSection({
+  pet,
+  onOpenPet,
+  onError,
+  onMedsChanged,
+}: {
+  pet: Pet;
+  onOpenPet: (petId: string) => void;
+  onError: (msg: string | null) => void;
+  onMedsChanged: (meds: Med[]) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(() => readDailyCollapsed().has(pet.id));
+
+  function toggle() {
+    hapticTap();
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      const ids = readDailyCollapsed();
+      if (next) ids.add(pet.id);
+      else ids.delete(pet.id);
+      localStorage.setItem(DAILY_COLLAPSED_KEY, JSON.stringify([...ids]));
+    } catch {
+      // storage unavailable — the toggle still works for this visit
+    }
+  }
+
+  return (
+    <section className="daily-all__pet">
+      <div className="daily-all__pet-header">
+        <button
+          type="button"
+          className="daily-all__pet-open"
+          onClick={() => onOpenPet(pet.id)}
+        >
+          <PetAvatar pet={pet} size={40} />
+          <span className="daily-all__pet-name">{pet.name}</span>
+        </button>
+        <button
+          type="button"
+          className="daily-all__disclose"
+          onClick={toggle}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? `Show ${pet.name}'s daily list` : `Hide ${pet.name}'s daily list`}
+        >
+          <span
+            className={`daily-all__disclose-chevron${collapsed ? ' daily-all__disclose-chevron--collapsed' : ''}`}
+            aria-hidden="true"
+          >
+            ▾
+          </span>
+        </button>
+      </div>
+      {!collapsed && (
+        <DailySection petId={pet.id} onError={onError} onMedsChanged={onMedsChanged} />
+      )}
+    </section>
   );
 }
 
@@ -4344,14 +4482,33 @@ function ProfileEditScreen({
 // current rabies certs first, then expired rabies, then everything else in
 // its existing urgency order. Label-based (cats and dogs alike get rabies
 // records) — a pet with no "rabies"-labeled record just keeps urgency order.
+//
+// Then dedupe by file identity: one AI-scanned visit summary commits as N
+// records (Rabies, Bordetella, …) all backed by the same bytes — flipping
+// through five copies of the same page helps nobody, so each file shows once
+// (the first occurrence, i.e. under its most door-relevant label).
 function presentOrder(docs: Doc[]): Doc[] {
   const isRabies = (d: Doc) => /rabies/i.test(d.label);
   const current = (d: Doc) => statusOf(d.expiry) !== 'overdue';
-  return [
+  const ordered = [
     ...docs.filter((d) => isRabies(d) && current(d)),
     ...docs.filter((d) => isRabies(d) && !current(d)),
     ...docs.filter((d) => !isRabies(d)),
   ];
+  // Identity: ETag (content MD5) when the API sent one; filename+size for
+  // door caches written before etag existed; a doc with neither (size 0 from
+  // an old cache) is treated as unique rather than risk hiding a real record.
+  const seen = new Set<string>();
+  return ordered.filter((d) => {
+    const key = d.etag
+      ? `e:${d.etag}:${d.size}`
+      : d.size
+        ? `f:${d.filename}:${d.size}`
+        : `id:${d.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function PresentScreen({
@@ -4438,14 +4595,14 @@ export function PresentScreen({
 
       <div className="present__footer">
         <span className="present__pet-name">{pet.name}</span>
-        {docs.length > 1 && (
+        {ordered.length > 1 && (
           <div className="present__dots" aria-hidden="true">
             {ordered.map((_, i) => (
               <span key={i} className={`present__dot${i === current ? ' present__dot--active' : ''}`} />
             ))}
           </div>
         )}
-        {docs.length > 1 && (
+        {ordered.length > 1 && (
           <span className="present__counter">{current + 1} / {ordered.length}</span>
         )}
       </div>

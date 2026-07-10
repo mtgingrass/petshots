@@ -73,4 +73,11 @@ This started as a live build doc for a traditional three-tier architecture and p
 
 ## License
 
-MIT.
+[PolyForm Noncommercial 1.0.0](./LICENSE.md) — read it, run it, learn from it,
+modify it, use it for any noncommercial purpose. Commercial use (including
+offering this software, or a derivative, as a paid service) is not licensed.
+
+The **Petshots** name, logo, and the petshots.app service are not covered by
+the code license — they identify the live product and stay with its owner.
+
+Want to use it commercially anyway? Open an issue — happy to talk.

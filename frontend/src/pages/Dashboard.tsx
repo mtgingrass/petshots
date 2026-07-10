@@ -325,9 +325,20 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // Which pet's records are fullscreen "at the door" — settable from any
-  // context (pet share menu, or the overview share menu's per-pet entries).
+  // Which pet's records are fullscreen "at the door" — opened by
+  // long-pressing a pet's circle on the overview.
   const [presentingPetId, setPresentingPetId] = useState<string | null>(null);
+  // One-time discoverability tip for that gesture (touch devices only, gone
+  // once dismissed or once the user actually long-presses).
+  const [showPresentHint, setShowPresentHint] = useState(
+    () =>
+      window.matchMedia('(pointer: coarse)').matches &&
+      !localStorage.getItem('petshots.presentHint'),
+  );
+  function dismissPresentHint() {
+    localStorage.setItem('petshots.presentHint', '1');
+    setShowPresentHint(false);
+  }
   const [pendingDelete, setPendingDelete] = useState<{
     pet: Pet;
     docs: Doc[];
@@ -913,6 +924,23 @@ export function Dashboard() {
               onNavigateToPet={(petId, tab) => setDashView({ type: 'detail', petId, tab })}
             />
             <h1 className="large-title">Pets</h1>
+            {showPresentHint &&
+              pets.some((p) => (allDocs[p.id]?.length ?? 0) > 0) && (
+                <p className="daily-swipe-hint" role="status">
+                  <span>
+                    Tip: press and hold a pet's photo to show their records at
+                    the door.
+                  </span>
+                  <button
+                    type="button"
+                    className="daily-swipe-hint__close"
+                    aria-label="Dismiss tip"
+                    onClick={dismissPresentHint}
+                  >
+                    ✕
+                  </button>
+                </p>
+              )}
             <div className="pet-pins">
               {pets.map((pet) => (
                 <PetPin
@@ -924,7 +952,10 @@ export function Dashboard() {
                   onSelect={() => setDashView({ type: 'detail', petId: pet.id })}
                   onPresent={
                     (allDocs[pet.id]?.length ?? 0) > 0
-                      ? () => setPresentingPetId(pet.id)
+                      ? () => {
+                          dismissPresentHint(); // they found the gesture
+                          setPresentingPetId(pet.id);
+                        }
                       : null
                   }
                 />
@@ -4360,6 +4391,20 @@ function ProfileEditScreen({
 
 // ---- present mode (full-screen swipeable carousel) ----
 
+// The door moment leads with the paper the front desk actually asks for:
+// current rabies certs first, then expired rabies, then everything else in
+// its existing urgency order. Label-based (cats and dogs alike get rabies
+// records) — a pet with no "rabies"-labeled record just keeps urgency order.
+function presentOrder(docs: Doc[]): Doc[] {
+  const isRabies = (d: Doc) => /rabies/i.test(d.label);
+  const current = (d: Doc) => statusOf(d.expiry) !== 'overdue';
+  return [
+    ...docs.filter((d) => isRabies(d) && current(d)),
+    ...docs.filter((d) => isRabies(d) && !current(d)),
+    ...docs.filter((d) => !isRabies(d)),
+  ];
+}
+
 export function PresentScreen({
   pet,
   docs,
@@ -4369,6 +4414,7 @@ export function PresentScreen({
   docs: Doc[];
   onExit: () => void;
 }) {
+  const ordered = presentOrder(docs);
   const [current, setCurrent] = useState(0);
   const slidesRef = useRef<HTMLDivElement>(null);
 
@@ -4396,7 +4442,7 @@ export function PresentScreen({
       <button className="present__exit" onClick={onExit} aria-label="Exit presentation">✕</button>
 
       <div className="present__slides" ref={slidesRef} onScroll={handleScroll}>
-        {docs.map((doc) => {
+        {ordered.map((doc) => {
           const isImage = IMAGE_EXTS.includes(extOf(doc.filename));
           const status = statusOf(doc.expiry);
           return (
@@ -4445,13 +4491,13 @@ export function PresentScreen({
         <span className="present__pet-name">{pet.name}</span>
         {docs.length > 1 && (
           <div className="present__dots" aria-hidden="true">
-            {docs.map((_, i) => (
+            {ordered.map((_, i) => (
               <span key={i} className={`present__dot${i === current ? ' present__dot--active' : ''}`} />
             ))}
           </div>
         )}
         {docs.length > 1 && (
-          <span className="present__counter">{current + 1} / {docs.length}</span>
+          <span className="present__counter">{current + 1} / {ordered.length}</span>
         )}
       </div>
     </div>

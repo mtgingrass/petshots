@@ -446,23 +446,16 @@ interface DailyFile {
   moods?: Record<string, DailyMood>; // date -> mood
 }
 // Species-aware defaults (they apply only until the user customizes the
-// list): dogs get walks and poop tracking; cats get the litter box counter —
-// output monitoring is a top early-warning health signal for indoor cats —
-// and no walk; anything else starts with just meals.
+// list): dogs get walks; anything else starts with just meals. Counter items
+// (the old 💩 preset) were removed from the product in s26 — the check/count
+// API semantics remain for lists that still carry stored counter items.
 function dailyPresetsFor(species: string | undefined): DailyItem[] {
   const meals: DailyItem[] = [
     { id: 'preset-breakfast', name: 'Breakfast' },
     { id: 'preset-dinner', name: 'Dinner' },
   ];
-  if (/cat/i.test(species ?? '')) {
-    return [...meals, { id: 'preset-poop', name: '💩 Litter box', kind: 'counter' }];
-  }
   if (/dog/i.test(species ?? '')) {
-    return [
-      ...meals,
-      { id: 'preset-walk', name: 'Walk' },
-      { id: 'preset-poop', name: '💩 Poop', kind: 'counter' },
-    ];
+    return [...meals, { id: 'preset-walk', name: 'Walk' }];
   }
   return meals;
 }

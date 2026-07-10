@@ -94,6 +94,14 @@ async function uploadDoc(token, petId, label, expiry) {
   return { status: presign.status, putStatus: res.status };
 }
 
+// ReminderFn does due-day math in UTC — meds meant to trigger the dry-run
+// reminder must be seeded with the UTC date, or evening-ET runs flake
+// (same gotcha smoke-digest hit in s20).
+const utcYmd = (offset) => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + offset);
+  return d.toISOString().slice(0, 10);
+};
 const ymd = (offset) => {
   const d = new Date();
   d.setDate(d.getDate() + offset);
@@ -214,8 +222,14 @@ async function main() {
   const bord = docs2.body.docs.find((d) => d.label === 'Bordetella');
   const mPatch = await api(member, 'PATCH', `/pets/${pet.id}/docs/${bord.id}`, { label: 'Bordetella (kennel cough)' });
   check(mPatch.status === 200, 'member edits a household doc');
+  // Two meds on purpose: Heartworm (LOCAL today) drives the daily-list
+  // check-off tests in [8b]; Flea & tick (UTC today) deterministically fires
+  // in the ReminderFn dry run regardless of wall-clock (UTC math).
   const mMeds = await api(member, 'PUT', `/pets/${pet.id}/meds`, {
-    meds: [{ name: 'Heartworm prevention', interval: 1, unit: 'month', nextDue: ymd(0), remindersEnabled: true, lastGiven: ymd(0) }],
+    meds: [
+      { name: 'Heartworm prevention', interval: 1, unit: 'month', nextDue: ymd(0), remindersEnabled: true, lastGiven: ymd(0) },
+      { name: 'Flea & tick prevention', interval: 1, unit: 'month', nextDue: utcYmd(0), remindersEnabled: true },
+    ],
   });
   check(mMeds.status === 200, 'member updates household meds (mark as given)');
   const mDocDel = await api(member, 'DELETE', `/pets/${pet.id}/docs/${bord.id}`);
@@ -258,7 +272,7 @@ async function main() {
   const memberMail = (dry.wouldSend ?? []).find((w) => w.email === memberEmail);
   check(!!memberMail, 'member would receive a reminder email');
   check(
-    !!memberMail && /Waffles/.test(memberMail.body) && /Heartworm/.test(memberMail.body),
+    !!memberMail && /Waffles/.test(memberMail.body) && /Flea & tick/.test(memberMail.body),
     "member's email covers the household pet's med",
   );
 
@@ -271,10 +285,24 @@ async function main() {
     names.includes('Breakfast') && names.includes('Dinner') && names.includes('Walk'),
     'preset items present (Breakfast, Dinner, Walk)',
   );
-  const poop = daily.body.items.find((i) => i.kind === 'counter');
-  check(!!poop && /Poop/.test(poop.name), 'poop counter preset present');
-  const medItem = daily.body.items.find((i) => i.id.startsWith('med:'));
-  check(!!medItem && medItem.name === 'Heartworm prevention', 'due med appears on the daily list');
+  // Counter presets were removed from the product (s26) — but the API still
+  // honors legacy lists that stored counter items, so seed one like a
+  // pre-removal list and keep the count-semantics coverage below.
+  check(!daily.body.items.some((i) => i.kind === 'counter'), 'no counter preset ships anymore');
+  const seeded = await api(owner, 'PUT', `/pets/${pet.id}/daily/items`, {
+    items: [
+      ...daily.body.items
+        .filter((i) => !i.id.startsWith('med:'))
+        .map(({ id, name, kind }) => ({ id, name, ...(kind ? { kind } : {}) })),
+      { name: '💩 Poop', kind: 'counter' },
+    ],
+  });
+  const poop = seeded.body.items.find((i) => i.kind === 'counter');
+  check(!!poop && /Poop/.test(poop.name), 'legacy counter item accepted via PUT items');
+  const medItem = daily.body.items.find(
+    (i) => i.id.startsWith('med:') && i.name === 'Heartworm prevention',
+  );
+  check(!!medItem, 'due med appears on the daily list');
   // Reads are plan-gated history now (free = 2 weeks): far past → HISTORY_LIMIT,
   // future days still a plain 400.
   const badDate = await api(owner, 'GET', `/pets/${pet.id}/daily?date=1999-01-01`);

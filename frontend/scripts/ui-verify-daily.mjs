@@ -75,15 +75,8 @@ async function main() {
   check(await page.locator('.daily-item__name', { hasText: 'Walk' }).first().isVisible(), 'Walk preset renders');
   check(await page.locator('.daily-item__name', { hasText: 'Heartworm' }).isVisible(), 'due med appears on the list');
 
-  const poopRow = page.locator('.daily-item', { hasText: 'Poop' });
-  check(await poopRow.locator('.daily-item__countpill').isVisible(), 'poop counter row renders');
-  await poopRow.locator('button:has-text("+")').click();
-  await page.waitForFunction(
-    () => document.querySelector('.daily-item__countpill')?.textContent === '1',
-    { timeout: 10000 },
-  );
-  check(true, 'counter increments to 1');
-  check(await poopRow.locator('.daily-item__who').isVisible(), 'counter shows last actor');
+  // Counter items were removed from the product (s26) — no Poop preset row.
+  check((await page.locator('.daily-item__countpill').count()) === 0, 'no counter rows render');
 
   await page.locator('.daily-item', { hasText: 'Breakfast' }).locator('.daily-item__check').click();
   const breakfastDone = page.locator('.daily-item--done', { hasText: 'Breakfast' });

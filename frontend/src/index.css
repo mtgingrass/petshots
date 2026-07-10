@@ -871,7 +871,9 @@ a {
 
 .form input,
 .form select,
-.form input[type='file'] {
+.form input[type='file'],
+.daily__add-row input,
+.family-invite input {
   padding: 0.65rem 0.75rem;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -1609,6 +1611,26 @@ a {
 }
 
 /* ---------- Profile view ---------- */
+
+/* Hero-row Profile entry (Profile left the segmented control). */
+.pet-detail__hero-profile {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-weight: 600;
+  padding: 0.35rem 0.25rem;
+}
+
+/* Inline edit affordances — inside the content, never a nav row. */
+.profile-view__editrow {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -0.5rem;
+}
+
+.profile-editpet {
+  align-self: flex-start;
+  margin-top: 1rem;
+}
 
 .profile-empty {
   display: flex;
@@ -2881,36 +2903,6 @@ a {
   font-size: 0.85rem;
 }
 
-.daily-item__countpill {
-  flex-shrink: 0;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 0.4rem;
-  border-radius: 14px;
-  border: 2px solid var(--border);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-}
-
-.daily-item--done .daily-item__countpill {
-  border-color: var(--ok-text, #34d399);
-  color: var(--ok-text, #34d399);
-}
-
-.daily-item__counter-btns {
-  display: flex;
-  gap: 0.4rem;
-}
-
-.daily-item__count-btn {
-  min-width: 44px;
-  padding: 0.35rem 0;
-  font-size: 1.1rem;
-  line-height: 1;
-}
-
 .daily__add {
   flex-direction: column;
   align-items: stretch;
@@ -2924,13 +2916,6 @@ a {
 .daily__add-row input {
   flex: 1;
   min-width: 0;
-}
-
-.daily__add-kind {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
 }
 
 /* ---- weight log ---- */

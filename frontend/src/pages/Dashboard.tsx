@@ -1694,21 +1694,7 @@ function PetDetailScreen({
 
   return (
     <div className="screen-view">
-      {/* Edit row only where there's something to edit (records = pet,
-          profile = health profile). Present/Passport live in the header
-          share menu now — no dedicated row. */}
-      {(tab === 'records' || tab === 'profile') && (
-        <nav className="screen-nav">
-          <span />
-          <button
-            className="screen-nav__action btn btn--link"
-            type="button"
-            onClick={tab === 'records' ? onEditPet : onEditProfile}
-          >
-            ✎ Edit
-          </button>
-        </nav>
-      )}
+      {/* No nav row here on purpose — editing lives inside the Profile tab. */}
 
       <div className="screen-view__body">
         <div className="pet-detail__hero">
@@ -1732,6 +1718,14 @@ function PetDetailScreen({
               {pet.breed ? ` · ${pet.breed}` : ''}
             </span>
           </div>
+          {/* Profile lives here, not in the segments — the hero IS the pet. */}
+          <button
+            type="button"
+            className="btn btn--link pet-detail__hero-profile"
+            onClick={() => { hapticTap(); setTab('profile'); }}
+          >
+            Profile <span aria-hidden="true">›</span>
+          </button>
         </div>
 
         <div className="tab-bar">
@@ -1753,12 +1747,6 @@ function PetDetailScreen({
           >
             Meds
             {medsDue > 0 && <span className="tab-badge">{medsDue}</span>}
-          </button>
-          <button
-            className={`tab-bar__tab${tab === 'profile' ? ' tab-bar__tab--active' : ''}`}
-            onClick={() => { hapticTap(); setTab('profile'); }}
-          >
-            Profile
           </button>
         </div>
 
@@ -1803,6 +1791,13 @@ function PetDetailScreen({
           <>
             <ProfileSection pet={pet} onEdit={onEditProfile} />
             <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
+            <button
+              type="button"
+              className="btn profile-editpet"
+              onClick={onEditPet}
+            >
+              Edit name &amp; photo
+            </button>
           </>
         )}
       </div>
@@ -2098,7 +2093,6 @@ function DailySection({
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [newItem, setNewItem] = useState('');
-  const [newIsCounter, setNewIsCounter] = useState(false);
   const [busy, setBusy] = useState(false);
   const day = date ?? localToday();
   // Past days are history, not a backfill surface — checks/mood are view-only.
@@ -2238,46 +2232,8 @@ function DailySection({
             Remove
           </button>
         );
-        if (item.kind === 'counter') {
-          const count = checkInfo?.count ?? 0;
-          return (
-            <div className={`daily-item${count > 0 ? ' daily-item--done' : ''}`} key={item.id}>
-              <span className="daily-item__countpill" aria-label={`${item.name}: ${count} today`}>
-                {count}
-              </span>
-              <span className="daily-item__name">
-                {item.name}
-                {checkInfo && (
-                  <span className="subtle daily-item__who">
-                    last: {whoAndWhen(checkInfo.by, checkInfo.at)}
-                  </span>
-                )}
-              </span>
-              {removeBtn ||
-                (!readOnly && (
-                  <span className="daily-item__counter-btns">
-                    <button
-                      type="button"
-                      className="btn daily-item__count-btn"
-                      aria-label={`Remove one ${item.name}`}
-                      disabled={count === 0}
-                      onClick={() => void toggle(item, false)}
-                    >
-                      −
-                    </button>
-                    <button
-                      type="button"
-                      className="btn daily-item__count-btn"
-                      aria-label={`Add one ${item.name}`}
-                      onClick={() => void toggle(item, true)}
-                    >
-                      +
-                    </button>
-                  </span>
-                ))}
-            </div>
-          );
-        }
+        // Counter items were removed from the product (s26) — any stored one
+        // renders as a plain check row (server still speaks count semantics).
         return (
           <div className={`daily-item${checkInfo ? ' daily-item--done' : ''}`} key={item.id}>
             <button
@@ -2311,11 +2267,7 @@ function DailySection({
             const name = newItem.trim();
             if (!name) return;
             setNewItem('');
-            setNewIsCounter(false);
-            void saveItems([
-              ...customItems,
-              { name, ...(newIsCounter ? { kind: 'counter' as const } : {}) },
-            ]);
+            void saveItems([...customItems, { name }]);
           }}
         >
           <div className="daily__add-row">
@@ -2329,14 +2281,6 @@ function DailySection({
               Add
             </button>
           </div>
-          <label className="daily__add-kind subtle">
-            <input
-              type="checkbox"
-              checked={newIsCounter}
-              onChange={(e) => setNewIsCounter(e.target.checked)}
-            />
-            Count it (can happen several times a day)
-          </label>
         </form>
       ) : readOnly ? null : (
         <p className="subtle daily__hint">
@@ -3863,6 +3807,11 @@ function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
 
   return (
     <div className="profile-view">
+      <div className="profile-view__editrow">
+        <button className="btn btn--link" type="button" onClick={onEdit}>
+          ✎ Edit
+        </button>
+      </div>
       {(pet.breed || pet.dob || pet.weight || pet.fixed !== undefined) && (
         <section className="profile-section">
           <h3 className="profile-section__title">About</h3>

@@ -43,8 +43,8 @@ await shot('lightbox');
 await page.keyboard.press('Escape');
 await page.waitForTimeout(400);
 
-// Profile tab (edit should be top-right now)
-await page.click('.tab-bar__tab:has-text("Profile")');
+// Profile opens from the hero row now (it left the segmented control)
+await page.click('.pet-detail__hero-profile');
 await shot('detail-profile');
 
 // Passport lives on the bottom tab bar now (per-pet sections)

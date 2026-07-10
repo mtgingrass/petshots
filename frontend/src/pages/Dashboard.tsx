@@ -270,11 +270,11 @@ type DashView =
   | { type: 'overview' }
   | { type: 'detail'; petId: string; tab?: PetTab }
   // The pet's identity screen (health profile + weight log + name/photo edit),
-  // pushed from the detail hero.
+  // pushed from the detail hero. Everything editable — including delete —
+  // lives in its Edit Profile sheet; there is no separate edit-pet screen.
   | { type: 'profile'; petId: string }
   | { type: 'passports' }
   | { type: 'add-pet' }
-  | { type: 'edit-pet'; petId: string }
   | { type: 'change-password' }
   // Settings is split into three focused screens, all reached from the
   // header avatar menu.
@@ -343,32 +343,12 @@ export function Dashboard() {
     localStorage.setItem('petshots.presentHint', '1');
     setShowPresentHint(false);
   }
-  const [pendingDelete, setPendingDelete] = useState<{
-    pet: Pet;
-    docs: Doc[];
-    timerId: ReturnType<typeof setTimeout>;
-  } | null>(null);
-  // Keep a ref so the unmount cleanup can read current value without a stale closure.
-  const pendingDeleteRef = useRef(pendingDelete);
-  pendingDeleteRef.current = pendingDelete;
-
   const showNotice = useCallback((msg: string) => {
     setNotice(msg);
     clearTimeout(noticeTimer.current);
     noticeTimer.current = setTimeout(() => setNotice(null), 3000);
   }, []);
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
-
-  // On unmount, commit any pending delete immediately so nothing leaks.
-  useEffect(() => {
-    return () => {
-      const pd = pendingDeleteRef.current;
-      if (pd) {
-        clearTimeout(pd.timerId);
-        void deletePet(pd.pet.id);
-      }
-    };
-  }, []);
 
   // ---- bottom tab bar (mobile + native; desktop keeps the ProfileMenu) ----
   // Which tab owns the current view. The pets tab is a whole stack
@@ -419,7 +399,6 @@ export function Dashboard() {
   // the view so mid-animation re-renders can't cancel it.
   const isSheetView =
     dashView.type === 'add-pet' ||
-    dashView.type === 'edit-pet' ||
     dashView.type === 'change-password' ||
     (dashView.type === 'detail' && (editView.type === 'edit' || editView.type === 'review-extraction')) ||
     (dashView.type === 'profile' && editView.type === 'edit-profile');
@@ -429,8 +408,7 @@ export function Dashboard() {
     dashView.type === 'passports' ||
     dashView.type === 'settings'
       ? 0
-      : dashView.type === 'edit-pet' ||
-          (dashView.type === 'profile' && editView.type === 'edit-profile')
+      : dashView.type === 'profile' && editView.type === 'edit-profile'
         ? 3
         : dashView.type === 'change-password' ||
             dashView.type === 'profile' ||
@@ -463,9 +441,9 @@ export function Dashboard() {
     };
   }
 
-  // Pet currently being viewed in detail/profile/edit-pet screens.
+  // Pet currently being viewed in detail/profile screens.
   const detailPet =
-    dashView.type === 'detail' || dashView.type === 'profile' || dashView.type === 'edit-pet'
+    dashView.type === 'detail' || dashView.type === 'profile'
       ? (pets?.find((p) => p.id === dashView.petId) ?? null)
       : null;
 
@@ -618,46 +596,24 @@ export function Dashboard() {
     setEditView({ type: 'list' });
   }
 
-  function handleDeletePetWithUndo(petId: string) {
-    if (!pets) return;
-    const pet = pets.find((p) => p.id === petId);
+  // Deliberate destruction only: the caller (Edit Profile's danger zone) has
+  // already made the user TYPE the pet's name, so this deletes immediately —
+  // the old optimistic-remove + 10s undo toast was too easy to trip and too
+  // easy to miss.
+  async function handleDeletePet(petId: string) {
+    const pet = pets?.find((p) => p.id === petId);
     if (!pet) return;
     hapticWarning();
-    const docs = allDocs[petId] ?? [];
-
-    // Commit any previously pending delete before starting a new one.
-    if (pendingDelete) {
-      clearTimeout(pendingDelete.timerId);
-      void deletePet(pendingDelete.pet.id).catch(() => {});
+    try {
+      await deletePet(petId);
+      setPets((prev) => (prev ?? []).filter((p) => p.id !== petId));
+      setAllDocs((prev) => { const n = { ...prev }; delete n[petId]; return n; });
+      setAllMeds((prev) => { const n = { ...prev }; delete n[petId]; return n; });
+      backToOverview();
+      showNotice(`${pet.name} deleted`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the pet');
     }
-
-    // Optimistically remove pet from local state and navigate away.
-    setPets((prev) => (prev ?? []).filter((p) => p.id !== petId));
-    setAllDocs((prev) => { const n = { ...prev }; delete n[petId]; return n; });
-    backToOverview();
-
-    const timerId = setTimeout(async () => {
-      setPendingDelete(null);
-      try {
-        await deletePet(petId);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Delete failed — restoring your pet');
-        void loadPets();
-      }
-    }, 10000);
-
-    setPendingDelete({ pet, docs, timerId });
-  }
-
-  function handleUndoDelete() {
-    if (!pendingDelete) return;
-    clearTimeout(pendingDelete.timerId);
-    setPets((prev) =>
-      [...(prev ?? []), pendingDelete.pet].sort((a, b) => a.name.localeCompare(b.name)),
-    );
-    setAllDocs((prev) => ({ ...prev, [pendingDelete.pet.id]: pendingDelete.docs }));
-    showNotice(`${pendingDelete.pet.name} restored`);
-    setPendingDelete(null);
   }
 
   return (
@@ -723,12 +679,6 @@ export function Dashboard() {
           </div>
         </header>
 
-        {pendingDelete && (
-          <div className="undo-notice" role="status">
-            <span>{pendingDelete.pet.name} deleted.</span>
-            <button className="btn btn--link" onClick={handleUndoDelete}>Undo</button>
-          </div>
-        )}
         {notice && <p className="notice" role="status">{notice}</p>}
         {error && (
           <p className="error" role="alert" onClick={() => setError(null)} title="Dismiss">
@@ -761,33 +711,6 @@ export function Dashboard() {
                   setDashView(pet ? { type: 'detail', petId: pet.id } : { type: 'overview' });
                 }}
                 onCancel={backToOverview}
-                onError={setError}
-                onNotice={showNotice}
-              />
-            </div>
-          </div>
-        ) : dashView.type === 'edit-pet' && detailPet ? (
-          <div className="screen-view screen-view--sheet">
-            <nav className="screen-nav">
-              <button
-                className="screen-nav__back btn btn--link"
-                type="button"
-                onClick={() => setDashView({ type: 'profile', petId: detailPet.id })}
-              >
-                ‹ {detailPet.name}
-              </button>
-              <span className="screen-nav__title">Edit Pet</span>
-            </nav>
-            <div className="screen-view__body">
-              <PetForm
-                pet={detailPet}
-                submitLabel="Save"
-                onDone={async () => {
-                  await loadPets();
-                  setDashView({ type: 'profile', petId: detailPet.id });
-                }}
-                onCancel={() => setDashView({ type: 'profile', petId: detailPet.id })}
-                onDeletePet={handleDeletePetWithUndo}
                 onError={setError}
                 onNotice={showNotice}
               />
@@ -836,6 +759,7 @@ export function Dashboard() {
               pet={detailPet}
               onDone={async () => { setEditView({ type: 'list' }); await loadPets(); }}
               onCancel={() => setEditView({ type: 'list' })}
+              onDeletePet={(petId) => { setEditView({ type: 'list' }); void handleDeletePet(petId); }}
               onError={setError}
               onNotice={showNotice}
             />
@@ -844,7 +768,6 @@ export function Dashboard() {
               pet={detailPet}
               onBack={() => setDashView({ type: 'detail', petId: detailPet.id, tab: petTab })}
               onEditProfile={() => setEditView({ type: 'edit-profile' })}
-              onEditPet={() => setDashView({ type: 'edit-pet', petId: detailPet.id })}
               onPetChanged={() => void loadPets()}
               onError={setError}
             />
@@ -1489,25 +1412,23 @@ function PetPin({
 
 // ---- pet create/edit form (shared) ----
 
+// Create-only (the New Pet sheet). Editing an existing pet — name, photo,
+// health profile, delete — all lives in ProfileEditScreen.
 function PetForm({
-  pet,
   submitLabel,
   onDone,
   onCancel,
-  onDeletePet,
   onError,
   onNotice,
 }: {
-  pet?: Pet; // absent = create mode
   submitLabel: string;
   onDone: (pet?: Pet) => Promise<void>;
   onCancel?: () => void;
-  onDeletePet?: (petId: string) => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
-  const [name, setName] = useState(pet?.name ?? '');
-  const [species, setSpecies] = useState(pet?.species ?? 'dog');
+  const [name, setName] = useState('');
+  const [species, setSpecies] = useState('dog');
   const [busy, setBusy] = useState(false);
   const photoRef = useRef<HTMLInputElement>(null);
 
@@ -1527,11 +1448,9 @@ function PetForm({
     setBusy(true);
     onError(null);
     try {
-      const saved = pet
-        ? await updatePet(pet.id, { name: name.trim(), species })
-        : await createPet(name.trim(), species);
+      const saved = await createPet(name.trim(), species);
       if (photo) await uploadAvatar(saved.pet.id, photo);
-      onNotice(pet ? 'Pet updated' : `${saved.pet.name} added`);
+      onNotice(`${saved.pet.name} added`);
       await onDone(saved.pet);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not save pet');
@@ -1568,23 +1487,6 @@ function PetForm({
           </button>
         )}
       </div>
-      {pet && onDeletePet && !pet.household && (
-        <div className="actions">
-          <button
-            type="button"
-            className="btn btn--link btn--danger"
-            onClick={() => onDeletePet(pet.id)}
-            disabled={busy}
-          >
-            Delete {pet.name}…
-          </button>
-        </div>
-      )}
-      {pet?.household && (
-        <p className="subtle">
-          {pet.name} is a family pet — only the family owner can delete it.
-        </p>
-      )}
     </form>
   );
 }
@@ -1823,14 +1725,12 @@ function PetProfileScreen({
   pet,
   onBack,
   onEditProfile,
-  onEditPet,
   onPetChanged,
   onError,
 }: {
   pet: Pet;
   onBack: () => void;
-  onEditProfile: () => void;
-  onEditPet: () => void;
+  onEditProfile: () => void; // the ONE edit affordance — name/photo/health/delete all live there
   onPetChanged: () => void; // weight log syncs the profile's display weight
   onError: (msg: string | null) => void;
 }) {
@@ -1867,10 +1767,10 @@ function PetProfileScreen({
             </span>
           </div>
         </div>
-        <ProfileSection pet={pet} onEdit={onEditProfile} />
+        <ProfileSection pet={pet} />
         <WeightSection petId={pet.id} onPetChanged={onPetChanged} onError={onError} />
-        <button type="button" className="btn profile-editpet" onClick={onEditPet}>
-          Edit name &amp; photo
+        <button type="button" className="btn profile-editpet" onClick={onEditProfile}>
+          Edit profile
         </button>
       </div>
       {showPhoto && pet.avatarUrl && (
@@ -3950,26 +3850,24 @@ function ProfileField({ label, value }: { label: string; value?: string | null }
   );
 }
 
-function ProfileSection({ pet, onEdit }: { pet: Pet; onEdit: () => void }) {
+// Read-only — the single "Edit profile" button on PetProfileScreen is the
+// one edit affordance (two edit buttons on one screen confused people).
+function ProfileSection({ pet }: { pet: Pet }) {
   const hasAny = pet.breed || pet.dob || pet.weight || pet.allergies || pet.behavior ||
     pet.vetName || pet.emergencyContact || pet.microchip || pet.fixed !== undefined || pet.notes;
 
   if (!hasAny) {
     return (
       <div className="profile-empty">
-        <p className="subtle">No health profile yet.</p>
-        <button className="btn btn--primary" onClick={onEdit}>Add profile details</button>
+        <p className="subtle">
+          No health profile yet — add breed, allergies, and vet info with Edit profile below.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="profile-view">
-      <div className="profile-view__editrow">
-        <button className="btn btn--link" type="button" onClick={onEdit}>
-          ✎ Edit
-        </button>
-      </div>
       {(pet.breed || pet.dob || pet.weight || pet.fixed !== undefined) && (
         <section className="profile-section">
           <h3 className="profile-section__title">About</h3>
@@ -4370,15 +4268,20 @@ function ProfileEditScreen({
   pet,
   onDone,
   onCancel,
+  onDeletePet,
   onError,
   onNotice,
 }: {
   pet: Pet;
   onDone: () => Promise<void>;
   onCancel: () => void;
+  onDeletePet?: (petId: string) => void;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
 }) {
+  const [name, setName] = useState(pet.name);
+  const [species, setSpecies] = useState(pet.species);
+  const photoRef = useRef<HTMLInputElement>(null);
   const [breed, setBreed] = useState(pet.breed ?? '');
   const [dob, setDob] = useState(pet.dob ?? '');
   const [weight, setWeight] = useState(pet.weight ?? '');
@@ -4393,15 +4296,32 @@ function ProfileEditScreen({
   const [vetPhone, setVetPhone] = useState(pet.vetPhone ?? '');
   const [emergencyContact, setEmergencyContact] = useState(pet.emergencyContact ?? '');
   const [busy, setBusy] = useState(false);
+  // Deleting is deliberate: type the pet's name to arm the button. The old
+  // one-tap-then-undo-toast flow was too easy to trip without noticing.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteText, setDeleteText] = useState('');
+  const deleteArmed =
+    deleteText.trim().toLowerCase() === pet.name.trim().toLowerCase();
 
   async function handleSave(e: FormEvent) {
     e.preventDefault();
+    const photo = photoRef.current?.files?.[0];
+    if (photo) {
+      if (!AVATAR_TYPES.includes(photo.type)) {
+        onError('Pet photo must be a JPG, PNG, or WebP image.');
+        return;
+      }
+      if (photo.size > MAX_AVATAR_BYTES) {
+        onError(`That photo is ${formatSize(photo.size)} - the limit is 5 MB.`);
+        return;
+      }
+    }
     setBusy(true);
     onError(null);
     try {
       await updatePet(pet.id, {
-        name: pet.name,
-        species: pet.species,
+        name: name.trim() || pet.name,
+        species,
         breed: breed || undefined,
         dob: dob || undefined,
         weight: weight || undefined,
@@ -4414,6 +4334,7 @@ function ProfileEditScreen({
         vetPhone: vetPhone || undefined,
         emergencyContact: emergencyContact || undefined,
       });
+      if (photo) await uploadAvatar(pet.id, photo);
       onNotice('Profile saved');
       await onDone();
     } catch (err) {
@@ -4432,7 +4353,25 @@ function ProfileEditScreen({
         <span className="screen-nav__title">Edit Profile</span>
       </nav>
       <form className="form profile-form" onSubmit={handleSave}>
-        <p className="profile-form__hint subtle">All fields are optional.</p>
+        <fieldset className="profile-form__group">
+          <legend>Name &amp; photo</legend>
+          <label>Pet name
+            <input value={name} onChange={(e) => setName(e.target.value)} required />
+          </label>
+          <label>Species
+            <select value={species} onChange={(e) => setSpecies(e.target.value)}>
+              <option value="dog">Dog</option>
+              <option value="cat">Cat</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label>
+            New photo (optional · JPG, PNG · max 5 MB)
+            <input ref={photoRef} type="file" accept="image/jpeg,image/png,image/webp" />
+          </label>
+        </fieldset>
+
+        <p className="profile-form__hint subtle">Everything below is optional.</p>
 
         <fieldset className="profile-form__group">
           <legend>About</legend>
@@ -4484,13 +4423,73 @@ function ProfileEditScreen({
         </fieldset>
 
         <div className="actions">
-          <button className="btn btn--primary" type="submit" disabled={busy}>
+          <button className="btn btn--primary" type="submit" disabled={busy || !name.trim()}>
             {busy ? 'Saving…' : 'Save profile'}
           </button>
           <button className="btn" type="button" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
         </div>
+
+        {onDeletePet && !pet.household && (
+          <fieldset className="profile-form__group profile-form__group--danger">
+            <legend>Danger zone</legend>
+            {!confirmingDelete ? (
+              <button
+                type="button"
+                className="btn btn--danger"
+                disabled={busy}
+                onClick={() => { setConfirmingDelete(true); setDeleteText(''); }}
+              >
+                Delete {pet.name}…
+              </button>
+            ) : (
+              <div className="danger-confirm">
+                <p className="danger-confirm__warning">
+                  This permanently deletes {pet.name} — every record, medication,
+                  daily history, weigh-in, and any shared passport link.
+                  <strong> There is no undo.</strong>
+                </p>
+                <label>
+                  Type <strong>{pet.name}</strong> to confirm
+                  <input
+                    value={deleteText}
+                    onChange={(e) => setDeleteText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
+                    placeholder={pet.name}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoFocus
+                  />
+                </label>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => { setConfirmingDelete(false); setDeleteText(''); }}
+                  >
+                    Keep {pet.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--danger"
+                    disabled={busy || !deleteArmed}
+                    onClick={() => onDeletePet(pet.id)}
+                  >
+                    Delete forever
+                  </button>
+                </div>
+              </div>
+            )}
+          </fieldset>
+        )}
+        {pet.household && (
+          <p className="subtle">
+            {pet.name} is a family pet — only the family owner can delete it.
+          </p>
+        )}
       </form>
     </div>
   );

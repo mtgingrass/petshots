@@ -527,24 +527,6 @@ a {
   margin-bottom: 1rem;
 }
 
-.undo-notice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--warn);
-  padding: 0.6rem 0.9rem;
-  border-radius: 8px;
-  margin-bottom: 1rem;
-}
-
-.undo-notice .btn--link {
-  color: var(--warn);
-  white-space: nowrap;
-}
-
 /* ---------- Pet overview: pinned portraits ---------- */
 
 /* Big round portraits, like pinned contacts in a messages app. The status
@@ -1719,6 +1701,17 @@ a {
   border-radius: 10px;
   padding: 1rem;
   margin: 0 0 1rem;
+}
+
+/* Delete-pet zone at the bottom of Edit Profile — same red-tinted treatment
+   as the account danger zone in Settings. */
+.profile-form__group--danger {
+  background: color-mix(in srgb, var(--error) 7%, var(--panel-raised));
+  border-color: color-mix(in srgb, var(--error) 30%, var(--border));
+}
+
+.profile-form__group--danger legend {
+  color: var(--error);
 }
 
 .profile-form__group legend {

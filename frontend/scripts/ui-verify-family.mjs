@@ -138,10 +138,12 @@ async function main() {
 
   console.log('\n[4] member: household pet restrictions in UI');
   await memberPage.click('text=Maple');
-  // Daily is the landing segment now — ✎ Edit lives on the Records tab.
-  await memberPage.click('.tab-bar__tab:has-text("Records")');
   await memberPage.waitForSelector('.pet-detail__hero', { timeout: 15000 });
-  await memberPage.click('button:has-text("✎ Edit")');
+  // Editing (incl. delete) lives on the Profile screen's Edit Profile sheet now.
+  await memberPage.click('.pet-detail__hero-open');
+  await memberPage.waitForSelector('.screen-nav__title:has-text("Profile")', { timeout: 10000 });
+  await memberPage.click('.profile-editpet');
+  await memberPage.waitForSelector('.screen-nav__title:has-text("Edit Profile")', { timeout: 10000 });
   const deleteVisible = await memberPage
     .locator('button:has-text("Delete Maple")')
     .isVisible()

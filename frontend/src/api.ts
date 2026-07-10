@@ -132,6 +132,8 @@ export interface Med {
   // "Stop tracking": stays on record, but banners, overview status, the
   // passport, and reminder emails all skip it.
   dismissed?: boolean;
+  // Server-stamped on first save; sent back on PUT but never trusted there.
+  createdAt?: string;
 }
 
 // ---- web push ----

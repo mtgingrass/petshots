@@ -120,6 +120,12 @@ interface Med {
   // public passport, and reminder email all skip it. Distinct from muting
   // reminders — a dismissed med is no longer considered due at all.
   dismissed?: boolean;
+  // Server-stamped (ISO) when an id first appears in a PUT; never trusted from
+  // the client. Lets the reminder Lambda fire a one-time nag for a med added
+  // already-overdue (the doc side uses S3 LastModified; meds.json is one
+  // whole-list file, so per-med stamps are the only usable signal). Legacy
+  // meds stored before this field stay unstamped — they never spuriously nag.
+  createdAt?: string;
 }
 const MAX_MEDS = Number(process.env.MAX_MEDS ?? LIMITS_FREE.MAX_MEDS);
 const MED_UNIT_MAX: Record<Med['unit'], number> = MEDS.UNIT_MAX;
@@ -134,9 +140,14 @@ function isStrictDay(v: unknown): v is string {
   return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
 }
 
-function cleanMeds(input: unknown, maxMeds: number): { meds: Med[] } | { error: string } {
+function cleanMeds(
+  input: unknown,
+  maxMeds: number,
+  storedMeds: Med[] = [],
+): { meds: Med[] } | { error: string } {
   if (!Array.isArray(input)) return { error: 'meds must be an array' };
   if (input.length > maxMeds) return { error: `limit of ${maxMeds} medications per pet` };
+  const storedById = new Map(storedMeds.map((m) => [m.id, m]));
   const seenIds = new Set<string>();
   const meds: Med[] = [];
   for (const raw of input) {
@@ -173,6 +184,9 @@ function cleanMeds(input: unknown, maxMeds: number): { meds: Med[] } | { error: 
       remindersEnabled: m.remindersEnabled !== false,
       lastGiven: m.lastGiven as string | undefined,
       dismissed: m.dismissed === true ? true : undefined,
+      // Known id keeps its stored stamp (even undefined, for legacy meds);
+      // a new id is stamped now. Client-sent values are never trusted.
+      createdAt: storedById.has(id) ? storedById.get(id)!.createdAt : new Date().toISOString(),
     });
   }
   return { meds };
@@ -1048,15 +1062,23 @@ async function handleUnsubscribe(
   // Both are UUIDs (Cognito sub / randomUUID); reject other shapes before they
   // touch a key. Wrong or unknown values all 404 so subs can't be probed.
   if (!isUuid(sub) || !isUuid(token)) return json(404, { error: 'not found' });
-  const settings = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
-  const stored = typeof settings?.unsubToken === 'string' ? settings.unsubToken : '';
-  const given = Buffer.from(token);
-  const expected = Buffer.from(stored);
-  if (!stored || given.length !== expected.length || !timingSafeEqual(given, expected)) {
-    return json(404, { error: 'not found' });
+  // ETag-guarded read-modify-write: an unguarded put here could clobber a
+  // concurrent Settings save (dropping its keys) or itself be lost.
+  for (let attempt = 0; ; attempt++) {
+    const { value: settings, etag } = await readJsonTagged<Record<string, unknown>>(
+      `users/${sub}/settings.json`,
+    );
+    const stored = typeof settings?.unsubToken === 'string' ? settings.unsubToken : '';
+    const given = Buffer.from(token);
+    const expected = Buffer.from(stored);
+    if (!stored || given.length !== expected.length || !timingSafeEqual(given, expected)) {
+      return json(404, { error: 'not found' });
+    }
+    if (await putJsonGuarded(`users/${sub}/settings.json`, { ...settings, emailOptOut: true }, etag)) {
+      return json(200, { ok: true });
+    }
+    if (attempt >= 3) return json(409, { error: 'busy, try again' });
   }
-  await putJson(`users/${sub}/settings.json`, { ...settings, emailOptOut: true });
-  return json(200, { ok: true });
 }
 
 export const handler = async (
@@ -1753,36 +1775,38 @@ export const handler = async (
       case 'PUT /pets/{petId}/meds': {
         // Whole-list replace, like settings.json. Require the pet to exist so
         // meds can't be stashed under arbitrary petIds outside the pet limit.
-        const [existingPet, ent, stored] = await Promise.all([
+        const [existingPet, ent] = await Promise.all([
           readJson(petKey),
           getEntitlements(dataSub),
-          readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
         ]);
         if (existingPet === null) return json(404, { error: 'not found' });
         const input = JSON.parse(event.body ?? '{}');
-        // Grandfather clause: whole-list replace means a user left over the cap
-        // by a downgrade must still be able to edit/shrink the list — only
-        // growing past what they already have is blocked.
-        const effectiveMax = Math.max(ent.maxMeds, stored?.meds?.length ?? 0);
-        const result = cleanMeds(input.meds, effectiveMax);
-        if ('error' in result) return json(400, { error: result.error });
-        // Growing the list counts as a write; read-only (over-cap) pets can
-        // still have meds edited, toggled, and removed — just not added.
-        if (
-          result.meds.length > (stored?.meds?.length ?? 0) &&
-          !(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))
-        ) {
-          return json(403, { error: READ_ONLY_PET_ERROR });
+        // ETag-guarded like daily.json: the daily-check med side-effect writes
+        // this file too, so an unguarded replace could clobber a nextDue
+        // advance that landed mid-request.
+        for (let attempt = 0; ; attempt++) {
+          const { value: stored, etag } = await readJsonTagged<{ meds: Med[] }>(
+            `${petPrefix}meds.json`,
+          );
+          // Grandfather clause: whole-list replace means a user left over the cap
+          // by a downgrade must still be able to edit/shrink the list — only
+          // growing past what they already have is blocked.
+          const effectiveMax = Math.max(ent.maxMeds, stored?.meds?.length ?? 0);
+          const result = cleanMeds(input.meds, effectiveMax, stored?.meds ?? []);
+          if ('error' in result) return json(400, { error: result.error });
+          // Growing the list counts as a write; read-only (over-cap) pets can
+          // still have meds edited, toggled, and removed — just not added.
+          if (
+            result.meds.length > (stored?.meds?.length ?? 0) &&
+            !(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))
+          ) {
+            return json(403, { error: READ_ONLY_PET_ERROR });
+          }
+          if (await putJsonGuarded(`${petPrefix}meds.json`, result, etag)) {
+            return json(200, result);
+          }
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
         }
-        await s3.send(
-          new PutObjectCommand({
-            Bucket: BUCKET,
-            Key: `${petPrefix}meds.json`,
-            Body: JSON.stringify(result),
-            ContentType: 'application/json',
-          }),
-        );
-        return json(200, result);
       }
 
       // ---- daily care checklist (per pet) ----
@@ -1970,10 +1994,28 @@ export const handler = async (
           if (attempt >= 3) return json(409, { error: 'busy, try again' });
         }
 
-        if (medUpdate && medsStored && med) {
-          med.lastGiven = medUpdate.lastGiven;
-          med.nextDue = medUpdate.nextDue;
-          await putJson(`${petPrefix}meds.json`, medsStored);
+        if (medUpdate && med) {
+          // Apply the schedule change to a FRESH read under an ETag guard —
+          // writing back the list read at request start could clobber another
+          // phone's concurrent check-off (or a meds-screen edit). The daily
+          // write already landed, so on exhausted retries we log and return
+          // 200 rather than strand a checked-off row (unchecking restores the
+          // schedule from `prev` either way).
+          const medId = med.id;
+          for (let attempt = 0; ; attempt++) {
+            const { value: fresh, etag } = await readJsonTagged<{ meds: Med[] }>(
+              `${petPrefix}meds.json`,
+            );
+            const target = fresh?.meds.find((m) => m.id === medId);
+            if (!target) break; // med deleted mid-request — nothing to advance
+            target.lastGiven = medUpdate.lastGiven;
+            target.nextDue = medUpdate.nextDue;
+            if (await putJsonGuarded(`${petPrefix}meds.json`, fresh, etag)) break;
+            if (attempt >= 3) {
+              console.error(`med schedule write lost after retries: ${petPrefix} ${medId}`);
+              break;
+            }
+          }
         }
         return json(200, { date, checks: day });
       }
@@ -2024,36 +2066,38 @@ export const handler = async (
       case 'PUT /settings': {
         const input = JSON.parse(event.body ?? '{}');
         const validDays = REMINDERS.VALID_REMINDER_DAYS;
-        // unsubToken is server-managed: preserved from the stored file (never
-        // trusted from the client) and minted here if absent, so every user
-        // who saves settings gets a working unsubscribe link.
-        const existing = await readJson<Record<string, unknown>>(`users/${sub}/settings.json`);
-        const settings = {
-          email: typeof input.email === 'string' ? input.email.slice(0, 254) : '',
-          remindersEnabled: input.remindersEnabled === true,
-          reminderDays: Array.isArray(input.reminderDays)
-            ? (input.reminderDays as unknown[]).filter(
-                (d): d is number => typeof d === 'number' && validDays.includes(d),
-              )
-            : REMINDERS.DEFAULT_REMINDER_DAYS,
-          marketingOptIn: input.marketingOptIn === true,
-          emailOptOut: input.emailOptOut === true,
-          // Sunday summary of the week's care/mood/weight. Default ON (it
-          // only ever sends when reminders are enabled AND there was
-          // activity), explicit false turns it off.
-          weeklyDigest: input.weeklyDigest !== false,
-          unsubToken:
-            typeof existing?.unsubToken === 'string' ? existing.unsubToken : randomUUID(),
-        };
-        await s3.send(
-          new PutObjectCommand({
-            Bucket: BUCKET,
-            Key: `users/${sub}/settings.json`,
-            Body: JSON.stringify(settings),
-            ContentType: 'application/json',
-          }),
-        );
-        return json(200, settings);
+        // ETag-guarded: the reminder Lambda's legacy-token backfill and the
+        // public /unsubscribe route write this file too — a conflict here
+        // could regenerate the unsubToken (dead links in already-sent email).
+        for (let attempt = 0; ; attempt++) {
+          // unsubToken is server-managed: preserved from the stored file (never
+          // trusted from the client) and minted here if absent, so every user
+          // who saves settings gets a working unsubscribe link.
+          const { value: existing, etag } = await readJsonTagged<Record<string, unknown>>(
+            `users/${sub}/settings.json`,
+          );
+          const settings = {
+            email: typeof input.email === 'string' ? input.email.slice(0, 254) : '',
+            remindersEnabled: input.remindersEnabled === true,
+            reminderDays: Array.isArray(input.reminderDays)
+              ? (input.reminderDays as unknown[]).filter(
+                  (d): d is number => typeof d === 'number' && validDays.includes(d),
+                )
+              : REMINDERS.DEFAULT_REMINDER_DAYS,
+            marketingOptIn: input.marketingOptIn === true,
+            emailOptOut: input.emailOptOut === true,
+            // Sunday summary of the week's care/mood/weight. Default ON (it
+            // only ever sends when reminders are enabled AND there was
+            // activity), explicit false turns it off.
+            weeklyDigest: input.weeklyDigest !== false,
+            unsubToken:
+              typeof existing?.unsubToken === 'string' ? existing.unsubToken : randomUUID(),
+          };
+          if (await putJsonGuarded(`users/${sub}/settings.json`, settings, etag)) {
+            return json(200, settings);
+          }
+          if (attempt >= 3) return json(409, { error: 'busy, try again' });
+        }
       }
 
       // ---- account deletion ----

@@ -259,6 +259,7 @@ interface Med {
   remindersEnabled: boolean;
   lastGiven?: string;
   dismissed?: boolean; // "stop tracking" — never considered due
+  createdAt?: string; // ISO, server-stamped when the med first appeared (absent on legacy meds)
 }
 
 async function readJson<T>(key: string): Promise<T | null> {
@@ -267,6 +268,49 @@ async function readJson<T>(key: string): Promise<T | null> {
     return JSON.parse(await obj.Body!.transformToString()) as T;
   } catch (e) {
     if ((e as { name?: string }).name === 'NoSuchKey') return null;
+    throw e;
+  }
+}
+
+// ETag-guarded pair for the one file this Lambda WRITES (the legacy
+// unsubToken backfill into settings.json) — same pattern as the api Lambda's
+// readJsonTagged/putJsonGuarded, so the backfill can't clobber a Settings
+// save landing at the same moment as the 9:00 cron.
+async function readJsonTagged<T>(key: string): Promise<{ value: T | null; etag: string | null }> {
+  try {
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    return {
+      value: JSON.parse(await obj.Body!.transformToString()) as T,
+      etag: obj.ETag ?? null,
+    };
+  } catch (e) {
+    if ((e as { name?: string }).name === 'NoSuchKey') return { value: null, etag: null };
+    throw e;
+  }
+}
+
+async function putJsonGuarded(key: string, body: unknown, etag: string | null): Promise<boolean> {
+  try {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: JSON.stringify(body),
+        ContentType: 'application/json',
+        ...(etag ? { IfMatch: etag } : { IfNoneMatch: '*' }),
+      }),
+    );
+    return true;
+  } catch (e) {
+    const err = e as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (
+      err.name === 'PreconditionFailed' ||
+      err.name === 'ConditionalRequestConflict' ||
+      err.$metadata?.httpStatusCode === 412 ||
+      err.$metadata?.httpStatusCode === 409
+    ) {
+      return false;
+    }
     throw e;
   }
 }
@@ -668,17 +712,28 @@ export const handler = async (event?: {
         : REMINDERS.DEFAULT_REMINDER_DAYS;
 
       // Every email must carry a working unsubscribe link. Accounts that
-      // predate unsubTokens get one minted and persisted here.
+      // predate unsubTokens get one minted and persisted here — under an
+      // ETag guard, so a Settings save landing at the same moment as the
+      // cron neither loses its keys nor ends up with a different token than
+      // the one going into this email.
       if (!settings.unsubToken) {
-        settings.unsubToken = randomUUID();
-        await s3.send(
-          new PutObjectCommand({
-            Bucket: BUCKET,
-            Key: `${userPrefix}settings.json`,
-            Body: JSON.stringify(settings),
-            ContentType: 'application/json',
-          }),
-        );
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const { value: fresh, etag } = await readJsonTagged<UserSettings>(
+            `${userPrefix}settings.json`,
+          );
+          if (fresh?.unsubToken) {
+            // Someone else (PUT /settings) minted one first — use theirs.
+            settings.unsubToken = fresh.unsubToken;
+            break;
+          }
+          const minted = { ...(fresh ?? settings), unsubToken: randomUUID() };
+          if (await putJsonGuarded(`${userPrefix}settings.json`, minted, etag)) {
+            settings.unsubToken = minted.unsubToken;
+            break;
+          }
+        }
+        // Never send email whose unsubscribe link isn't persisted.
+        if (!settings.unsubToken) continue;
       }
       const userSub = userPrefix.slice('users/'.length).replace(/\/$/, '');
       const unsubUrl = `${APP_URL}/unsubscribe?u=${userSub}&t=${settings.unsubToken}`;
@@ -754,7 +809,18 @@ export const handler = async (event?: {
           if (med.dismissed === true || med.remindersEnabled === false || !med.nextDue) continue;
           const days = daysUntil(med.nextDue);
           const effInterval = effectiveMedIntervalDays(med.unit, med.interval);
-          if (medShouldRemind(days, effInterval)) {
+          // Med equivalent of the doc-side first-scan rule: a med ADDED
+          // already-overdue would otherwise wait for the next taper tick
+          // (up to ~30 days) before its first email. createdAt is stamped
+          // per med by the PUT validator (meds.json's own LastModified is
+          // useless — any edit refreshes it); legacy meds without a stamp
+          // never spuriously nag. Age < window is true on exactly one run.
+          const firstScanOverdue =
+            !ignoreNewUploads &&
+            days < 0 &&
+            typeof med.createdAt === 'string' &&
+            Date.now() - Date.parse(med.createdAt) < REMINDERS.FIRST_SCAN_OVERDUE_WINDOW_MS;
+          if (medShouldRemind(days, effInterval) || firstScanOverdue) {
             dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days, phase: phaseFor(days) });
           }
         }

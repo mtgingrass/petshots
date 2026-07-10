@@ -18,9 +18,12 @@
 //     days" heads-up — short-cycle (daily) meds skip that heads-up.
 //   - First-scan nag: a doc uploaded (or edited) ALREADY overdue fires once
 //     on the first run after the object appears (age < 24h), so it never
-//     waits silently for the next taper tick. The dry-run payload flag
-//     { ignoreNewUploads: true } disables this so freshly-seeded docs can
-//     still exercise the pure cadence rules above.
+//     waits silently for the next taper tick. Meds get the same rule via a
+//     server-stamped per-med createdAt (meds.json's LastModified refreshes on
+//     every edit, so it can't be the signal); legacy meds without the stamp
+//     never nag. The dry-run payload flag { ignoreNewUploads: true } disables
+//     BOTH nags so freshly-seeded docs/meds can still exercise the pure
+//     cadence rules above.
 //
 // Needs AWS CLI creds (lambda:InvokeFunction + cloudformation:ListStackResources
 // + s3 read/write on the uploads bucket — the script writes users/{sub}/plan.json
@@ -213,8 +216,10 @@ async function main() {
   });
   check(grow.status === 400, `growing past current count rejected 400 (got ${grow.status})`);
 
-  console.log('\n[3] dry run: meds fire per the new due/heads-up/overdue-taper rules');
-  let dry = invokeDryRun(fnName);
+  console.log('\n[3] dry run (ignoreNewUploads): meds fire per the pure due/heads-up/overdue-taper rules');
+  // The flag suppresses the first-scan nag — every med here was just PUT, so
+  // without it the overdue off-cadence meds would (correctly) fire once.
+  let dry = invokeDryRun(fnName, { ignoreNewUploads: true });
   check(dry?.dryRun === true, 'dry run returned without sending');
   let msg = mine(dry);
   check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
@@ -238,6 +243,43 @@ async function main() {
     check(msg.body.includes("Smokey's DueSoonWeeklyMed — due") && msg.body.includes('(in 3 days)'), '3-day heads-up phrasing');
     check(msg.body.includes('/unsubscribe?u='), 'unsubscribe link in footer');
   }
+
+  console.log('\n[3b] first-scan nag: a med ADDED already-overdue fires once (no flag)');
+  // Same 10 seeded meds, no ignoreNewUploads: the off-cadence overdue meds
+  // (fresh createdAt from the PUT) now fire; upcoming/muted/dismissed stay put.
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(!!msg && !Array.isArray(msg), 'exactly one email for this user');
+  if (msg && !Array.isArray(msg)) {
+    check(msg.subject === '⚠️ Petshots: 4 overdue reminders', `subject counts all 4 overdue ("${msg.subject}")`);
+    for (const name of ['OverdueThreeMed', 'OverdueThirtyFiveMed']) {
+      check(msg.body.includes(name), `${name} in body (first-scan nag for a just-added overdue med)`);
+    }
+    for (const name of ['DueTomorrowMed', 'DueSoonDailyMed', 'MutedMed', 'DismissedMed']) {
+      check(!msg.body.includes(name), `${name} still NOT in body`);
+    }
+  }
+  // Legacy meds (stored before createdAt existed) must never spuriously nag:
+  // write meds.json directly, bypassing the PUT validator's stamp.
+  const legacyFile = join(tmpdir(), `legacy-meds-${Date.now()}.json`);
+  writeFileSync(legacyFile, JSON.stringify({
+    meds: [{
+      id: '00000000-0000-4000-8000-000000000001',
+      name: 'LegacyOverdueMed',
+      interval: 1,
+      unit: 'month',
+      nextDue: daysFromToday(-3), // off-cadence overdue — only a nag could fire it
+      remindersEnabled: true,
+    }],
+  }));
+  execSync(`aws s3 cp ${legacyFile} s3://${BUCKET}/users/${sub}/pets/${petId}/meds.json`, { encoding: 'utf8' });
+  unlinkSync(legacyFile);
+  dry = invokeDryRun(fnName);
+  msg = mine(dry);
+  check(
+    !msg || (!Array.isArray(msg) && !msg.body.includes('LegacyOverdueMed')),
+    'unstamped legacy overdue med stays silent (no false first-scan nag)',
+  );
 
   console.log('\n[4] seed: vaccine toggle ON, eight docs covering every vaccine trigger, meds cleared');
   r = await api(token, 'PUT', `/pets/${petId}/meds`, { meds: [] });

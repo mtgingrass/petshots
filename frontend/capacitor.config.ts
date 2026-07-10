@@ -40,7 +40,7 @@ const config: CapacitorConfig = {
     SplashScreen: {
       launchShowDuration: 800,
       launchAutoHide: true,
-      backgroundColor: '#0f1220',
+      backgroundColor: '#0a0a0c', // graphite --bg (s26 theme)
       showSpinner: false,
     },
   },

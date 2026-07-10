@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const svg = readFileSync(join(root, 'public/favicon.svg'), 'utf8');
 
-const TILE_BG = '#0f1220'; // matches --bg / theme-color
+const TILE_BG = '#0a0a0c'; // matches --bg / theme-color (iOS graphite, s26)
 const SIZES = [
   { file: 'icon-512.png', px: 512 },
   { file: 'icon-192.png', px: 192 },

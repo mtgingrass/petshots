@@ -434,6 +434,19 @@ interface DailyItem {
   // 'counter' rows tally repeatable events (poops, walks) instead of a
   // single check-off; each increment is logged with who + when.
   kind?: 'check' | 'counter';
+  // Effective-dating (local YYYY-MM-DD, stamped by PUT items): history must
+  // keep showing what the list looked like THAT day. A deleted item is never
+  // dropped from the array — it gets removedOn and disappears from that day
+  // forward; a new item gets addedOn so it doesn't retro-appear in the past.
+  // Missing fields = existed forever (presets, pre-tombstone lists).
+  addedOn?: string;
+  removedOn?: string;
+}
+
+// Is this item on the list as of `date`? Visible from addedOn (inclusive)
+// until removedOn (exclusive — "removed that day and going forward").
+function itemVisibleOn(i: DailyItem, date: string): boolean {
+  return (!i.addedOn || i.addedOn <= date) && (!i.removedOn || date < i.removedOn);
 }
 interface DailyCheck {
   by: string; // actor email, server-stamped (counters: the LAST increment)
@@ -1853,7 +1866,11 @@ export const handler = async (
           mood = arch?.days?.[date]?.mood ?? null;
         }
         const items = [
-          ...(file?.items ?? dailyPresetsFor(petInfo.species)),
+          // Tombstoned/future items filter out per date — the archive path
+          // works too, since removed items keep their names in daily.json.
+          ...(file?.items ?? dailyPresetsFor(petInfo.species)).filter((i) =>
+            itemVisibleOn(i, date),
+          ),
           ...dailyMedItems(medsStored?.meds ?? [], date, checks),
         ];
         return json(200, { date, items, checks, mood });
@@ -1949,7 +1966,9 @@ export const handler = async (
             }
           } else {
             const items = file.items ?? dailyPresetsFor(checkPetInfo.species);
-            const item = items.find((i) => i.id === itemId);
+            // Tombstoned (or not-yet-added) items can't be checked for a day
+            // they weren't on the list.
+            const item = items.find((i) => i.id === itemId && itemVisibleOn(i, date));
             if (!item) return json(404, { error: 'item not found' });
             if (item.kind === 'counter') {
               // Counters tally repeatable events; `checked` maps to +1/-1.
@@ -2021,14 +2040,22 @@ export const handler = async (
       }
 
       case 'PUT /pets/{petId}/daily/items': {
-        // Whole-list replace of the CUSTOM items (med rows derive from meds.json
-        // and can't be edited here). Same pattern as meds.
+        // Whole-list replace of the VISIBLE custom items (med rows derive from
+        // meds.json and can't be edited here). Removals become tombstones, not
+        // deletions: history must keep showing what the list looked like on
+        // each past day, so a removed item stays in the array with removedOn
+        // and only disappears from that day forward.
         const input = JSON.parse(event.body ?? '{}');
         if (!Array.isArray(input.items) || input.items.length > MAX_DAILY_ITEMS) {
           return json(400, { error: `items must be an array of at most ${MAX_DAILY_ITEMS}` });
         }
+        // The client's local day stamps addedOn/removedOn (log dates are local
+        // days too); older clients that send no date fall back to UTC today.
+        const stamp = isDailyDate(input.date)
+          ? input.date
+          : new Date().toISOString().slice(0, 10);
         const seen = new Set<string>();
-        const items: DailyItem[] = [];
+        const incoming: DailyItem[] = [];
         for (const raw of input.items) {
           const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
           const name = String(r.name ?? '').trim().slice(0, 60);
@@ -2040,14 +2067,32 @@ export const handler = async (
               ? r.id
               : randomUUID();
           seen.add(id);
-          items.push({ id, name, ...(r.kind === 'counter' ? { kind: 'counter' as const } : {}) });
+          incoming.push({ id, name, ...(r.kind === 'counter' ? { kind: 'counter' as const } : {}) });
         }
-        if ((await readJson(petKey)) === null) return json(404, { error: 'not found' });
+        const itemsPetInfo = await readJson<{ species?: string }>(petKey);
+        if (itemsPetInfo === null) return json(404, { error: 'not found' });
         for (let attempt = 0; ; attempt++) {
           const { value: file, etag } = await readJsonTagged<DailyFile>(`${petPrefix}daily.json`);
+          // First-ever edit materializes the presets so removing one of them
+          // tombstones it instead of just not storing it.
+          const base = file?.items ?? dailyPresetsFor(itemsPetInfo.species);
+          const baseById = new Map(base.filter((s) => !s.removedOn).map((s) => [s.id, s]));
+          const items: DailyItem[] = [
+            // Visible list in the user's order: known ids keep their addedOn,
+            // new ids are stamped with today.
+            ...incoming.map((i) => {
+              const prev = baseById.get(i.id);
+              return prev ? { ...i, addedOn: prev.addedOn } : { ...i, addedOn: stamp };
+            }),
+            // History: prior tombstones ride along; anything visible that the
+            // client dropped is removed as of today.
+            ...base
+              .filter((s) => s.removedOn || !seen.has(s.id))
+              .map((s) => (s.removedOn ? s : { ...s, removedOn: stamp })),
+          ];
           const next = { items, log: file?.log ?? {}, moods: file?.moods ?? {} };
           if (await putJsonGuarded(`${petPrefix}daily.json`, next, etag)) {
-            return json(200, { items });
+            return json(200, { items: items.filter((i) => itemVisibleOn(i, stamp)) });
           }
           if (attempt >= 3) return json(409, { error: 'busy, try again' });
         }

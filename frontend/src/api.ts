@@ -271,8 +271,11 @@ export function setDailyMood(
 export function saveDailyItems(
   petId: string,
   items: { id?: string; name: string; kind?: 'check' | 'counter' }[],
+  // The client's local day — stamps removed items' removedOn (history keeps
+  // showing them for days before this) and new items' addedOn.
+  date?: string,
 ): Promise<{ items: DailyItem[] }> {
-  return request('PUT', `/pets/${petId}/daily/items`, { items });
+  return request('PUT', `/pets/${petId}/daily/items`, { items, date });
 }
 
 // Per-user limits, resolved server-side from the user's plan and returned by

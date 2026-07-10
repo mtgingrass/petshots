@@ -3334,6 +3334,32 @@ html[data-native="true"] .screen-view--root .screen-view__body {
 
 .date-nav {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+/* Day-step arrows flanking the title — quiet until pressed, dimmed (not
+   hidden) at the range ends so the row never reflows. */
+.date-nav__step {
+  background: none;
+  border: none;
+  color: var(--subtle);
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+
+.date-nav__step:active {
+  opacity: 0.5;
+}
+
+.date-nav__step:disabled {
+  opacity: 0.25;
+  cursor: default;
 }
 
 .date-nav__btn {

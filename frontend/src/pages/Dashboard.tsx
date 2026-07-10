@@ -1199,7 +1199,7 @@ function NoticeStrip({
   pets: Pet[];
   allDocs: Record<string, Doc[]>;
   allMeds: Record<string, Med[]>;
-  onNavigateToPet: (petId: string, tab: 'records' | 'meds' | 'profile') => void;
+  onNavigateToPet: (petId: string, tab: 'records' | 'meds' | 'profile' | 'daily') => void;
 }) {
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
 
@@ -1941,6 +1941,17 @@ function DateNav({
 
   return (
     <div className="date-nav" ref={ref}>
+      {/* Visible day-step buttons — the swipe gesture exists but isn't
+          discoverable; these are, and they edit the same date state. */}
+      <button
+        type="button"
+        className="date-nav__step"
+        aria-label="Previous day"
+        disabled={date <= minDate}
+        onClick={() => { hapticTap(); onChange(addDays(date, -1)); }}
+      >
+        ‹
+      </button>
       <button
         type="button"
         className="date-nav__btn large-title"
@@ -1950,6 +1961,15 @@ function DateNav({
       >
         {dailyDateLabel(date)}
         <span className="date-nav__chevron" aria-hidden="true">▾</span>
+      </button>
+      <button
+        type="button"
+        className="date-nav__step"
+        aria-label="Next day"
+        disabled={date >= localToday()}
+        onClick={() => { hapticTap(); onChange(addDays(date, 1)); }}
+      >
+        ›
       </button>
       {open && (
         <div className="date-nav__dropdown" role="menu">
@@ -2293,7 +2313,7 @@ function DailySection({
     setBusy(true);
     onError(null);
     try {
-      await saveDailyItems(petId, items);
+      await saveDailyItems(petId, items, day);
       load();
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not save the list');

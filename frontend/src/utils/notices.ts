@@ -84,9 +84,12 @@ export function dismissNotice(notice: Notice): void {
   localStorage.setItem(DISMISS_PREFIX + notice.id, String(Date.now()));
 }
 
-// Which pet-detail tab a notice should deep-link to when tapped.
-export function noticeTab(type: NoticeType): 'records' | 'meds' | 'profile' {
-  if (type === 'med-overdue' || type === 'med-due') return 'meds';
+// Which pet-detail surface a notice should deep-link to when tapped.
+// Med notices land on DAILY, not Meds: any med with nextDue <= today is a row
+// on the Daily list, and checking it off there IS marking it given — the Meds
+// tab is schedule management, not the place you act on "due today".
+export function noticeTab(type: NoticeType): 'records' | 'meds' | 'profile' | 'daily' {
+  if (type === 'med-overdue' || type === 'med-due') return 'daily';
   if (type.startsWith('birthday') || type === 'dob-nudge') return 'profile';
   return 'records';
 }

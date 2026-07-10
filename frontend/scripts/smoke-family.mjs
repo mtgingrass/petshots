@@ -371,6 +371,39 @@ async function main() {
   });
   check(ghostCheck.status === 404, 'unknown item 404s');
 
+  console.log('\n[8b2] items history: removals tombstone — past days keep the list they had');
+  const yesterday = ymd(-1);
+  const dinner = daily.body.items.find((i) => i.name === 'Dinner');
+  const yCheck = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: yesterday, itemId: dinner.id, checked: true,
+  });
+  check(yCheck.status === 200, 'preset checked for yesterday (existed then)');
+  const evening = daily.body.items.find((i) => i.name === 'Evening walk');
+  const yGhost = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: yesterday, itemId: evening.id, checked: true,
+  });
+  check(yGhost.status === 404, "item added today can't be checked for yesterday (not on that day's list)");
+  const remove = await api(owner, 'PUT', `/pets/${pet.id}/daily/items`, {
+    items: daily.body.items
+      .filter((i) => !i.id.startsWith('med:') && i.id !== dinner.id)
+      .map(({ id, name, kind }) => ({ id, name, ...(kind ? { kind } : {}) })),
+    date: today,
+  });
+  check(
+    remove.status === 200 && !remove.body.items.some((i) => i.id === dinner.id),
+    'removal accepted; response omits the removed item',
+  );
+  let dToday = await api(member, 'GET', `/pets/${pet.id}/daily?date=${today}`);
+  check(!dToday.body.items.some((i) => i.id === dinner.id), "removed item gone from today's list");
+  const dYest = await api(member, 'GET', `/pets/${pet.id}/daily?date=${yesterday}`);
+  check(dYest.body.items.some((i) => i.id === dinner.id), "yesterday's list still shows the removed item");
+  check(dYest.body.checks[dinner.id]?.by === ownerEmail, "yesterday's check-off + attribution retained");
+  check(!dYest.body.items.some((i) => i.id === evening.id), "yesterday's list omits the item added today");
+  const deadCheck = await api(owner, 'POST', `/pets/${pet.id}/daily/check`, {
+    date: today, itemId: dinner.id, checked: true,
+  });
+  check(deadCheck.status === 404, 'removed item is not checkable today');
+
   console.log('\n[8c] daily mood: first press attributed, override re-attributes');
   const m1 = await api(owner, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 4 });
   check(m1.status === 200 && m1.body.mood.value === 4 && m1.body.mood.by === ownerEmail,

@@ -38,6 +38,8 @@ import {
   listWeights,
   logWeight,
   deleteWeight,
+  getTrends,
+  sendTrendsReport,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -54,11 +56,13 @@ import {
   type CommitRecord,
   type ProfilePatch,
   type DuplicateInfo,
+  type TrendsPet,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
 import { OnboardingTour, TOUR_DONE_KEY } from '../components/OnboardingTour';
+import { Sparkline, GaugeDial, ChecklistPercentRow, moodStatus, statusColor } from '../components/TrendsCharts';
 import { isNative, hapticTap, hapticSuccess, hapticWarning } from '../native';
 import {
   computeNotices,
@@ -275,6 +279,8 @@ type DashView =
   // lives in its Edit Profile sheet; there is no separate edit-pet screen.
   | { type: 'profile'; petId: string }
   | { type: 'passports' }
+  // Combined every-pet trends view — the bottom tab bar's "Trends" tab.
+  | { type: 'trends' }
   | { type: 'add-pet' }
   | { type: 'change-password' }
   // Settings is split into three focused screens, all reached from the
@@ -371,9 +377,11 @@ export function Dashboard() {
       ? 'settings'
       : dashView.type === 'daily'
         ? 'daily'
-        : dashView.type === 'passports'
-          ? 'passports'
-          : 'pets';
+        : dashView.type === 'trends'
+          ? 'trends'
+          : dashView.type === 'passports'
+            ? 'passports'
+            : 'pets';
 
   // Remember where the pets stack was so switching Daily → Pets restores the
   // pet you were looking at (per-tab stacks, like a real iOS tab bar).
@@ -387,9 +395,11 @@ export function Dashboard() {
     settingsReturnRef.current =
       activeTab === 'daily'
         ? { type: 'daily' }
-        : activeTab === 'passports'
-          ? { type: 'passports' }
-          : { type: 'overview' };
+        : activeTab === 'trends'
+          ? { type: 'trends' }
+          : activeTab === 'passports'
+            ? { type: 'passports' }
+            : { type: 'overview' };
     setDashView({ type: 'settings', section });
   }
 
@@ -401,6 +411,7 @@ export function Dashboard() {
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
     else if (tab === 'daily') setDashView({ type: 'daily' });
+    else if (tab === 'trends') setDashView({ type: 'trends' });
     else if (tab === 'passports') setDashView({ type: 'passports' });
     else setDashView({ type: 'settings', section: 'account' });
   }
@@ -638,6 +649,7 @@ export function Dashboard() {
               screens pushed within the pets stack show a back button on desktop. */}
           {dashView.type === 'overview' ||
           dashView.type === 'daily' ||
+          dashView.type === 'trends' ||
           dashView.type === 'settings' ||
           dashView.type === 'change-password' ? (
             <Link className="wordmark dashboard-header__wordmark-desktop" to="/">🐾 Petshots</Link>
@@ -691,6 +703,13 @@ export function Dashboard() {
             </div>
           </div>
         </header>
+
+        {/* Rendered here (right after the header, inside <main>) rather than
+            as a sibling after </main> so desktop's normal document flow puts
+            it between the header and the page content — mobile/native are
+            unaffected since their .tabbar is position:fixed (DOM position
+            doesn't matter once an element is taken out of flow). */}
+        {pets !== null && <TabBar active={activeTab} onSelect={handleTabSelect} />}
 
         {notice && <p className="notice" role="status">{notice}</p>}
         {error && (
@@ -757,6 +776,14 @@ export function Dashboard() {
               setAllMeds((prev) => ({ ...prev, [petId]: meds }))
             }
             onAddPet={() => setDashView({ type: 'add-pet' })}
+          />
+        ) : dashView.type === 'trends' ? (
+          <TrendsAllScreen
+            pets={pets}
+            onError={setError}
+            onNotice={showNotice}
+            onAddPet={() => setDashView({ type: 'add-pet' })}
+            onUpgrade={() => setDashView({ type: 'settings', section: 'account' })}
           />
         ) : dashView.type === 'passports' ? (
           <PassportsAllScreen
@@ -983,7 +1010,6 @@ export function Dashboard() {
         )}
         </div>
       </main>
-      {pets !== null && <TabBar active={activeTab} onSelect={handleTabSelect} />}
       <SiteFooter />
       {presentingPet && presentingDocs.length > 0 && (
         <PresentScreen
@@ -994,6 +1020,208 @@ export function Dashboard() {
       )}
       {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
     </>
+  );
+}
+
+// The bottom bar's Trends tab: a simple (no charts yet — v2) weekly summary
+// per pet, plus a monthly rollup with a one-line "what's moving the needle"
+// headline as a paid perk. Fetches its own data (GET /trends) rather than
+// riding the pets/limits load, since it's the one screen that needs it.
+function TrendsAllScreen({
+  pets,
+  onError,
+  onNotice,
+  onAddPet,
+  onUpgrade,
+}: {
+  pets: Pet[];
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+  onAddPet: () => void;
+  onUpgrade: () => void;
+}) {
+  const [trends, setTrends] = useState<TrendsPet[] | null>(null);
+  const [plan, setPlan] = useState<'free' | 'paid'>('free');
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState<'week' | 'month' | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getTrends()
+      .then((res) => { if (!cancelled) { setTrends(res.pets); setPlan(res.plan); } })
+      .catch((e: Error) => { if (!cancelled) onError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleSend(period: 'week' | 'month') {
+    setSending(period);
+    try {
+      const res = await sendTrendsReport(period);
+      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSending(null);
+    }
+  }
+
+  if (pets.length === 0) {
+    return (
+      <div className="empty-overview">
+        <span className="empty-state__icon" aria-hidden="true">🐾</span>
+        <p>Trends start with a pet. Add yours to get going.</p>
+        <button className="btn btn--primary" onClick={onAddPet}>
+          Add your first pet
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="trends-all">
+      <div className="trends-all__header">
+        <h1 className="large-title">Trends</h1>
+        <div className="trends-all__send-buttons">
+          <button className="btn btn--link btn--sm" disabled={sending !== null} onClick={() => void handleSend('week')}>
+            {sending === 'week' ? 'Sending…' : 'Email week →'}
+          </button>
+          {plan === 'paid' && (
+            <button className="btn btn--link btn--sm" disabled={sending !== null} onClick={() => void handleSend('month')}>
+              {sending === 'month' ? 'Sending…' : 'Email month →'}
+            </button>
+          )}
+        </div>
+      </div>
+      {loading || trends === null ? (
+        <p className="trends-all__loading">Loading trends…</p>
+      ) : (
+        trends.map((t) => {
+          // A single at-a-glance number: mean of this window's per-item
+          // completion rates. Real and derived from data already shown
+          // below, not a fabricated composite metric.
+          const weekPct = t.week.checklist.length
+            ? Math.round(
+                t.week.checklist.reduce((sum, c) => sum + (c.total ? (c.count / c.total) * 100 : 0), 0) /
+                  t.week.checklist.length,
+              )
+            : 0;
+          const monthPct =
+            t.month && t.month.checklist.length
+              ? Math.round(t.month.checklist.reduce((sum, c) => sum + c.pctThis, 0) / t.month.checklist.length)
+              : 0;
+          const gaugeLabel = (pct: number) => (pct >= 80 ? 'On track' : pct >= 50 ? 'Slipping' : 'Off track');
+          const weekMood = t.week.moodAvg !== null ? moodStatus(t.week.moodAvg) : null;
+          const monthMood = t.month?.moodAvg != null ? moodStatus(t.month.moodAvg) : null;
+
+          return (
+            <section key={t.petId} className="card trends-all__pet">
+              <div className="trends-hero">
+                <div className="trends-hero__text">
+                  <h2 className="trends-all__pet-name">{t.name}</h2>
+                  <p className="trends-hero__caption">This week's care consistency</p>
+                </div>
+                <GaugeDial
+                  pct={weekPct}
+                  value={`${weekPct}%`}
+                  label={gaugeLabel(weekPct)}
+                  color={statusColor(weekPct)}
+                />
+              </div>
+
+              <div className="trends-all__section-label">This week</div>
+              <div className="trends-chart-block">
+                <div className="trends-chart-block__caption">
+                  Mood
+                  {weekMood && <span className="trends-status" style={{ color: weekMood.color }}> · {weekMood.label}</span>}
+                </div>
+                <Sparkline points={t.week.moodSeries} color="var(--primary)" />
+              </div>
+              {t.week.weight && (
+                <div className="trends-chart-block">
+                  <div className="trends-chart-block__caption">
+                    Weight — {t.week.weight.value} {t.week.weight.unit}
+                    {t.week.weight.deltaWeek != null &&
+                      ` (${t.week.weight.deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(t.week.weight.deltaWeek)} ${t.week.weight.unit} this week)`}
+                  </div>
+                  <Sparkline points={t.week.weightSeries} color="var(--ok)" />
+                </div>
+              )}
+              <div className="trends-dotrows">
+                {t.week.checklist.map((c) => (
+                  <ChecklistPercentRow
+                    key={c.id}
+                    item={c}
+                    pct={c.total ? Math.round((c.count / c.total) * 100) : 0}
+                    caption={`${c.count}/${c.total} days`}
+                  />
+                ))}
+              </div>
+              {t.week.medsGiven > 0 && (
+                <p className="trends-all__row">Meds given: {t.week.medsGiven}</p>
+              )}
+              {t.week.insight && (
+                <div className="notice-card notice-card--headsup trends-all__insight">
+                  <p className="notice-card__body">{t.week.insight}</p>
+                </div>
+              )}
+
+              {t.month ? (
+                <>
+                  <div className="trends-all__section-label">This month</div>
+                  <div className="trends-hero trends-hero--compact">
+                    <p className="trends-hero__caption">Monthly care consistency</p>
+                    <GaugeDial
+                      pct={monthPct}
+                      value={`${monthPct}%`}
+                      label={gaugeLabel(monthPct)}
+                      color={statusColor(monthPct)}
+                      size={64}
+                    />
+                  </div>
+                  {t.month.headline && (
+                    <div className="notice-card notice-card--headsup trends-all__insight">
+                      <p className="notice-card__body">{t.month.headline}</p>
+                    </div>
+                  )}
+                  <div className="trends-chart-block">
+                    <div className="trends-chart-block__caption">
+                      Mood
+                      {monthMood && <span className="trends-status" style={{ color: monthMood.color }}> · {monthMood.label}</span>}
+                      {t.month.moodAvgLastMonth != null && ` (last month: ${t.month.moodAvgLastMonth.toFixed(1)})`}
+                    </div>
+                    <Sparkline points={t.month.moodSeries} color="var(--primary)" />
+                  </div>
+                  {t.month.weightSeries.some((p) => p.value !== null) && (
+                    <div className="trends-chart-block">
+                      <div className="trends-chart-block__caption">Weight{t.month.weightUnit && ` (${t.month.weightUnit})`}</div>
+                      <Sparkline points={t.month.weightSeries} color="var(--ok)" />
+                    </div>
+                  )}
+                  <div className="trends-dotrows">
+                    {t.month.checklist.map((c) => (
+                      <ChecklistPercentRow key={c.id} item={c} pct={c.pctThis} caption={`last month: ${c.pctLast}%`} />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p className="trends-all__upgrade">
+                  {/* App Store 3.1.1: no external-purchase steering on iOS */}
+                  Monthly trends are a paid feature.{' '}
+                  {!isNative && (
+                    <button className="btn btn--link" onClick={onUpgrade}>
+                      Upgrade to unlock →
+                    </button>
+                  )}
+                </p>
+              )}
+            </section>
+          );
+        })
+      )}
+    </div>
   );
 }
 

@@ -19,6 +19,8 @@ import {
   LIMITS_PAID,
   UPLOADS,
   REMINDERS,
+  DAILY_NUDGE,
+  DIGEST,
   AI,
   EMAIL,
   INFRA,
@@ -252,9 +254,66 @@ export class ApiStack extends cdk.Stack {
     });
     dailyRule.addTarget(new eventsTargets.LambdaFunction(reminderFn));
 
+    // Feeding/walk nudge — two more daily hits on the same Lambda, later in
+    // the day, distinguished by the { nudge } payload. Times are set in
+    // lambda/shared/config.ts (DAILY_NUDGE.*).
+    const breakfastNudgeRule = new events.Rule(this, 'BreakfastNudgeRule', {
+      schedule: events.Schedule.cron({
+        minute: String(DAILY_NUDGE.BREAKFAST_MINUTE),
+        hour: String(DAILY_NUDGE.BREAKFAST_HOUR_UTC),
+        day: '*',
+        month: '*',
+        year: '*',
+      }),
+      description: 'Push-only nudge if breakfast is not checked off yet',
+    });
+    breakfastNudgeRule.addTarget(
+      new eventsTargets.LambdaFunction(reminderFn, {
+        event: events.RuleTargetInput.fromObject({ nudge: 'breakfast' }),
+      }),
+    );
+
+    const eveningNudgeRule = new events.Rule(this, 'EveningNudgeRule', {
+      schedule: events.Schedule.cron({
+        minute: String(DAILY_NUDGE.EVENING_MINUTE),
+        hour: String(DAILY_NUDGE.EVENING_HOUR_UTC),
+        day: '*',
+        month: '*',
+        year: '*',
+      }),
+      description: 'Push-only nudge if dinner/walk is not checked off yet',
+    });
+    eveningNudgeRule.addTarget(
+      new eventsTargets.LambdaFunction(reminderFn, {
+        event: events.RuleTargetInput.fromObject({ nudge: 'evening' }),
+      }),
+    );
+
+    // Monthly report — a paid-plan perk (mirrors GET /trends's month: null
+    // free-tier split), once a month on the same Lambda. Day-of-month is set
+    // directly on the cron rule (DIGEST.MONTHLY_REPORT_DAY_UTC in config.ts)
+    // rather than firing daily and checking the date inside the handler.
+    const monthlyReportRule = new events.Rule(this, 'MonthlyReportRule', {
+      schedule: events.Schedule.cron({
+        minute: String(DIGEST.MONTHLY_REPORT_MINUTE),
+        hour: String(DIGEST.MONTHLY_REPORT_HOUR_UTC),
+        day: String(DIGEST.MONTHLY_REPORT_DAY_UTC),
+        month: '*',
+        year: '*',
+      }),
+      description: 'Sends the paid-plan monthly report email once a month',
+    });
+    monthlyReportRule.addTarget(
+      new eventsTargets.LambdaFunction(reminderFn, {
+        event: events.RuleTargetInput.fromObject({ monthlyReport: true }),
+      }),
+    );
+
     const authedRoutes: [HttpMethod, string][] = [
       [HttpMethod.GET, '/pets'],
       [HttpMethod.POST, '/pets'],
+      [HttpMethod.GET, '/trends'],
+      [HttpMethod.POST, '/trends/send'],
       [HttpMethod.PUT, '/pets/{petId}'],
       [HttpMethod.DELETE, '/pets/{petId}'],
       [HttpMethod.POST, '/pets/{petId}/avatar/upload-url'],

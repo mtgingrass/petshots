@@ -154,6 +154,26 @@ export const REMINDERS = {
 } as const;
 
 /**
+ * FEEDING/WALK NUDGE — two extra EventBridge hits on the same ReminderFn
+ * Lambda (see api-stack.ts), push-only, nagging if breakfast/dinner/walk
+ * presets aren't checked off yet. Gated on the same `remindersEnabled`
+ * consent toggle as vaccine reminders — no separate opt-in yet.
+ *
+ * No per-user timezone is stored anywhere in the product (see DAILY below),
+ * so like REMINDERS.CRON_HOUR_UTC these are fixed UTC hours approximating
+ * US Eastern — they drift an hour with DST rather than tracking each user's
+ * actual local time.
+ */
+export const DAILY_NUDGE = {
+  /** ~10 AM Eastern (EDT) — nags if breakfast isn't checked off yet. */
+  BREAKFAST_HOUR_UTC: 14,
+  BREAKFAST_MINUTE: 0,
+  /** ~7:30 PM Eastern (EDT) — nags if dinner/walk isn't checked off yet. */
+  EVENING_HOUR_UTC: 23,
+  EVENING_MINUTE: 30,
+} as const;
+
+/**
  * WEEKLY DIGEST (separate Sunday email: mood strip, checklist tallies, meds
  * given, weight delta). Only sends when the week held actual activity.
  */
@@ -163,6 +183,40 @@ export const DIGEST = {
   /** How many days back the digest summarizes. Keep <= DAILY.LOG_RETENTION_DAYS
    *  or the digest would need to read the archive (it doesn't). */
   LOOKBACK_DAYS: 7,
+  /**
+   * Below this 1-5 weekly mood average, the digest adds one short "mood
+   * dipped" note (see copy/digest.ts's digestInsightCopy). Takes priority
+   * over a low-completion note below — mood is the more direct signal.
+   */
+  MOOD_DIP_THRESHOLD: 3,
+  /**
+   * A checklist item checked off fewer than (window length - this) times
+   * gets a short "did you forget to log it?" note — at most one per pet.
+   * Template-based (see copy/digest.ts), not AI — deliberately simple;
+   * revisit only if custom items make the generic phrasing feel flat.
+   */
+  LOW_COMPLETION_MISSED_DAYS: 2,
+  /**
+   * Below this many days with ANY Daily activity in the window, the
+   * low-completion note stays silent — there's not enough data to judge yet
+   * (a pet/item added partway through the window, or a brand-new signup's
+   * first day). Deliberately a small ABSOLUTE floor, not window-relative:
+   * an established pet going quiet for much of a 30-day window is real
+   * signal worth surfacing, not a "too new to judge" case — a
+   * window-relative gate (e.g. "active >= days-2") wrongly suppressed that
+   * in testing once the window grew past a week. See GET /trends and the
+   * weekly digest for the two callers.
+   */
+  MIN_ACTIVE_DAYS_FOR_INSIGHT: 3,
+  /**
+   * Monthly report email — a paid-plan perk (mirrors the Trends tab's
+   * month:null-for-free split), same content as GET /trends in email form.
+   * Fixed UTC like REMINDERS.CRON_HOUR_UTC — no per-user timezone exists
+   * (see that constant's comment).
+   */
+  MONTHLY_REPORT_DAY_UTC: 1,
+  MONTHLY_REPORT_HOUR_UTC: 14,
+  MONTHLY_REPORT_MINUTE: 0,
 } as const;
 
 /**

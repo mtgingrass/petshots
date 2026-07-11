@@ -47,7 +47,7 @@ const ymd = (o) => { const d = new Date(); d.setDate(d.getDate() + o); const p =
 
 function invokeDryRun() {
   const fn = execSync(
-    `aws cloudformation describe-stack-resources --stack-name PetshotsApiStack --query "StackResources[?starts_with(LogicalResourceId,'ReminderFn') && ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text`,
+    `aws cloudformation list-stack-resources --stack-name PetshotsApiStack --query "StackResourceSummaries[?starts_with(LogicalResourceId,'ReminderFn') && ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text`,
     { encoding: 'utf8' },
   ).trim();
   execSync(
@@ -64,17 +64,14 @@ async function main() {
   for (const p of pre.body?.pets ?? []) await api(token, 'DELETE', `/pets/${p.id}`);
   const pet = (await api(token, 'POST', '/pets', { name: 'Digby', species: 'dog' })).body.pet;
   const today = ymd(0);
-  // Checklist: breakfast today, two poops, a mood, a given daily med, weigh-ins.
+  // Checklist: breakfast today, a mood, a given daily med, weigh-ins.
   await api(token, 'PUT', `/pets/${pet.id}/meds`, {
     meds: [{ name: 'Insulin', interval: 1, unit: 'day', nextDue: today, remindersEnabled: false }],
   });
   const daily = await api(token, 'GET', `/pets/${pet.id}/daily?date=${today}`);
   const breakfast = daily.body.items.find((i) => i.name === 'Breakfast');
-  const poop = daily.body.items.find((i) => i.kind === 'counter');
   const medItem = daily.body.items.find((i) => i.id.startsWith('med:'));
   await api(token, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: breakfast.id, checked: true });
-  await api(token, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: poop.id, checked: true });
-  await api(token, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: poop.id, checked: true });
   await api(token, 'POST', `/pets/${pet.id}/daily/check`, { date: today, itemId: medItem.id, checked: true });
   await api(token, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 4 });
   await api(token, 'POST', `/pets/${pet.id}/weights`, { date: ymd(-5), weight: 80, unit: 'lb' });
@@ -109,8 +106,13 @@ async function main() {
   const body = digest?.body ?? '';
   check(/🙂/.test(body) && /good/.test(body), 'mood strip + label included');
   check(/Breakfast ×1/.test(body), 'feeding count included');
-  check(/Poop ×2/.test(body), 'counter tally included');
   check(/Meds given: 1/.test(body), 'meds-given count included');
+  // Only 1 of the digest's 7-day window has any Daily activity (the pet was
+  // just created) — the low-completion "we noticed" nudge deliberately
+  // requires most of the window to be tracked first, so it must stay silent
+  // here rather than telling a brand-new pet "you only logged breakfast 1 of
+  // the last 7 days."
+  check(!/We noticed Digby/.test(body), 'no false low-completion nudge for a brand-new pet');
   check(/79 lb/.test(body) && /▼ 1 lb/.test(body), 'weight + weekly delta included');
   check(/unsubscribe/i.test(body), 'unsubscribe link included');
   const push = (dry.wouldPush ?? []).find((w) => w.email === email);

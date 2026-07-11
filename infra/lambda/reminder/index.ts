@@ -12,7 +12,13 @@ import { randomUUID, sign } from 'node:crypto';
 import * as http2 from 'node:http2';
 // All product-tunable numbers (cadences, windows, TTLs) live in one
 // documented file — edit values there, not here.
-import { REMINDERS, DIGEST, PUSH, EMAIL } from '../shared/config';
+import { REMINDERS, DIGEST, PUSH, EMAIL, LIMITS_FREE, DAILY } from '../shared/config';
+// The actual sentences these emails/pushes say live separately from this
+// file's "how it's built and sent" logic — see copy/reminder.ts's header.
+import { reminderCopy, nudgeCopy, digestCopy, digestInsightCopy, monthlyReportCopy } from '../shared/copy';
+// Window-stats math (archive-merging, tallies, the "we noticed" line) is
+// shared with the api Lambda's GET /trends — see that file's header for why.
+import { mergedDailyEntries, rangeStats, pickInsight, overallCompletionPct } from '../shared/dailyStats';
 
 const s3 = new S3Client({
   requestChecksumCalculation: 'WHEN_REQUIRED',
@@ -416,28 +422,54 @@ function isBirthdayToday(dob: string, today: Date): boolean {
   return false;
 }
 
+// ---- HTML email template ----
+// Table-based layout with inline styles — email clients strip <style> blocks
+// and don't support flexbox/grid, so everything is inlined. The plain-text
+// body stays the deliverability/accessibility fallback (SES sends both in
+// one Simple body); this is purely a nicer rendering of the same content.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function emailHtml(title: string, bodyHtml: string, footerHtml: string): string {
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f5f4fb;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f4fb;padding:24px 0;">
+      <tr><td align="center">
+        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:480px;width:100%;">
+          <tr><td style="background:#6c5ce7;padding:20px 28px;">
+            <span style="font-size:20px;font-weight:700;color:#ffffff;">🐾 Petshots</span>
+          </td></tr>
+          <tr><td style="padding:28px;color:#1a1a2e;font-size:15px;line-height:1.55;">
+            <h1 style="margin:0 0 16px;font-size:18px;color:#1a1a2e;">${escapeHtml(title)}</h1>
+            ${bodyHtml}
+          </td></tr>
+          <tr><td style="padding:16px 28px 28px;color:#8a8a9a;font-size:12px;line-height:1.5;border-top:1px solid #eeeef5;">
+            ${footerHtml}
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>`;
+}
+
 function docBullet(d: DueDoc): string {
   if (d.phase === 'overdue') {
-    const od = -d.days;
-    return `• ${d.petName}'s ${d.label} — expired ${formatDate(d.expiry)} (${od} day${od === 1 ? '' : 's'} overdue)`;
+    return `• ${reminderCopy.docOverdue(d.petName, d.label, formatDate(d.expiry), -d.days)}`;
   }
-  if (d.phase === 'today') {
-    return `• ${d.petName}'s ${d.label} — expires today`;
-  }
+  if (d.phase === 'today') return `• ${reminderCopy.docToday(d.petName, d.label)}`;
   const when = d.days === 1 ? 'tomorrow' : `in ${d.days} days`;
-  return `• ${d.petName}'s ${d.label} — expires ${formatDate(d.expiry)} (${when})`;
+  return `• ${reminderCopy.docUpcoming(d.petName, d.label, formatDate(d.expiry), when)}`;
 }
 
 function medBullet(m: DueMed): string {
   if (m.phase === 'overdue') {
-    const od = -m.days;
-    return `• ${m.petName}'s ${m.name} — ${od} day${od === 1 ? '' : 's'} overdue (was due ${formatDate(m.nextDue)})`;
+    return `• ${reminderCopy.medOverdue(m.petName, m.name, formatDate(m.nextDue), -m.days)}`;
   }
-  if (m.phase === 'today') {
-    return `• ${m.petName}'s ${m.name} — due today`;
-  }
+  if (m.phase === 'today') return `• ${reminderCopy.medToday(m.petName, m.name)}`;
   const when = m.days === 1 ? 'tomorrow' : `in ${m.days} days`;
-  return `• ${m.petName}'s ${m.name} — due ${formatDate(m.nextDue)} (${when})`;
+  return `• ${reminderCopy.medUpcoming(m.petName, m.name, formatDate(m.nextDue), when)}`;
 }
 
 // Combines docs + meds for one urgency tier into a single bulleted block,
@@ -451,11 +483,43 @@ function urgencySection(title: string, docs: DueDoc[], meds: DueMed[]): string |
   return `${title}:\n${items.map((i) => i.text).join('\n')}`;
 }
 
+// HTML line-builders — pet names, doc labels, and med names are user input,
+// so (unlike the plain-text bullets above) each dynamic value is escaped
+// individually rather than reusing the pre-formatted text bullet.
+function docLineHtml(d: DueDoc): string {
+  const pet = escapeHtml(d.petName);
+  const label = escapeHtml(d.label);
+  if (d.phase === 'overdue') return reminderCopy.docOverdue(pet, label, formatDate(d.expiry), -d.days);
+  if (d.phase === 'today') return reminderCopy.docToday(pet, label);
+  const when = d.days === 1 ? 'tomorrow' : `in ${d.days} days`;
+  return reminderCopy.docUpcoming(pet, label, formatDate(d.expiry), when);
+}
+function medLineHtml(m: DueMed): string {
+  const pet = escapeHtml(m.petName);
+  const name = escapeHtml(m.name);
+  if (m.phase === 'overdue') return reminderCopy.medOverdue(pet, name, formatDate(m.nextDue), -m.days);
+  if (m.phase === 'today') return reminderCopy.medToday(pet, name);
+  const when = m.days === 1 ? 'tomorrow' : `in ${m.days} days`;
+  return reminderCopy.medUpcoming(pet, name, formatDate(m.nextDue), when);
+}
+function urgencySectionHtml(title: string, docs: DueDoc[], meds: DueMed[], color: string): string | null {
+  if (docs.length === 0 && meds.length === 0) return null;
+  const items = [
+    ...meds.map((m) => ({ days: m.days, text: medLineHtml(m) })),
+    ...docs.map((d) => ({ days: d.days, text: docLineHtml(d) })),
+  ].sort((a, b) => a.days - b.days);
+  return `<div style="margin:0 0 18px;">
+    <div style="font-weight:600;color:${color};margin:0 0 6px;">${escapeHtml(title)}</div>
+    <ul style="margin:0;padding-left:18px;">${items.map((i) => `<li style="margin:0 0 4px;">${i.text}</li>`).join('')}</ul>
+  </div>`;
+}
+
 function composeEmail(
   dueDocs: DueDoc[],
   dueMeds: DueMed[],
   birthdays: Birthday[],
   unsubUrl: string,
+  showUpgrade: boolean,
 ): { subject: string; body: string } {
   const overdueDocs = dueDocs.filter((d) => d.phase === 'overdue');
   const overdueMeds = dueMeds.filter((m) => m.phase === 'overdue');
@@ -474,80 +538,111 @@ function composeEmail(
     const b = birthdays[0];
     subject =
       birthdays.length > 1
-        ? `🎂 ${birthdays.length} Petshots birthdays today!`
-        : b.age >= 1
-          ? `🎂 ${b.petName} turns ${b.age} today!`
-          : `🎂 Happy birthday, ${b.petName}!`;
+        ? reminderCopy.subjectBirthdayMulti(birthdays.length)
+        : reminderCopy.subjectBirthdaySingle(b.petName, b.age);
   } else if (overdueCount === 1 && total === 1) {
     if (overdueDocs.length === 1) {
       const d = overdueDocs[0];
-      const od = -d.days;
-      subject = `⚠️ ${d.petName}'s ${d.label} is ${od} day${od === 1 ? '' : 's'} overdue`;
+      subject = reminderCopy.subjectOverdueSingleDoc(d.petName, d.label, -d.days);
     } else {
       const m = overdueMeds[0];
-      const od = -m.days;
-      subject = `⚠️ ${m.petName}'s ${m.name} is ${od} day${od === 1 ? '' : 's'} overdue`;
+      subject = reminderCopy.subjectOverdueSingleMed(m.petName, m.name, -m.days);
     }
   } else if (overdueCount > 0) {
-    subject = `⚠️ Petshots: ${overdueCount} overdue reminder${overdueCount !== 1 ? 's' : ''}`;
+    subject = reminderCopy.subjectOverdueMulti(overdueCount);
   } else if (todayCount === 1 && total === 1) {
     subject = todayDocs.length === 1
-      ? `Reminder: ${todayDocs[0].petName}'s ${todayDocs[0].label} expires today`
-      : `Reminder: ${todayMeds[0].petName}'s ${todayMeds[0].name} is due today`;
+      ? reminderCopy.subjectTodaySingleDoc(todayDocs[0].petName, todayDocs[0].label)
+      : reminderCopy.subjectTodaySingleMed(todayMeds[0].petName, todayMeds[0].name);
   } else if (todayCount > 0) {
-    subject = `Petshots: ${todayCount} reminder${todayCount !== 1 ? 's' : ''} due today`;
+    subject = reminderCopy.subjectTodayMulti(todayCount);
   } else if (upcomingCount === 1 && upcomingMeds.length === 1) {
     const m = upcomingMeds[0];
-    subject = `Reminder: ${m.petName}'s ${m.name} is due in ${m.days} day${m.days !== 1 ? 's' : ''}`;
+    subject = reminderCopy.subjectUpcomingSingleMed(m.petName, m.name, m.days);
   } else if (upcomingCount === 1) {
     const d = upcomingDocs[0];
-    subject = `Reminder: ${d.petName}'s ${d.label} expires in ${d.days} day${d.days !== 1 ? 's' : ''}`;
+    subject = reminderCopy.subjectUpcomingSingleDoc(d.petName, d.label, d.days);
   } else if (upcomingMeds.length === 0) {
-    subject = `Petshots: ${upcomingCount} vaccine records expiring soon`;
+    subject = reminderCopy.subjectUpcomingDocsOnly(upcomingCount);
   } else if (upcomingDocs.length === 0) {
-    subject = `Petshots: ${upcomingCount} medications due soon`;
+    subject = reminderCopy.subjectUpcomingMedsOnly(upcomingCount);
   } else {
-    subject = `Petshots: ${upcomingCount} pet care reminders`;
+    subject = reminderCopy.subjectUpcomingMixed(upcomingCount);
   }
 
   const sections: string[] = [];
   if (birthdays.length > 0) {
-    sections.push(
-      birthdays
-        .map((b) =>
-          b.age >= 1
-            ? `🎂 ${b.petName} turns ${b.age} today — happy birthday!`
-            : `🎂 It's ${b.petName}'s birthday today — happy birthday!`,
-        )
-        .join('\n'),
-    );
+    sections.push(birthdays.map((b) => reminderCopy.birthdayLine(b.petName, b.age)).join('\n'));
   }
-  const overdueSection = urgencySection('⚠️ Overdue', overdueDocs, overdueMeds);
+  const overdueSection = urgencySection(reminderCopy.sectionTitles.overdue, overdueDocs, overdueMeds);
   if (overdueSection) sections.push(overdueSection);
-  const todaySection = urgencySection('📅 Due today', todayDocs, todayMeds);
+  const todaySection = urgencySection(reminderCopy.sectionTitles.today, todayDocs, todayMeds);
   if (todaySection) sections.push(todaySection);
-  const upcomingSection = urgencySection('Coming up', upcomingDocs, upcomingMeds);
+  const upcomingSection = urgencySection(reminderCopy.sectionTitles.upcoming, upcomingDocs, upcomingMeds);
   if (upcomingSection) sections.push(upcomingSection);
 
   const anyMeds = dueMeds.length > 0;
   const body = [
-    `Hi,`,
+    reminderCopy.greeting,
     ``,
-    total === 0 ? `A little celebration from Petshots:` : `Here's your Petshots reminder:`,
+    total === 0 ? reminderCopy.introCelebrationOnly : reminderCopy.introWithItems,
     ``,
     sections.join('\n\n'),
     ``,
-    anyMeds
-      ? `Mark meds as given and keep records up to date: ${APP_URL}/dashboard`
-      : `Keep records up to date: ${APP_URL}/dashboard`,
+    anyMeds ? reminderCopy.ctaWithMeds(`${APP_URL}/dashboard`) : reminderCopy.ctaDocsOnly(`${APP_URL}/dashboard`),
+    ...(showUpgrade ? [``, reminderCopy.upgradeLine(LIMITS_FREE.MAX_PETS, `${APP_URL}/settings`)] : []),
     ``,
-    `— The Petshots team`,
+    reminderCopy.signoff,
     ``,
-    `Manage reminders in Settings or on each pet's Meds tab.`,
-    `Unsubscribe from all Petshots email: ${unsubUrl}`,
+    reminderCopy.manageReminders,
+    reminderCopy.unsubscribeLine(unsubUrl),
   ].join('\n');
 
   return { subject, body };
+}
+
+// Same content as composeEmail's body, rendered as branded HTML with the
+// same free-plan upgrade line. Subject/urgency-bucketing logic is shared —
+// this only re-renders the body.
+function composeEmailHtml(
+  dueDocs: DueDoc[],
+  dueMeds: DueMed[],
+  birthdays: Birthday[],
+  unsubUrl: string,
+  showUpgrade: boolean,
+): string {
+  const overdueDocs = dueDocs.filter((d) => d.phase === 'overdue');
+  const overdueMeds = dueMeds.filter((m) => m.phase === 'overdue');
+  const todayDocs = dueDocs.filter((d) => d.phase === 'today');
+  const todayMeds = dueMeds.filter((m) => m.phase === 'today');
+  const upcomingDocs = dueDocs.filter((d) => d.phase === 'upcoming');
+  const upcomingMeds = dueMeds.filter((m) => m.phase === 'upcoming');
+  const total = dueDocs.length + dueMeds.length;
+
+  const sections: string[] = [];
+  if (birthdays.length > 0) {
+    sections.push(
+      `<div style="margin:0 0 18px;">${birthdays
+        .map((b) => `<div>${reminderCopy.birthdayLine(escapeHtml(b.petName), b.age)}</div>`)
+        .join('')}</div>`,
+    );
+  }
+  const overdueSection = urgencySectionHtml(reminderCopy.sectionTitles.overdue, overdueDocs, overdueMeds, '#d64545');
+  if (overdueSection) sections.push(overdueSection);
+  const todaySection = urgencySectionHtml(reminderCopy.sectionTitles.today, todayDocs, todayMeds, '#c98a1b');
+  if (todaySection) sections.push(todaySection);
+  const upcomingSection = urgencySectionHtml(reminderCopy.sectionTitles.upcoming, upcomingDocs, upcomingMeds, '#555577');
+  if (upcomingSection) sections.push(upcomingSection);
+
+  const ctaHtml = `<div style="margin:20px 0 0;"><a href="${APP_URL}/dashboard" style="display:inline-block;background:#6c5ce7;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:8px;font-weight:600;font-size:14px;">${reminderCopy.ctaButtonLabel}</a></div>`;
+  const upgradeHtml = showUpgrade
+    ? `<div style="margin:16px 0 0;padding:14px 16px;background:#f5f4fb;border-radius:8px;font-size:13px;color:#4a4a5e;">${reminderCopy.upgradeLineHtml(LIMITS_FREE.MAX_PETS, `${APP_URL}/settings`)}</div>`
+    : '';
+
+  const title = total === 0 && birthdays.length > 0 ? reminderCopy.emailTitleCelebration : reminderCopy.emailTitleReminder;
+  const footerHtml = `${reminderCopy.manageReminders}<br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+
+  return emailHtml(title, sections.join('') + ctaHtml + upgradeHtml, footerHtml);
 }
 
 // ---- weekly digest ----
@@ -562,7 +657,7 @@ interface DailyCheckEntry {
   events?: { by: string; at: string }[];
 }
 interface DailyFileView {
-  items: { id: string; name: string; kind?: string }[] | null;
+  items: { id: string; name: string; kind?: string; addedOn?: string; removedOn?: string }[] | null;
   log?: Record<string, Record<string, DailyCheckEntry>>;
   moods?: Record<string, { value: number; by: string; at: string }>;
 }
@@ -582,6 +677,225 @@ function digestPresetName(itemId: string, species: string | undefined): string |
   if (itemId === 'preset-walk') return 'Walk';
   if (itemId === 'preset-poop') return /cat/i.test(species ?? '') ? '💩 Litter box' : '💩 Poop';
   return undefined;
+}
+
+// ---- feeding/walk nudge ----
+// Two extra EventBridge hits a day (see api-stack.ts DAILY_NUDGE rules), same
+// Lambda, distinguished by event.nudge. Push-only — a same-day nag is stale
+// news by the time any digest/reminder email would next go out. Reuses the
+// vaccine-reminder consent toggle rather than a new opt-in (same precedent
+// as the birthday email). Mirrors the Daily tab's own preset/tombstone
+// model (api/index.ts) rather than a new "due time" concept — there isn't
+// one; a preset is either on today's active list and unchecked, or it isn't.
+function itemActiveOn(
+  items: DailyFileView['items'],
+  presetId: string,
+  date: string,
+): boolean {
+  if (items === null) return true; // never customized -> presets apply as-is
+  const item = items.find((i) => i.id === presetId);
+  if (!item) return false; // customized away, or this pet never had it
+  return (!item.addedOn || item.addedOn <= date) && (!item.removedOn || date < item.removedOn);
+}
+
+async function runDailyNudge(which: 'breakfast' | 'evening', dryRun: boolean): Promise<unknown> {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const wouldPush: Array<{ email: string; body: string }> = [];
+
+  const topList = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: 'users/', Delimiter: '/' }),
+  );
+  const userPrefixes = (topList.CommonPrefixes ?? []).map((p) => p.Prefix!);
+  console.log(`Daily nudge (${which})${dryRun ? ' (dry run)' : ''}: ${userPrefixes.length} user(s) found`);
+
+  for (const userPrefix of userPrefixes) {
+    try {
+      const settings = await readJson<UserSettings>(`${userPrefix}settings.json`);
+      if (!settings?.email || settings.remindersEnabled !== true) continue;
+
+      const petsList = await s3.send(
+        new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}pets/` }),
+      );
+      const petIds = (petsList.Contents ?? [])
+        .filter((it) => it.Key!.endsWith('/pet.json'))
+        .map((it) => it.Key!.slice(`${userPrefix}pets/`.length).split('/')[0]);
+
+      const missed: string[] = [];
+      for (const petId of petIds) {
+        const [pet, daily] = await Promise.all([
+          readJson<{ name?: string; species?: string }>(`${userPrefix}pets/${petId}/pet.json`),
+          readJson<DailyFileView>(`${userPrefix}pets/${petId}/daily.json`),
+        ]);
+        if (!pet?.name) continue;
+        const todaysLog = daily?.log?.[todayKey] ?? {};
+        const presetIds =
+          which === 'breakfast'
+            ? ['preset-breakfast']
+            : /dog/i.test(pet.species ?? '')
+              ? ['preset-dinner', 'preset-walk']
+              : ['preset-dinner'];
+        for (const id of presetIds) {
+          if (itemActiveOn(daily?.items ?? null, id, todayKey) && !todaysLog[id]) {
+            missed.push(`${pet.name}'s ${digestPresetName(id, pet.species)}`);
+          }
+        }
+      }
+      if (missed.length === 0) continue;
+
+      const title = nudgeCopy.title(which);
+      const body = nudgeCopy.body(missed);
+
+      if (dryRun) {
+        wouldPush.push({ email: settings.email, body });
+        console.log(`[dry run] would nudge ${settings.email}: ${body}`);
+        continue;
+      }
+      const pushed = await sendPushes(userPrefix, title, body);
+      console.log(`Sent ${which} nudge to ${settings.email} (+${pushed} push): ${body}`);
+    } catch (e) {
+      console.error(`Error processing nudge for ${userPrefix}:`, e);
+      // Continue to next user rather than failing the whole run.
+    }
+  }
+  return dryRun ? { dryRun: true, wouldPush } : undefined;
+}
+
+// ---- monthly report (paid-plan perk) ----
+// Fires once a month (see api-stack.ts's MonthlyReportRule, DIGEST.
+// MONTHLY_REPORT_* in config.ts) via { monthlyReport: true }. Same content
+// as GET /trends's month rollup, in email form — care-consistency %, mood,
+// per-item %, weight, the "we noticed" headline. Free-plan users are
+// skipped entirely (not even a downgrade tease), mirroring the Trends tab's
+// month: null split. Household/family pets aren't included yet — owner's
+// own pets only (see TODO.md).
+function addToDay(ymd: string, offset: { days?: number }): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + (offset.days ?? 0));
+  return d.toISOString().slice(0, 10);
+}
+
+async function composeMonthlyReportForPet(
+  petName: string,
+  species: string | undefined,
+  userPrefix: string,
+  petId: string,
+  todayKey: string,
+): Promise<string[] | null> {
+  const petPrefix = `${userPrefix}pets/${petId}/`;
+  const [daily, weightsStored] = await Promise.all([
+    readJson<DailyFileView>(`${petPrefix}daily.json`),
+    readJson<{ entries: WeightEntryView[] }>(`${petPrefix}weights.json`),
+  ]);
+  const weights = weightsStored?.entries ?? [];
+  const monthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(29 - i) }));
+  const priorMonthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(59 - i) }));
+
+  const [thisEntries, lastEntries] = await Promise.all([
+    mergedDailyEntries(BUCKET, petPrefix, daily, monthDates, todayKey, DAILY.LOG_RETENTION_DAYS, addToDay),
+    mergedDailyEntries(BUCKET, petPrefix, daily, priorMonthDates, todayKey, DAILY.LOG_RETENTION_DAYS, addToDay),
+  ]);
+  const thisStats = rangeStats(thisEntries, monthDates, weights);
+  const lastStats = rangeStats(lastEntries, priorMonthDates, weights);
+  if (thisStats.activeDates.size === 0) return null; // nothing to report
+
+  const knownPresets = /dog/i.test(species ?? '') ? ['preset-breakfast', 'preset-dinner', 'preset-walk'] : ['preset-breakfast', 'preset-dinner'];
+  const itemIds = [...new Set([...knownPresets, ...thisStats.checkCountsByItemId.keys(), ...lastStats.checkCountsByItemId.keys()])];
+  const itemLabel = (id: string) => digestPresetName(id, species) ?? id;
+
+  const lines = [petName, `  ${monthlyReportCopy.careConsistency(overallCompletionPct(thisStats, itemIds))}`];
+  if (thisStats.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(thisStats.moodAvg, lastStats.moodAvg)}`);
+  for (const id of itemIds) {
+    const pct = Math.round(((thisStats.checkCountsByItemId.get(id) ?? 0) / thisStats.totalDays) * 100);
+    lines.push(`  ${itemLabel(id)}: ${pct}% of days`);
+  }
+  if (thisStats.weightLatest) {
+    const delta =
+      thisStats.weightFirst && thisStats.weightFirst !== thisStats.weightLatest && thisStats.weightFirst.unit === thisStats.weightLatest.unit
+        ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
+        : null;
+    lines.push(`  ${monthlyReportCopy.weight(thisStats.weightLatest.weight, thisStats.weightLatest.unit, delta)}`);
+  }
+  const headline = pickInsight(petName, thisStats, itemLabel);
+  if (headline) lines.push(`  ${headline}`);
+  return lines;
+}
+
+async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
+
+  const topList = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: 'users/', Delimiter: '/' }));
+  const userPrefixes = (topList.CommonPrefixes ?? []).map((p) => p.Prefix!);
+  console.log(`Monthly report run${dryRun ? ' (dry run)' : ''}: ${userPrefixes.length} user(s) found`);
+
+  for (const userPrefix of userPrefixes) {
+    try {
+      const [settings, planFile] = await Promise.all([
+        readJson<UserSettings>(`${userPrefix}settings.json`),
+        readJson<{ plan?: string }>(`${userPrefix}plan.json`),
+      ]);
+      if (!settings?.email || settings.emailOptOut === true || settings.remindersEnabled !== true) continue;
+      if (!settings.unsubToken) continue; // needs a working unsubscribe link; main run backfills it
+      if (planFile?.plan !== 'paid') continue; // free plan: skip entirely, mirrors GET /trends's month: null
+
+      const petsList = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}pets/` }));
+      const petIds = (petsList.Contents ?? [])
+        .filter((it) => it.Key!.endsWith('/pet.json'))
+        .map((it) => it.Key!.slice(`${userPrefix}pets/`.length).split('/')[0]);
+
+      const sections: string[] = [];
+      const petNames: string[] = [];
+      for (const petId of petIds) {
+        const pet = await readJson<{ name?: string; species?: string }>(`${userPrefix}pets/${petId}/pet.json`);
+        if (!pet?.name) continue;
+        const lines = await composeMonthlyReportForPet(pet.name, pet.species, userPrefix, petId, todayKey);
+        if (lines) {
+          sections.push(lines.join('\n'));
+          petNames.push(pet.name);
+        }
+      }
+      if (sections.length === 0) continue;
+
+      const subject = petNames.length === 1 ? monthlyReportCopy.subjectSingle(petNames[0]) : monthlyReportCopy.subjectMulti;
+      const userSub = userPrefix.slice('users/'.length).replace(/\/$/, '');
+      const unsubUrl = `${APP_URL}/unsubscribe?u=${userSub}&t=${settings.unsubToken}`;
+      const body = [
+        monthlyReportCopy.greeting,
+        ``,
+        monthlyReportCopy.intro,
+        ``,
+        sections.join('\n\n'),
+        ``,
+        monthlyReportCopy.cta(`${APP_URL}/dashboard`),
+        ``,
+        monthlyReportCopy.signoff,
+        ``,
+        monthlyReportCopy.unsubscribeLine(unsubUrl),
+      ].join('\n');
+
+      if (dryRun) {
+        wouldSend.push({ email: settings.email, subject, body });
+        console.log(`[dry run] would send monthly report to ${settings.email}: ${subject}`);
+        continue;
+      }
+      await ses.send(
+        new SendEmailCommand({
+          FromEmailAddress: FROM_EMAIL,
+          Destination: { ToAddresses: [settings.email] },
+          Content: {
+            Simple: {
+              Subject: { Data: subject, Charset: 'UTF-8' },
+              Body: { Text: { Data: body, Charset: 'UTF-8' } },
+            },
+          },
+        }),
+      );
+      console.log(`Sent monthly report to ${settings.email}`);
+    } catch (e) {
+      console.error(`Error processing monthly report for ${userPrefix}:`, e);
+    }
+  }
+  return dryRun ? { dryRun: true, wouldSend } : undefined;
 }
 
 // The digest's date window (DIGEST.LOOKBACK_DAYS long, ending today),
@@ -610,29 +924,36 @@ function digestPetSection(
   const moods = dates
     .map((d) => daily?.moods?.[d]?.value)
     .filter((v): v is number => typeof v === 'number');
+  const moodAvgRaw = moods.length > 0 ? moods.reduce((a, b) => a + b, 0) / moods.length : null;
   if (moods.length > 0) {
-    const avg = Math.round(moods.reduce((a, b) => a + b, 0) / moods.length);
+    const avg = Math.round(moodAvgRaw!);
     lines.push(
       `Mood: ${moods.map((v) => MOOD_EMOJI[v] ?? '·').join(' ')} (mostly ${MOOD_LABEL[avg] ?? 'okay'})`,
     );
   }
 
-  // Checklist totals by item name; counters report their tallies.
+  // Checklist totals — tracked by BOTH display name (the tally line below)
+  // and raw itemId (to pick the right "we noticed" phrasing further down).
   const itemNames = new Map<string, string>(
     (daily?.items ?? []).map((i) => [i.id, i.name]),
   );
   const checkCounts = new Map<string, number>();
+  const checkCountsByItemId = new Map<string, number>();
   const byPerson = new Map<string, number>();
+  const activeDates = new Set<string>();
   let medsGiven = 0;
   for (const d of dates) {
     const day = daily?.log?.[d];
+    if (daily?.moods?.[d]) activeDates.add(d);
     if (!day) continue;
+    activeDates.add(d);
     for (const [itemId, entry] of Object.entries(day)) {
       const n = entry.count ?? 1;
       if (itemId.startsWith('med:')) medsGiven += 1;
       else {
         const name = itemNames.get(itemId) ?? digestPresetName(itemId, species) ?? 'Other';
         checkCounts.set(name, (checkCounts.get(name) ?? 0) + n);
+        checkCountsByItemId.set(itemId, (checkCountsByItemId.get(itemId) ?? 0) + n);
       }
       for (const ev of entry.events ?? [{ by: entry.by }]) {
         const who = (ev.by ?? '').split('@')[0];
@@ -647,6 +968,29 @@ function digestPetSection(
   }
   if (medsGiven > 0) {
     lines.push(`Meds given: ${medsGiven}`);
+  }
+
+  // At most one short "we noticed" line — mood takes priority over a low
+  // checklist rate (see DIGEST.MOOD_DIP_THRESHOLD / LOW_COMPLETION_MISSED_DAYS
+  // / MIN_ACTIVE_DAYS_FOR_INSIGHT in shared/config.ts for the thresholds,
+  // copy/digest.ts for the wording). The low-completion check additionally
+  // requires a SMALL ABSOLUTE floor of tracked days — otherwise a pet added
+  // mid-week (or a brand-new signup's first day) would get told "you only
+  // logged breakfast 1 of the last 7 days," a false signal, not a missed day.
+  const trackedEnoughDays = activeDates.size >= DIGEST.MIN_ACTIVE_DAYS_FOR_INSIGHT;
+  if (moodAvgRaw !== null && moodAvgRaw < DIGEST.MOOD_DIP_THRESHOLD) {
+    lines.push(digestInsightCopy.moodDip(petName));
+  } else if (trackedEnoughDays) {
+    const lowItem = [...checkCountsByItemId.entries()]
+      .filter(([, n]) => n <= dates.length - DIGEST.LOW_COMPLETION_MISSED_DAYS)
+      .sort((a, b) => a[1] - b[1])[0];
+    if (lowItem) {
+      const [itemId, n] = lowItem;
+      if (itemId === 'preset-breakfast') lines.push(digestInsightCopy.lowBreakfast(petName, n, dates.length));
+      else if (itemId === 'preset-dinner') lines.push(digestInsightCopy.lowDinner(petName, n, dates.length));
+      else if (itemId === 'preset-walk') lines.push(digestInsightCopy.lowWalk(petName, n, dates.length));
+      else lines.push(digestInsightCopy.lowGeneric(petName, itemNames.get(itemId) ?? 'that', n, dates.length));
+    }
   }
 
   // Weight: newest in-window entry, plus the change across the window.
@@ -678,12 +1022,21 @@ function digestPetSection(
 // { forceDigest: true } composes the weekly digest regardless of weekday.
 // { ignoreNewUploads: true } disables the first-scan already-overdue nag so
 // the smoke test can assert pure cadence behavior on freshly-seeded docs.
+// { nudge: 'breakfast' | 'evening' } is a separate, later-in-day EventBridge
+// rule (see api-stack.ts) that runs ONLY the feeding/walk nudge below and
+// skips the vaccine/med/digest scan entirely. { monthlyReport: true } is
+// similarly a separate once-a-month EventBridge rule that runs ONLY the
+// paid-plan monthly report.
 export const handler = async (event?: {
   dryRun?: boolean;
   forceDigest?: boolean;
   ignoreNewUploads?: boolean;
+  nudge?: 'breakfast' | 'evening';
+  monthlyReport?: boolean;
 }): Promise<unknown> => {
   const dryRun = event?.dryRun === true;
+  if (event?.nudge) return runDailyNudge(event.nudge, dryRun);
+  if (event?.monthlyReport) return runMonthlyReport(dryRun);
   const ignoreNewUploads = event?.ignoreNewUploads === true;
   const digestDay = event?.forceDigest === true || new Date().getUTCDay() === DIGEST.DAY_UTC;
   const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
@@ -850,22 +1203,20 @@ export const handler = async (event?: {
         }
         if (sections.length > 0) {
           const subject =
-            petNames.length === 1
-              ? `🐾 ${petNames[0]}'s week at a glance`
-              : `🐾 Your pets' week at a glance`;
+            petNames.length === 1 ? digestCopy.subjectSingle(petNames[0]) : digestCopy.subjectMulti;
           const body = [
-            `Hi,`,
+            digestCopy.greeting,
             ``,
-            `Here's how the last 7 days went:`,
+            digestCopy.intro,
             ``,
             sections.join('\n\n'),
             ``,
-            `Keep it up: ${APP_URL}/dashboard`,
+            digestCopy.cta(`${APP_URL}/dashboard`),
             ``,
-            `— The Petshots team`,
+            digestCopy.signoff,
             ``,
-            `Turn the weekly digest off in Settings.`,
-            `Unsubscribe from all Petshots email: ${unsubUrl}`,
+            digestCopy.toggleOff,
+            digestCopy.unsubscribeLine(unsubUrl),
           ].join('\n');
           if (dryRun) {
             wouldSend.push({ email: settings.email, subject, body });
@@ -890,7 +1241,13 @@ export const handler = async (event?: {
 
       if (dueDocs.length === 0 && dueMeds.length === 0 && birthdays.length === 0) continue;
 
-      const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays, unsubUrl);
+      // Free-plan users get a short upgrade line in the reminder email itself
+      // (no separate opt-in — same low-key treatment as the in-app CTAs).
+      const planFile = await readJson<{ plan?: string }>(`${userPrefix}plan.json`);
+      const showUpgrade = planFile?.plan !== 'paid';
+
+      const { subject, body } = composeEmail(dueDocs, dueMeds, birthdays, unsubUrl, showUpgrade);
+      const html = composeEmailHtml(dueDocs, dueMeds, birthdays, unsubUrl, showUpgrade);
       // Push body: the email's first couple of bullets, no boilerplate.
       const pushBody =
         body.split('\n').filter((l) => l.startsWith('•')).slice(0, 2).join('\n') ||
@@ -911,7 +1268,10 @@ export const handler = async (event?: {
           Content: {
             Simple: {
               Subject: { Data: subject, Charset: 'UTF-8' },
-              Body: { Text: { Data: body, Charset: 'UTF-8' } },
+              Body: {
+                Text: { Data: body, Charset: 'UTF-8' },
+                Html: { Data: html, Charset: 'UTF-8' },
+              },
             },
           },
         }),

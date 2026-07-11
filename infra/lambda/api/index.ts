@@ -33,12 +33,26 @@ import {
   UPLOADS,
   REMINDERS,
   DAILY,
+  DIGEST,
   WEIGHTS,
   MEDS,
   FAMILY,
   AI,
   EMAIL,
 } from '../shared/config';
+// Window-stats math (archive-merging, tallies, the "we noticed" line) is
+// shared with the reminder Lambda's report emails — see that file's header.
+import {
+  mergedDailyEntries as mergedDailyEntriesShared,
+  rangeStats,
+  pickInsight,
+  overallCompletionPct,
+  type RangeStats,
+  type MergedEntries,
+} from '../shared/dailyStats';
+// "Email me this report" (POST /trends/send) reuses the exact same copy the
+// proactive monthly report email uses — see shared/copy/digest.ts.
+import { monthlyReportCopy, weeklyReportCopy } from '../shared/copy';
 
 // One Lambda fronts every route (a tiny router on event.routeKey). Fewer moving
 // parts than a function per route, and IAM is identical across them anyway.
@@ -486,6 +500,191 @@ function dailyPresetsFor(species: string | undefined): DailyItem[] {
   }
   return meals;
 }
+// ---- Trends tab (GET /trends) ----
+// Window-stats computation (archive-merging, tallies, the "we noticed"
+// picker) lives in shared/dailyStats.ts — the reminder Lambda's new monthly
+// report email needs the exact same logic, and a third independent copy was
+// judged too likely to drift (see that file's header for the bug that
+// motivated the extraction).
+const mergedDailyEntries = (petPrefix: string, daily: DailyFile | null, dates: string[], todayKey: string) =>
+  mergedDailyEntriesShared(BUCKET, petPrefix, daily, dates, todayKey, DAILY_LOG_RETENTION_DAYS, addToDay);
+
+// Every pet in a pool's week (every plan) + month (paid only) rollup —
+// exactly what GET /trends renders, also reused by POST /trends/send (the
+// "email me this report" button) so the two never drift apart.
+async function computeTrendsPets(poolPrefix: string, plan: 'free' | 'paid') {
+  const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix }));
+  const trendsPetIds = (list.Contents ?? [])
+    .filter((it) => it.Key!.endsWith('/pet.json'))
+    .map((it) => it.Key!.slice(poolPrefix.length).split('/')[0]);
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const weekDates = Array.from({ length: DIGEST.LOOKBACK_DAYS }, (_, i) =>
+    addToDay(todayKey, { days: -(DIGEST.LOOKBACK_DAYS - 1 - i) }),
+  );
+  const monthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(29 - i) }));
+  const priorMonthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(59 - i) }));
+
+  return (
+    await Promise.all(
+      trendsPetIds.map(async (petId) => {
+        const petPrefix = `${poolPrefix}${petId}/`;
+        const [pet, daily, weightsStored] = await Promise.all([
+          readJson<{ name?: string; species?: string }>(`${petPrefix}pet.json`),
+          readJson<DailyFile>(`${petPrefix}daily.json`),
+          readJson<{ entries: WeightEntry[] }>(`${petPrefix}weights.json`),
+        ]);
+        if (!pet?.name) return null;
+        const petName = pet.name; // narrowed once — TS doesn't carry the guard into the nested async IIFE below
+        const weights = weightsStored?.entries ?? [];
+        const activeItems = (daily?.items ?? dailyPresetsFor(pet.species)).filter((i) =>
+          itemVisibleOn(i, todayKey),
+        );
+        const itemLabel = (id: string) => activeItems.find((i) => i.id === id)?.name ?? id;
+        const asChecklist = (stats: RangeStats) =>
+          activeItems.map((i) => ({
+            id: i.id,
+            label: i.name,
+            count: stats.checkCountsByItemId.get(i.id) ?? 0,
+            total: stats.totalDays,
+          }));
+
+        // Chart data (sparklines + the checklist dot-strip) rides on the
+        // same merged-entries maps used for the aggregate stats above — no
+        // extra S3 reads, just a second pass building per-day series.
+        const weightUnit = weights[0]?.unit ?? null;
+        const seriesFor = (entries: MergedEntries, dates: string[]) => ({
+          moodSeries: dates.map((d) => ({ date: d, value: entries[d]?.mood?.value ?? null })),
+          // Aligned to the same one-entry-per-date shape as moodSeries (most
+          // days null — weigh-ins are sparse) so the client never has to
+          // date-match a sparse log against the day range itself.
+          weightSeries: dates.map((d) => ({ date: d, value: weights.find((w) => w.date === d)?.weight ?? null })),
+          weightUnit,
+          checklistSeries: activeItems.map((i) => ({
+            id: i.id,
+            label: i.name,
+            days: dates.map((d) => Boolean(entries[d]?.checks?.[i.id])),
+          })),
+        });
+
+        const weekEntries = await mergedDailyEntries(petPrefix, daily, weekDates, todayKey);
+        const weekStats = rangeStats(weekEntries, weekDates, weights);
+        const week = {
+          moodAvg: weekStats.moodAvg,
+          checklist: asChecklist(weekStats),
+          medsGiven: weekStats.medsGiven,
+          weight: weekStats.weightLatest && {
+            value: weekStats.weightLatest.weight,
+            unit: weekStats.weightLatest.unit,
+            deltaWeek:
+              weekStats.weightFirst &&
+              weekStats.weightFirst.unit === weekStats.weightLatest.unit &&
+              weekStats.weightFirst !== weekStats.weightLatest
+                ? Math.round((weekStats.weightLatest.weight - weekStats.weightFirst.weight) * 100) / 100
+                : null,
+          },
+          insight: pickInsight(pet.name, weekStats, itemLabel),
+          ...seriesFor(weekEntries, weekDates),
+        };
+
+        const month =
+          plan === 'paid'
+            ? await (async () => {
+                const [thisMonthEntries, lastMonthEntries] = await Promise.all([
+                  mergedDailyEntries(petPrefix, daily, monthDates, todayKey),
+                  mergedDailyEntries(petPrefix, daily, priorMonthDates, todayKey),
+                ]);
+                const thisMonthStats = rangeStats(thisMonthEntries, monthDates, weights);
+                const lastMonthStats = rangeStats(lastMonthEntries, priorMonthDates, weights);
+                return {
+                  headline: pickInsight(petName, thisMonthStats, itemLabel),
+                  careConsistency: overallCompletionPct(thisMonthStats, activeItems.map((i) => i.id)),
+                  moodAvg: thisMonthStats.moodAvg,
+                  moodAvgLastMonth: lastMonthStats.moodAvg,
+                  medsGiven: thisMonthStats.medsGiven,
+                  medsGivenLastMonth: lastMonthStats.medsGiven,
+                  weight: thisMonthStats.weightLatest && {
+                    value: thisMonthStats.weightLatest.weight,
+                    unit: thisMonthStats.weightLatest.unit,
+                    deltaMonth:
+                      thisMonthStats.weightFirst &&
+                      thisMonthStats.weightFirst.unit === thisMonthStats.weightLatest.unit &&
+                      thisMonthStats.weightFirst !== thisMonthStats.weightLatest
+                        ? Math.round((thisMonthStats.weightLatest.weight - thisMonthStats.weightFirst.weight) * 100) / 100
+                        : null,
+                  },
+                  checklist: activeItems.map((i) => ({
+                    id: i.id,
+                    label: i.name,
+                    pctThis: Math.round(((thisMonthStats.checkCountsByItemId.get(i.id) ?? 0) / thisMonthStats.totalDays) * 100),
+                    pctLast: Math.round(((lastMonthStats.checkCountsByItemId.get(i.id) ?? 0) / lastMonthStats.totalDays) * 100),
+                  })),
+                  ...seriesFor(thisMonthEntries, monthDates),
+                };
+              })()
+            : null;
+
+        return { petId, name: pet.name, week, month };
+      }),
+    )
+  ).filter((p): p is NonNullable<typeof p> => p !== null);
+}
+
+// Renders the same content computeTrendsPets returns as a plain-text email
+// — the on-demand ("email me this report") and eventually any future
+// in-app share flow. Week and month have slightly different shapes
+// (count/total vs pctThis/pctLast, insight vs headline), so this stays two
+// short branches rather than forcing one generic formatter over both.
+function composeReportEmail(
+  period: 'week' | 'month',
+  pets: Awaited<ReturnType<typeof computeTrendsPets>>,
+  unsubUrl: string,
+): { subject: string; body: string } {
+  const sections =
+    period === 'week'
+      ? pets.map((p) => {
+          const w = p.week;
+          const lines = [p.name];
+          if (w.moodAvg !== null) lines.push(`  Mood: ${w.moodAvg.toFixed(1)}/5`);
+          for (const c of w.checklist) lines.push(`  ${c.label}: ${c.count} of ${c.total} days`);
+          if (w.weight) lines.push(`  ${weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek)}`);
+          if (w.insight) lines.push(`  ${w.insight}`);
+          return lines.join('\n');
+        })
+      : pets
+          .map((p) => {
+            if (!p.month) return null;
+            const m = p.month;
+            const lines = [p.name, `  ${monthlyReportCopy.careConsistency(m.careConsistency)}`];
+            if (m.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth)}`);
+            for (const c of m.checklist) lines.push(`  ${c.label}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`);
+            if (m.weight) lines.push(`  ${monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth)}`);
+            if (m.headline) lines.push(`  ${m.headline}`);
+            return lines.join('\n');
+          })
+          .filter((s): s is string => s !== null);
+
+  const copy = period === 'month' ? monthlyReportCopy : weeklyReportCopy;
+  const petNames = pets.map((p) => p.name);
+  const subject = petNames.length === 1 ? copy.subjectSingle(petNames[0]) : copy.subjectMulti;
+  const body = [
+    copy.greeting,
+    ``,
+    copy.intro,
+    ``,
+    sections.join('\n\n'),
+    ``,
+    copy.onDemandNote,
+    ``,
+    copy.cta(`${APP_URL}/dashboard`),
+    ``,
+    copy.signoff,
+    ``,
+    copy.unsubscribeLine(unsubUrl),
+  ].join('\n');
+  return { subject, body };
+}
+
 const MAX_DAILY_ITEMS = DAILY.MAX_ITEMS;
 const MAX_COUNTER_PER_DAY = DAILY.MAX_COUNTER_PER_DAY;
 const DAILY_LOG_RETENTION_DAYS = DAILY.LOG_RETENTION_DAYS;
@@ -1258,6 +1457,58 @@ export const handler = async (
           ),
         );
         return json(200, { pets, limits, family });
+      }
+
+      case 'GET /trends': {
+        // Account-level, not pet-scoped — every pet in the caller's pool
+        // (their own, or their household's if they're a member). Weekly
+        // summary is free-tier; the monthly rollup + trend headline is a
+        // paid perk, same free/paid split as DAILY.HISTORY_DAYS_*.
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
+        const ent = await getEntitlements(poolSub);
+        const trendsPets = await computeTrendsPets(poolPrefix, ent.plan);
+        return json(200, { plan: ent.plan, pets: trendsPets });
+      }
+
+      case 'POST /trends/send': {
+        // On-demand version of the same content GET /trends renders — "email
+        // me this report" from the Trends tab. Week is available to every
+        // plan; month is paid-only (403 otherwise), same split as the tab.
+        const input = JSON.parse(event.body ?? '{}');
+        const period = input.period === 'month' ? 'month' : 'week';
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
+        const ent = await getEntitlements(poolSub);
+        if (period === 'month' && ent.plan !== 'paid') {
+          return json(403, { error: 'Monthly reports are a paid feature' });
+        }
+        const settings = await readJson<{ email?: string; unsubToken?: string }>(`users/${sub}/settings.json`);
+        if (!settings?.email || !settings.unsubToken) {
+          return json(400, { error: 'Add your email in Settings before requesting a report' });
+        }
+        const trendsPets = await computeTrendsPets(poolPrefix, ent.plan);
+        const withData = trendsPets.filter((p) => (period === 'month' ? p.month !== null : true));
+        if (withData.length === 0) {
+          return json(200, { ok: true, sent: false, reason: 'Nothing to report yet' });
+        }
+        const unsubUrl = `${APP_URL}/unsubscribe?u=${sub}&t=${settings.unsubToken}`;
+        const { subject, body } = composeReportEmail(period, withData, unsubUrl);
+        await ses.send(
+          new SendEmailCommand({
+            FromEmailAddress: FROM_EMAIL,
+            Destination: { ToAddresses: [settings.email] },
+            Content: {
+              Simple: {
+                Subject: { Data: subject, Charset: 'UTF-8' },
+                Body: { Text: { Data: body, Charset: 'UTF-8' } },
+              },
+            },
+          }),
+        );
+        return json(200, { ok: true, sent: true });
       }
 
       case 'POST /pets': {

@@ -120,6 +120,13 @@ button,
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
+  /* #root is a column flex container (default align-items: stretch) — on
+     a wide-enough viewport, margin:auto alone wasn't reliably centering
+     this max-width-capped item (confirmed bug, reproducible at width,
+     independent of fullscreen). align-self scopes the fix to .page only —
+     #root itself stays untouched so .site-footer's own full-width stretch
+     (its top border/background span the viewport) isn't affected. */
+  align-self: center;
   padding: 1.25rem 1rem calc(2rem + env(safe-area-inset-bottom));
   flex: 1;
 }
@@ -1189,6 +1196,217 @@ a {
   padding: 0.25rem 0.1rem;
   font-size: 1.15rem;
   font-weight: 700;
+}
+
+/* Trends tab — plain stats, no charts yet (v2). */
+.trends-all {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.trends-all__loading {
+  color: var(--subtle);
+  padding: 0.5rem 0.1rem;
+}
+
+.trends-all__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.trends-all__send-buttons {
+  display: flex;
+  gap: 1rem;
+}
+
+.trends-all__pet-name {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.trends-all__section-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--subtle);
+  margin-top: 0.25rem;
+}
+
+.trends-all__row {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.trends-all__insight {
+  width: 100%;
+}
+
+.trends-all__upgrade {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--subtle);
+}
+
+.trends-chart-block {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.trends-chart-block__caption {
+  font-size: 0.85rem;
+  color: var(--subtle);
+}
+
+.sparkline {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.sparkline__empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--subtle);
+  font-style: italic;
+}
+
+.trends-dotrows {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.trends-dotrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.trends-dotrow__label {
+  font-size: 0.85rem;
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+.trends-dotrow__bar {
+  flex: 1;
+  min-width: 120px;
+}
+
+.trends-status {
+  font-weight: 700;
+}
+
+/* Hero row: pet name + the week/month "care consistency" ring gauge. */
+.trends-hero {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.trends-hero--compact {
+  margin-top: -0.25rem;
+}
+
+.trends-hero__text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.trends-hero__caption {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--subtle);
+}
+
+/* Ring gauge — CSS conic-gradient, not SVG arc math. */
+.gauge-dial {
+  position: relative;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.gauge-dial__hole {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.gauge-dial__value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.gauge-dial__label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Completion bar — a fixed red->amber->green track, masked from the right
+   so the color at the fill edge always matches where that % sits on the
+   0-100 scale (not a bar-relative gradient that looks the same at any pct). */
+.percent-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.percent-bar__track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: linear-gradient(90deg, var(--overdue), var(--warn) 50%, var(--ok));
+}
+
+.percent-bar__mask {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--border);
+  border-radius: 0 4px 4px 0;
+}
+
+.percent-bar__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+
+.percent-bar__value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.percent-bar__caption {
+  font-size: 0.7rem;
+  color: var(--subtle);
+  white-space: nowrap;
 }
 
 /* Inline destructive-action confirm inside the Family screen. */
@@ -3373,6 +3591,27 @@ html[data-native="true"] .page--tabbed {
 }
 html[data-native="true"] .page--tabbed ~ .site-footer {
   display: none;
+}
+
+/* Desktop web previously had NO way to reach Daily/Passports/Trends at all
+   (tab bar was mobile+native only). Went through two positions before this:
+   fixed at the bottom (mobile-style — "too hidden" per Mark), then fixed at
+   the top ABOVE the header (Mark wanted it below the logo/MG/share row
+   instead). Landed on: not fixed at all — .tabbar is rendered in the JSX
+   right after <header> now (inside <main>, see Dashboard.tsx), so on
+   desktop it's just a normal block sitting between the header and the page
+   content, in real document flow. Mobile/native are unaffected: their
+   .tabbar is position:fixed, which takes it out of flow entirely, so its
+   DOM position doesn't matter for them. Still not a from-scratch desktop
+   design (full-bleed bar, mobile's icon+label item styling) — see TODO.md. */
+@media (min-width: 768px) {
+  .tabbar {
+    display: flex;
+    position: static;
+    border-top: none;
+    border-bottom: var(--hairline) solid var(--separator);
+    padding: 0;
+  }
 }
 html[data-native="true"] .screen-nav__back--desktop {
   display: none;

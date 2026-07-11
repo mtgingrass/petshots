@@ -4,7 +4,7 @@
 import type { JSX } from 'react';
 import { hapticTap } from '../native';
 
-export type MainTab = 'pets' | 'daily' | 'passports' | 'settings';
+export type MainTab = 'pets' | 'daily' | 'trends' | 'passports' | 'settings';
 
 // Inline SVGs so the active tint (--accent) applies via currentColor — emoji
 // can't be tinted and look off-brand next to iOS tab bars.
@@ -23,6 +23,13 @@ const ICONS: Record<MainTab, JSX.Element> = {
       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
     </svg>
   ),
+  // Simple up-trend line + dot — matches the "no charts yet" plain-stats page.
+  trends: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 17l5-5 4 4 8-9" />
+      <path d="M14 7h6v6" />
+    </svg>
+  ),
   // Passport-booklet: rounded card with a QR-ish mark.
   passports: (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -39,6 +46,7 @@ const ICONS: Record<MainTab, JSX.Element> = {
 const LABELS: Record<MainTab, string> = {
   pets: 'Pets',
   daily: 'Daily',
+  trends: 'Trends',
   passports: 'Passport',
   settings: 'Settings',
 };
@@ -55,7 +63,7 @@ export function TabBar({
 }) {
   return (
     <nav className="tabbar" aria-label="Main">
-      {(['pets', 'daily', 'passports'] as const).map((tab) => (
+      {(['pets', 'daily', 'trends', 'passports'] as const).map((tab) => (
         <button
           key={tab}
           type="button"

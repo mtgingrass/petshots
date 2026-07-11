@@ -355,6 +355,72 @@ export function listPets(): Promise<{ pets: Pet[]; limits?: Limits; family?: Fam
   return request('GET', '/pets');
 }
 
+// ---- trends (bottom-bar "Trends" tab) ----
+// Week is available on every plan; month is a paid perk (server omits it —
+// `null` — for free accounts), same free/paid split as Limits.dailyHistoryDays.
+export interface TrendsChecklistItem {
+  id: string;
+  label: string;
+  count: number;
+  total: number;
+}
+// One entry per date in the window, oldest first — value is null on days
+// with nothing logged (a gap, not a zero). Sparklines render these directly.
+export interface TrendsSeriesPoint {
+  date: string;
+  value: number | null;
+}
+export interface TrendsChecklistDots {
+  id: string;
+  label: string;
+  days: boolean[]; // one per date in the window, oldest first
+}
+export interface TrendsWeek {
+  moodAvg: number | null;
+  checklist: TrendsChecklistItem[];
+  medsGiven: number;
+  weight: { value: number; unit: string; deltaWeek: number | null } | null;
+  insight: string | null;
+  moodSeries: TrendsSeriesPoint[];
+  weightSeries: TrendsSeriesPoint[];
+  weightUnit: string | null;
+  checklistSeries: TrendsChecklistDots[];
+}
+export interface TrendsMonthChecklistItem {
+  id: string;
+  label: string;
+  pctThis: number;
+  pctLast: number;
+}
+export interface TrendsMonth {
+  headline: string | null;
+  moodAvg: number | null;
+  moodAvgLastMonth: number | null;
+  medsGiven: number;
+  medsGivenLastMonth: number;
+  checklist: TrendsMonthChecklistItem[];
+  moodSeries: TrendsSeriesPoint[];
+  weightSeries: TrendsSeriesPoint[];
+  weightUnit: string | null;
+  checklistSeries: TrendsChecklistDots[];
+}
+export interface TrendsPet {
+  petId: string;
+  name: string;
+  week: TrendsWeek;
+  month: TrendsMonth | null;
+}
+export function getTrends(): Promise<{ plan: 'free' | 'paid'; pets: TrendsPet[] }> {
+  return request('GET', '/trends');
+}
+
+// "Email me this report" — week is available on every plan; month 403s on
+// a free account (the button that calls this is hidden for free users to
+// begin with, but the server enforces it regardless).
+export function sendTrendsReport(period: 'week' | 'month'): Promise<{ ok: true; sent: boolean; reason?: string }> {
+  return request('POST', '/trends/send', { period });
+}
+
 // ---- family / household ----
 
 export interface HouseholdMemberView {

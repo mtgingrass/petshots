@@ -261,7 +261,7 @@ async function main() {
   });
   // Make the med due today so the dry run has something to say to the member.
   const fnName = execSync(
-    `aws cloudformation describe-stack-resources --stack-name PetshotsApiStack --query "StackResources[?starts_with(LogicalResourceId,'ReminderFn') && ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text`,
+    `aws cloudformation list-stack-resources --stack-name PetshotsApiStack --query "StackResourceSummaries[?starts_with(LogicalResourceId,'ReminderFn') && ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text`,
     { encoding: 'utf8' },
   ).trim();
   execSync(

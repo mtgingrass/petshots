@@ -419,6 +419,43 @@ async function main() {
   const mBad = await api(owner, 'POST', `/pets/${pet.id}/daily/mood`, { date: today, value: 9 });
   check(mBad.status === 400, 'out-of-range mood rejected');
 
+  console.log('\n[8d] family walk leaderboard: attributed walks, miles-ranked');
+  const walkNow = Date.now();
+  const mkWalk = (tok, minsAgo, meters) =>
+    api(tok, 'POST', '/walks', {
+      petIds: [pet.id],
+      startedAt: new Date(walkNow - minsAgo * 60_000).toISOString(),
+      endedAt: new Date(walkNow - (minsAgo - 15) * 60_000).toISOString(),
+      distanceMeters: meters,
+    });
+  const wOwner = await mkWalk(owner, 60, 1609.344); // owner: 1 walk, 1.0 mi
+  const wMember1 = await mkWalk(member, 120, 1609.344 * 2); // member: 2 walks, 3.0 mi
+  const wMember2 = await mkWalk(member, 180, 1609.344);
+  check(wOwner.status === 200 && wMember1.status === 200 && wMember2.status === 200, 'three walks saved');
+  check(wMember1.body.walk.by === memberEmail, 'member walk attributed to member');
+  const achBoard = await api(member, 'GET', '/achievements');
+  const board = achBoard.body.leaderboard;
+  check(!!board && board.members.length === 2, `leaderboard has both members (got ${board?.members?.length})`);
+  check(board?.me === memberEmail, 'leaderboard "me" is the caller');
+  check(
+    board?.members[0]?.email === memberEmail && board?.members[0]?.miles === 3 && board?.members[0]?.walks === 2,
+    `member leads with 3.0 mi / 2 walks (got ${JSON.stringify(board?.members[0])})`,
+  );
+  check(
+    board?.members[1]?.email === ownerEmail && board?.members[1]?.miles === 1,
+    `owner second with 1.0 mi (got ${JSON.stringify(board?.members[1])})`,
+  );
+  // Member deletes their own accidental walk — the pool-shared history is
+  // editable by any member (same trust model as the shared Daily list).
+  const delWalk = await api(member, 'DELETE', `/walks/${wMember1.body.walk.id}`);
+  check(delWalk.status === 204, 'member deletes a walk from the shared history');
+  const achBoard2 = await api(owner, 'GET', '/achievements');
+  check(
+    achBoard2.body.leaderboard?.members?.find((m) => m.email === memberEmail)?.miles === 1,
+    'leaderboard reflects the deletion',
+  );
+  for (const w of [wOwner, wMember2]) await api(owner, 'DELETE', `/walks/${w.body.walk.id}`);
+
   console.log('\n[9] removal cuts access immediately');
   hh = await api(owner, 'GET', '/household');
   const memberSub = hh.body.members[0].sub;

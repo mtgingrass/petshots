@@ -55,6 +55,8 @@ export const monthlyReportCopy = {
     `Mood: ${avg.toFixed(1)}/5${lastMonthAvg != null ? ` (last month: ${lastMonthAvg.toFixed(1)})` : ''}`,
   weight: (value: number, unit: string, deltaMonth: number | null) =>
     `Weight: ${value} ${unit}${deltaMonth != null ? ` (${deltaMonth > 0 ? '▲' : '▼'} ${Math.abs(deltaMonth)} ${unit} this month)` : ''}`,
+  walks: (count: number, miles: number, countLast: number, milesLast: number) =>
+    `Walks: ${count} (${miles} mi) — last month: ${countLast} (${milesLast} mi)`,
   cta: (url: string) => `See the full breakdown: ${url}`,
   signoff: '— The Petshots team',
   onDemandNote: 'You requested this report from the Trends tab.',
@@ -76,6 +78,7 @@ export const weeklyReportCopy = {
   intro: "Here's how the last 7 days went:",
   weight: (value: number, unit: string, deltaWeek: number | null) =>
     `Weight: ${value} ${unit}${deltaWeek != null ? ` (${deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(deltaWeek)} ${unit} this week)` : ''}`,
+  walks: (count: number, miles: number) => `Walks: ${count} (${miles} mi)`,
   cta: (url: string) => `See the full breakdown: ${url}`,
   signoff: '— The Petshots team',
   onDemandNote: 'You requested this report from the Trends tab.',

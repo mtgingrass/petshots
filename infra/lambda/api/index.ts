@@ -147,7 +147,17 @@ interface WalkRecord {
   startedAt: string; // ISO timestamp
   endedAt: string; // ISO timestamp
   distanceMeters: number;
+  // Actor email, server-stamped like DailyCheck.by — feeds the family
+  // leaderboard. Walks logged before 2026-07-12 predate attribution and
+  // simply don't count toward any member's tally.
+  by?: string;
 }
+// One species-dispatch convention (review finding, 2026-07-12): cats get no
+// walk cards/stats anywhere. dailyPresetsFor's separate /dog/i test is a
+// different question ("who gets the Walk preset"), not a duplicate of this.
+const isCatSpecies = (species?: string) => /cat/i.test(species ?? '');
+const METERS_PER_MILE = 1609.344;
+const toMiles = (meters: number) => Math.round((meters / METERS_PER_MILE) * 10) / 10;
 // All of a pool's walks live in ONE compact users/{poolSub}/walks-index.json
 // (records are ~120 bytes; years of daily walks stay well under 1 MB) instead
 // of one object per walk — the original per-object layout meant one S3
@@ -735,6 +745,8 @@ interface TrendsWeekPet {
   checklist: { id: string; label: string; count: number; total: number }[];
   medsGiven: number;
   weight: { value: number; unit: string; deltaWeek: number | null } | null;
+  // null for cats (no walk features), matching the achievements cards.
+  walks: { count: number; miles: number } | null;
   insight: string | null;
   moodSeries: { date: string; value: number | null }[];
   weightSeries: { date: string; value: number | null }[];
@@ -750,6 +762,7 @@ interface TrendsMonthPet {
   medsGiven: number;
   medsGivenLastMonth: number;
   weight: { value: number; unit: string; deltaMonth: number | null } | null;
+  walks: { count: number; miles: number; countLast: number; milesLast: number } | null;
   checklist: { id: string; label: string; pctThis: number; pctLast: number }[];
   moodSeries: { date: string; value: number | null }[];
   weightSeries: { date: string; value: number | null }[];
@@ -767,7 +780,13 @@ async function computeTrendsView(
   view: 'week' | 'month',
   offset: number,
 ): Promise<{ pets: (TrendsWeekPet | TrendsMonthPet)[]; rangeStart: string; rangeEnd: string }> {
-  const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix }));
+  // Pool walks are read ONCE per view (they're account-level, shared across
+  // every pet in the window) — the per-pet loop only filters them.
+  const trendsPoolSub = poolPrefix.slice('users/'.length, -'/pets/'.length);
+  const [list, poolWalks] = await Promise.all([
+    s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix })),
+    readWalksIndex(trendsPoolSub),
+  ]);
   const trendsPetIds = (list.Contents ?? [])
     .filter((it) => it.Key!.endsWith('/pet.json'))
     .map((it) => it.Key!.slice(poolPrefix.length).split('/')[0]);
@@ -819,6 +838,22 @@ async function computeTrendsView(
         const thisEntries = await mergedDailyEntries(petPrefix, daily, thisDates, todayKey);
         const thisStats = rangeStats(thisEntries, thisDates, weights);
 
+        // Walk tallies for a window: this pet's walks whose start date falls
+        // inside it. Cats get null (no walk features), same as achievements.
+        const walksIn = (dates: string[]) => {
+          const inWindow = poolWalks.filter(
+            (w) =>
+              w.petIds.includes(petId) &&
+              w.startedAt.slice(0, 10) >= dates[0] &&
+              w.startedAt.slice(0, 10) <= dates[dates.length - 1],
+          );
+          return {
+            count: inWindow.length,
+            miles: toMiles(inWindow.reduce((sum, w) => sum + w.distanceMeters, 0)),
+          };
+        };
+        const petIsCat = isCatSpecies(pet.species);
+
         if (view === 'week') {
           const weekPet: TrendsWeekPet = {
             petId, name: petName,
@@ -840,6 +875,7 @@ async function computeTrendsView(
                   ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
                   : null,
             },
+            walks: petIsCat ? null : walksIn(thisDates),
             insight: pickInsight(petName, thisStats, itemLabel),
             ...seriesFor(thisEntries, thisDates, weightUnit),
           };
@@ -866,6 +902,13 @@ async function computeTrendsView(
                 ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
                 : null,
           },
+          walks: petIsCat
+            ? null
+            : (() => {
+                const thisWalks = walksIn(thisDates);
+                const lastWalks = walksIn(priorDates);
+                return { ...thisWalks, countLast: lastWalks.count, milesLast: lastWalks.miles };
+              })(),
           checklist: activeItems.map((i) => ({
             id: i.id, label: i.name,
             pctThis: Math.round(((thisStats.checkCountsByItemId.get(i.id) ?? 0) / thisStats.totalDays) * 100),
@@ -896,6 +939,7 @@ function composeReportEmail(
           if (w.moodAvg !== null) lines.push(`  Mood: ${w.moodAvg.toFixed(1)}/5`);
           for (const c of w.checklist) lines.push(`  ${c.label}: ${c.count} of ${c.total} days`);
           if (w.weight) lines.push(`  ${weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek)}`);
+          if (w.walks && w.walks.count > 0) lines.push(`  ${weeklyReportCopy.walks(w.walks.count, w.walks.miles)}`);
           if (w.insight) lines.push(`  ${w.insight}`);
           return lines.join('\n');
         })
@@ -904,6 +948,9 @@ function composeReportEmail(
           if (m.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth)}`);
           for (const c of m.checklist) lines.push(`  ${c.label}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`);
           if (m.weight) lines.push(`  ${monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth)}`);
+          if (m.walks && (m.walks.count > 0 || m.walks.countLast > 0)) {
+            lines.push(`  ${monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.countLast, m.walks.milesLast)}`);
+          }
           if (m.headline) lines.push(`  ${m.headline}`);
           return lines.join('\n');
         });
@@ -944,6 +991,7 @@ function composeReportEmailHtml(
           if (w.moodAvg !== null) rows.push(petRowHtml(`Mood: ${w.moodAvg.toFixed(1)}/5`));
           for (const c of w.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.count} of ${c.total} days`));
           if (w.weight) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek))));
+          if (w.walks && w.walks.count > 0) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.walks(w.walks.count, w.walks.miles))));
           const insight = w.insight ? insightRowHtml(escapeHtml(w.insight)) : '';
           return petCardHtml(w.name, rows.join('') + insight);
         })
@@ -952,6 +1000,9 @@ function composeReportEmailHtml(
           if (m.moodAvg !== null) rows.push(petRowHtml(escapeHtml(monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth))));
           for (const c of m.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`));
           if (m.weight) rows.push(petRowHtml(escapeHtml(monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth))));
+          if (m.walks && (m.walks.count > 0 || m.walks.countLast > 0)) {
+            rows.push(petRowHtml(escapeHtml(monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.countLast, m.walks.milesLast))));
+          }
           const insight = m.headline ? insightRowHtml(escapeHtml(m.headline)) : '';
           return petCardHtml(m.name, rows.join('') + insight);
         });
@@ -1877,12 +1928,14 @@ export const handler = async (
         const confirmedPetIds = petIds.filter((id): id is string => validIds.has(id as string));
         if (confirmedPetIds.length === 0) return json(404, { error: 'no matching pets found' });
 
+        const who = await actorEmail(sub);
         const walk: WalkRecord = {
           id: randomUUID(),
           petIds: confirmedPetIds,
           startedAt,
           endedAt,
           distanceMeters,
+          by: who,
         };
         if (!(await mutateWalksIndex(poolSub, (walks) => [...walks, walk]))) {
           return json(409, { error: 'could not save the walk, try again' });
@@ -1895,7 +1948,6 @@ export const handler = async (
         // per pet: one pet's daily.json contention shouldn't fail the walk
         // save that already landed.
         const walkDay = endedAt.slice(0, 10);
-        const who = await actorEmail(sub);
         await Promise.all(
           confirmedPetIds.map(async (petId) => {
             const dailyKey = `${poolPrefix}${petId}/daily.json`;
@@ -1972,8 +2024,7 @@ export const handler = async (
 
             const petWalks = allWalks.filter((w) => w.petIds.includes(petId));
             const weekWalks = petWalks.filter((w) => w.startedAt.slice(0, 10) >= windowStart);
-            const weekMeters = weekWalks.reduce((sum, w) => sum + w.distanceMeters, 0);
-            const weekMiles = Math.round((weekMeters / 1609.344) * 10) / 10;
+            const weekMiles = toMiles(weekWalks.reduce((sum, w) => sum + w.distanceMeters, 0));
             const walkBests = weeklyBests(petWalks.map((w) => w.startedAt.slice(0, 10)));
 
             const photoDates = (photosList.Contents ?? [])
@@ -2016,7 +2067,7 @@ export const handler = async (
 
             const stats: PetBadgeStats = {
               totalWalks: petWalks.length,
-              totalMiles: petWalks.reduce((sum, w) => sum + w.distanceMeters, 0) / 1609.344,
+              totalMiles: petWalks.reduce((sum, w) => sum + w.distanceMeters, 0) / METERS_PER_MILE,
               maxWalksInWeek: walkBests.maxCount,
               maxWalkDaysInWeek: walkBests.maxDays,
               longestWalkWeekStreak: walkBests.longestStreak,
@@ -2056,7 +2107,7 @@ export const handler = async (
             };
             // Cats never evaluate walk badges at all — no stray earns if a
             // walk gets tagged onto a cat in a mixed-species outing.
-            const cards = /cat/i.test(pet.species ?? '')
+            const cards = isCatSpecies(pet.species)
               ? [careCard, photoCard]
               : [
                   { id: 'walks-week', icon: '🚶', label: 'Walks this week', value: String(weekWalks.length), badges: badgesFor('walks-week') },
@@ -2068,7 +2119,39 @@ export const handler = async (
             return { petId, petName: pet.name, cards };
           }),
         );
-        return json(200, { pets: pets.filter((p): p is NonNullable<typeof p> => p !== null) });
+
+        // Family leaderboard — who's winning the week (miles first, walk
+        // count as the tiebreak), over the same rolling window as the cards.
+        // Solo accounts get null and the UI hides the section entirely.
+        // Pre-attribution walks (no `by`, logged before 2026-07-12) count
+        // for nobody.
+        let leaderboard: {
+          label: string;
+          me: string;
+          members: { email: string; walks: number; miles: number }[];
+        } | null = null;
+        const household = await readHousehold(poolSub);
+        if (household.members.length > 0) {
+          const emails = [await actorEmail(poolSub), ...household.members.map((m) => m.email)];
+          const rows = emails
+            .map((email) => {
+              const wk = allWalks.filter(
+                (w) => w.by === email && w.startedAt.slice(0, 10) >= windowStart,
+              );
+              return {
+                email,
+                walks: wk.length,
+                miles: toMiles(wk.reduce((sum, w) => sum + w.distanceMeters, 0)),
+              };
+            })
+            .sort((a, b) => b.miles - a.miles || b.walks - a.walks);
+          leaderboard = { label: 'This week', me: await actorEmail(sub), members: rows };
+        }
+
+        return json(200, {
+          pets: pets.filter((p): p is NonNullable<typeof p> => p !== null),
+          leaderboard,
+        });
       }
 
       case 'POST /pets': {

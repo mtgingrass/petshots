@@ -13,6 +13,8 @@ import {
   uploadPhoto,
   deletePhoto,
   createWalk,
+  listWalks,
+  deleteWalk,
   getAchievements,
   listDocs,
   updateDoc,
@@ -67,6 +69,8 @@ import {
   type TrendsMonthPet,
   type Photo,
   type PetAchievements,
+  type WalkLeaderboard,
+  type WalkRecord,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
@@ -316,7 +320,10 @@ type DashView =
   // ladder (earned vs still-to-earn), same push-a-level pattern as
   // albums -> album.
   | { type: 'achievements' }
-  | { type: 'badges'; petId: string; cardId: string };
+  | { type: 'badges'; petId: string; cardId: string }
+  // Full walk log (all pool walks, any age) with per-walk delete — the
+  // escape hatch for accidentally logged / left-running-in-the-car walks.
+  | { type: 'walk-history' };
 
 type EditView =
   | { type: 'list' }
@@ -733,6 +740,8 @@ export function Dashboard() {
       backToOverview();
     } else if (dashView.type === 'badges' && dir === 'back') {
       setDashView({ type: 'achievements' });
+    } else if (dashView.type === 'walk-history' && dir === 'back') {
+      setDashView({ type: 'achievements' });
     }
   });
 
@@ -942,6 +951,7 @@ export function Dashboard() {
             onError={setError}
             onLoaded={setAchievementsCache}
             onOpenBadges={(petId, cardId) => setDashView({ type: 'badges', petId, cardId })}
+            onOpenWalkHistory={() => setDashView({ type: 'walk-history' })}
           />
         ) : dashView.type === 'badges' ? (
           <BadgeScreen
@@ -950,6 +960,13 @@ export function Dashboard() {
             preloaded={achievementsCache}
             onBack={() => setDashView({ type: 'achievements' })}
             onError={setError}
+          />
+        ) : dashView.type === 'walk-history' ? (
+          <WalkHistoryScreen
+            pets={pets ?? []}
+            onBack={() => setDashView({ type: 'achievements' })}
+            onError={setError}
+            onNotice={showNotice}
           />
         ) : dashView.type === 'profile' && detailPet ? (
           editView.type === 'edit-profile' ? (
@@ -1436,6 +1453,11 @@ function WeeklyTrendsView({
               ))}
             </div>
             {t.medsGiven > 0 && <p className="trends-all__row">Meds given: {t.medsGiven}</p>}
+            {t.walks && t.walks.count > 0 && (
+              <p className="trends-all__row">
+                Walks: {t.walks.count} · {t.walks.miles} mi
+              </p>
+            )}
             {t.insight && (
               <div className="notice-card notice-card--headsup trends-all__insight">
                 <p className="notice-card__body">{t.insight}</p>
@@ -1572,6 +1594,12 @@ function MonthlyTrendsView({
               ))}
             </div>
             {m.medsGiven > 0 && <p className="trends-all__row">Meds given: {m.medsGiven}</p>}
+            {m.walks && (m.walks.count > 0 || m.walks.countLast > 0) && (
+              <p className="trends-all__row">
+                Walks: {m.walks.count} · {m.walks.miles} mi
+                <span className="trends-all__row-caption"> (last month: {m.walks.countLast} · {m.walks.milesLast} mi)</span>
+              </p>
+            )}
           </section>
         );
       })}
@@ -5527,12 +5555,15 @@ function AchievementsAllScreen({
   onError,
   onLoaded,
   onOpenBadges,
+  onOpenWalkHistory,
 }: {
   onError: (msg: string | null) => void;
   onLoaded: (pets: PetAchievements[]) => void;
   onOpenBadges: (petId: string, cardId: string) => void;
+  onOpenWalkHistory: () => void;
 }) {
   const [pets, setPets] = useState<PetAchievements[] | null>(null);
+  const [leaderboard, setLeaderboard] = useState<WalkLeaderboard | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -5541,6 +5572,7 @@ function AchievementsAllScreen({
         const res = await getAchievements();
         if (!cancelled) {
           setPets(res.pets);
+          setLeaderboard(res.leaderboard);
           onLoaded(res.pets); // cached for the badge drill-down screen
         }
       } catch (err) {
@@ -5555,7 +5587,15 @@ function AchievementsAllScreen({
 
   return (
     <div className="albums-all">
-      <h1 className="large-title">Achievements</h1>
+      <div className="albums-all__pet-header">
+        <h1 className="large-title">Achievements</h1>
+        <button type="button" className="btn btn--link" onClick={onOpenWalkHistory}>
+          Walk history →
+        </button>
+      </div>
+      {leaderboard && leaderboard.members.length >= 2 && (
+        <FamilyLeaderboard board={leaderboard} />
+      )}
       {pets === null ? (
         <p className="albums-all__loading">Loading…</p>
       ) : pets.length === 0 ? (
@@ -5703,6 +5743,177 @@ function BadgeScreen({
               </>
             )}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- family walk leaderboard (Achievements screen, households only) ----
+// "Who's winning the week": ranked by miles (walk count breaks ties), a bar
+// per member scaled to the leader, medals for the podium. Only rendered when
+// the household actually has 2+ people — a solo leaderboard is just a stat.
+function FamilyLeaderboard({ board }: { board: WalkLeaderboard }) {
+  const maxMiles = Math.max(...board.members.map((m) => m.miles), 0.1);
+  const medals = ['🥇', '🥈', '🥉'];
+  const displayName = (email: string) =>
+    email === board.me ? 'You' : email.split('@')[0];
+  return (
+    <section className="leaderboard">
+      <div className="leaderboard__header">
+        <span className="leaderboard__title">🏆 Family walk-off</span>
+        <span className="leaderboard__label">{board.label}</span>
+      </div>
+      {board.members.map((m, i) => (
+        <div
+          key={m.email}
+          className={`leaderboard__row${i === 0 && m.miles > 0 ? ' leaderboard__row--leader' : ''}`}
+        >
+          <span className="leaderboard__medal" aria-hidden="true">
+            {m.miles > 0 || m.walks > 0 ? (medals[i] ?? `${i + 1}.`) : '–'}
+          </span>
+          <div className="leaderboard__bar-wrap">
+            <span className="leaderboard__name">{displayName(m.email)}</span>
+            <div
+              className="leaderboard__bar"
+              style={{ width: `${Math.max((m.miles / maxMiles) * 100, 2)}%` }}
+            />
+          </div>
+          <span className="leaderboard__stats">
+            {m.miles} mi · {m.walks} walk{m.walks === 1 ? '' : 's'}
+          </span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+// ---- walk history (from the Achievements screen) ----
+// Every pool walk, any age, newest first, grouped by day — with per-walk
+// delete (two-tap inline confirm) so an accidental start or a tracker left
+// running in the car can be scrubbed. Deleting recomputes the achievement
+// card numbers server-side on the next visit; earned badges stay (trophy
+// semantics, deliberate).
+function WalkHistoryScreen({
+  pets,
+  onBack,
+  onError,
+  onNotice,
+}: {
+  pets: Pet[];
+  onBack: () => void;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [walks, setWalks] = useState<WalkRecord[] | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await listWalks();
+        if (!cancelled) setWalks(res.walks);
+      } catch (err) {
+        if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load walks');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onError]);
+
+  async function handleDelete(id: string) {
+    setBusyId(id);
+    try {
+      await deleteWalk(id);
+      setWalks((prev) => (prev ?? []).filter((w) => w.id !== id));
+      onNotice('Walk deleted.');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not delete the walk');
+    } finally {
+      setBusyId(null);
+      setConfirmId(null);
+    }
+  }
+
+  const petName = (id: string) => pets.find((p) => p.id === id)?.name ?? 'a pet';
+  const byDay = new Map<string, WalkRecord[]>();
+  for (const w of walks ?? []) {
+    const day = toYMD(new Date(w.startedAt));
+    byDay.set(day, [...(byDay.get(day) ?? []), w]);
+  }
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ‹ Achievements
+        </button>
+        <span className="screen-nav__title">Walk history</span>
+      </nav>
+      <div className="screen-view__body">
+        {walks === null ? (
+          <p className="albums-all__loading">Loading…</p>
+        ) : walks.length === 0 ? (
+          <p className="albums-all__loading">No walks logged yet.</p>
+        ) : (
+          [...byDay.entries()].map(([day, dayWalks]) => (
+            <section key={day} className="walk-history__day">
+              <h2 className="badges__section-title">{formatDate(day)}</h2>
+              <ul className="walk-history__list">
+                {dayWalks.map((w) => (
+                  <li key={w.id} className="walk-history__row">
+                    <div className="walk-history__info">
+                      <span className="walk-history__stats">
+                        {(w.distanceMeters / 1609.344).toFixed(2)} mi ·{' '}
+                        {formatElapsed(Date.parse(w.endedAt) - Date.parse(w.startedAt))}
+                        {' · '}
+                        {new Date(w.startedAt).toLocaleTimeString(undefined, {
+                          hour: 'numeric',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      <span className="walk-history__meta">
+                        {w.petIds.map(petName).join(', ')}
+                        {w.by ? ` · by ${w.by.split('@')[0]}` : ''}
+                      </span>
+                    </div>
+                    {confirmId === w.id ? (
+                      <span className="walk-history__confirm">
+                        <button
+                          type="button"
+                          className="btn btn--danger btn--sm"
+                          disabled={busyId === w.id}
+                          onClick={() => void handleDelete(w.id)}
+                        >
+                          {busyId === w.id ? 'Deleting…' : 'Delete?'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--link btn--sm"
+                          disabled={busyId === w.id}
+                          onClick={() => setConfirmId(null)}
+                        >
+                          Keep
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn--link walk-history__delete"
+                        aria-label="Delete this walk"
+                        onClick={() => setConfirmId(w.id)}
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))
         )}
       </div>
     </div>

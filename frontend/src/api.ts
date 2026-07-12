@@ -391,6 +391,7 @@ export interface TrendsWeekPet extends TrendsSeriesFields {
   checklist: TrendsChecklistItem[];
   medsGiven: number;
   weight: { value: number; unit: string; deltaWeek: number | null } | null;
+  walks: { count: number; miles: number } | null; // null for cats
   insight: string | null;
 }
 export interface TrendsMonthChecklistItem {
@@ -409,6 +410,7 @@ export interface TrendsMonthPet extends TrendsSeriesFields {
   medsGiven: number;
   medsGivenLastMonth: number;
   weight: { value: number; unit: string; deltaMonth: number | null } | null;
+  walks: { count: number; miles: number; countLast: number; milesLast: number } | null; // null for cats
   checklist: TrendsMonthChecklistItem[];
 }
 export interface TrendsResponse<T> {
@@ -443,6 +445,7 @@ export interface WalkRecord {
   startedAt: string; // ISO timestamp
   endedAt: string; // ISO timestamp
   distanceMeters: number;
+  by?: string; // actor email, server-stamped; absent on pre-attribution walks
 }
 
 export function listWalks(): Promise<{ walks: WalkRecord[] }> {
@@ -484,8 +487,15 @@ export interface PetAchievements {
   petName: string;
   cards: AchievementCard[];
 }
+// Family walk leaderboard — null for solo accounts (no household members).
+// `me` = the caller's email so the UI can highlight their own row.
+export interface WalkLeaderboard {
+  label: string;
+  me: string;
+  members: { email: string; walks: number; miles: number }[];
+}
 
-export function getAchievements(): Promise<{ pets: PetAchievements[] }> {
+export function getAchievements(): Promise<{ pets: PetAchievements[]; leaderboard: WalkLeaderboard | null }> {
   return request('GET', '/achievements');
 }
 

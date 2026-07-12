@@ -105,6 +105,14 @@ async function main() {
     rexCards0.flatMap((c) => c.badges).every((b) => b.earnedAt === null),
     'fresh pet: all badges locked',
   );
+  const trends0 = await api(token, 'GET', '/trends?view=week&offset=0');
+  const catTrend0 = trends0.body?.pets?.find((p) => p.petId === cat.id);
+  const rexTrend0 = trends0.body?.pets?.find((p) => p.petId === rex.id);
+  check(catTrend0?.walks === null, `trends: cat walks is null (got ${JSON.stringify(catTrend0?.walks)})`);
+  check(
+    rexTrend0?.walks?.count === 0 && rexTrend0?.walks?.miles === 0,
+    `trends: dog with no walks shows 0/0 (got ${JSON.stringify(rexTrend0?.walks)})`,
+  );
 
   // Swap the cat for a second dog — the multi-pet walk sections below need
   // two dogs, and the free tier allows only 2 pets at once.
@@ -153,9 +161,19 @@ async function main() {
     walk.body?.walk?.petIds?.length === 2 && walk.body.walk.petIds.includes(rex.id) && walk.body.walk.petIds.includes(fido.id),
     'bogus petId silently dropped, both real pets kept',
   );
+  check(walk.body?.walk?.by === email, `walk attributed to the caller (got ${walk.body?.walk?.by})`);
 
   const list = await api(token, 'GET', '/walks');
   check(list.body.walks.length === 1, 'GET /walks lists it');
+  check(list.body.walks[0].by === email, 'attribution survives the round-trip');
+
+  console.log('\n[3b] trends week view picks up the walk; solo account has no leaderboard');
+  const trends = await api(token, 'GET', '/trends?view=week&offset=0');
+  const rexTrend = trends.body?.pets?.find((p) => p.petId === rex.id);
+  check(
+    rexTrend?.walks?.count === 1 && rexTrend?.walks?.miles === 2.5,
+    `trends shows 1 walk / 2.5 mi for Rex (got ${JSON.stringify(rexTrend?.walks)})`,
+  );
 
   console.log('\n[4] ending the walk auto-checked the Daily "Walk" preset for both pets');
   const today = endedAt.slice(0, 10);
@@ -163,6 +181,9 @@ async function main() {
   const dailyFido = await api(token, 'GET', `/pets/${fido.id}/daily?date=${today}`);
   check(!!dailyRex.body?.checks?.['preset-walk'], "Rex's Daily Walk item checked");
   check(!!dailyFido.body?.checks?.['preset-walk'], "Fido's Daily Walk item checked");
+
+  const achForBoard = await api(token, 'GET', '/achievements');
+  check(achForBoard.body.leaderboard === null, 'solo account: leaderboard is null');
 
   console.log('\n[5] GET /achievements reflects the walk + first badges earn');
   // Complete Rex's Daily list for today (walk was auto-checked by [3/4];

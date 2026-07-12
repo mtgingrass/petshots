@@ -1447,6 +1447,128 @@ a {
   font-size: 0.9rem;
 }
 
+/* Family walk leaderboard (Achievements screen, households only) */
+.leaderboard {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.leaderboard__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.leaderboard__title {
+  font-weight: 800;
+}
+
+.leaderboard__label {
+  font-size: 0.75rem;
+  color: var(--subtle);
+}
+
+.leaderboard__row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.leaderboard__row--leader .leaderboard__name {
+  font-weight: 800;
+}
+
+.leaderboard__medal {
+  width: 1.6rem;
+  text-align: center;
+  font-size: 1.1rem;
+}
+
+.leaderboard__bar-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.leaderboard__name {
+  font-size: 0.85rem;
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.leaderboard__bar {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), #9b8cff);
+  transition: width 0.4s ease;
+}
+
+.leaderboard__stats {
+  font-size: 0.78rem;
+  color: var(--subtle);
+  white-space: nowrap;
+}
+
+/* Walk history (per-walk delete) */
+.walk-history__day {
+  margin-bottom: 1rem;
+}
+
+.walk-history__list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.walk-history__row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 0.7rem 0.9rem;
+}
+
+.walk-history__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.walk-history__stats {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.walk-history__meta {
+  font-size: 0.78rem;
+  color: var(--subtle);
+}
+
+.walk-history__delete {
+  font-size: 1rem;
+}
+
+.walk-history__confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.trends-all__row-caption {
+  color: var(--subtle);
+  font-size: 0.85em;
+}
+
 .walk-screen__summary-stats {
   font-size: 1.1rem;
   font-weight: 700;

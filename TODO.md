@@ -6,7 +6,6 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item. Comple
 
 ## Inbox
 - [ ] **TestFlight build 2 — BLOCKING iOS parity** (2026-07-12) — the app serves the bundled webDir, so build 1 is frozen at the session-27 bundle: no Trends swipe, no photos/albums, no walks, no achievements/badges on iOS until Mark archives/uploads build 2 from Xcode. `cap sync` is current and the simulator build passes (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project App.xcodeproj -scheme App`).
-- [ ] **Commit sessions 28–30** (2026-07-12) — three sessions deployed live but uncommitted on `main`; the tree matches production exactly and all 9 smoke suites are green, so commit whenever ready.
 
 ## Marketing
 - [ ] Write App Store listing copy (2026-07-10)

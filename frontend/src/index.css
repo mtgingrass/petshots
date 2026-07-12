@@ -2222,7 +2222,8 @@ a {
   box-shadow: var(--shadow-menu);
 }
 
-.profile-menu__dropdown button[role="menuitem"] {
+.profile-menu__dropdown button[role="menuitem"],
+.profile-menu__dropdown a[role="menuitem"] {
   display: block;
   width: 100%;
   text-align: left;
@@ -2233,9 +2234,11 @@ a {
   border-radius: 7px;
   font-size: 0.9rem;
   color: var(--text);
+  text-decoration: none; /* the a[role=menuitem] app link */
 }
 
-.profile-menu__dropdown button[role="menuitem"]:hover {
+.profile-menu__dropdown button[role="menuitem"]:hover,
+.profile-menu__dropdown a[role="menuitem"]:hover {
   background: var(--panel);
 }
 

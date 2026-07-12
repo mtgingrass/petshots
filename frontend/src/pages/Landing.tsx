@@ -43,7 +43,19 @@ export function Landing() {
       .catch(() => {}); // fallback copy stays
   }, []);
 
-  if (email) return <Navigate to="/dashboard" replace />;
+  // The browser's native #iphone anchor jump fires before React has
+  // rendered the section — re-run it once the DOM actually has it.
+  useEffect(() => {
+    if (window.location.hash === '#iphone') {
+      document.getElementById('iphone')?.scrollIntoView();
+    }
+  }, []);
+
+  // Logged-in users normally skip the landing page — EXCEPT when they
+  // followed the footer's "Get the iPhone app" link to the #iphone section.
+  if (email && window.location.hash !== '#iphone') {
+    return <Navigate to="/dashboard" replace />;
+  }
 
   return (
     <>
@@ -139,7 +151,7 @@ export function Landing() {
           </li>
         </ul>
 
-        <section className="app-cta">
+        <section className="app-cta" id="iphone">
           <div className="app-cta__phone" aria-hidden="true">
             <span className="app-cta__island" />
             <img src={albumsShot} alt="" width={780} height={1688} loading="lazy" />

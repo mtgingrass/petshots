@@ -91,6 +91,7 @@ import {
   UPLOADS,
   DASHBOARD as DASHBOARD_CONFIG,
   ACHIEVEMENTS as ACHIEVEMENTS_CONFIG,
+  APP_STORE_URL,
   PAID_PLAN_LIMITS,
   REMINDER_DAY_OPTIONS,
   VACCINE_CADENCES,
@@ -1721,6 +1722,14 @@ function AccountMenu({
           >
             Family
           </button>
+          {/* Browser-only: mobile-web users never see the dashboard footer
+              (the tab bar replaces it), so this is their quiet path to the
+              iPhone app. Points at the App Store once APP_STORE_URL is set. */}
+          {!isNative && (
+            <a role="menuitem" href={APP_STORE_URL || '/#iphone'}>
+              Get the iPhone app
+            </a>
+          )}
           <div className="profile-menu__divider" />
           <button
             role="menuitem"

@@ -248,6 +248,35 @@ a {
   gap: 0.9rem;
 }
 
+.hero__copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+/* The product shot: a phone-framed slice of the real dashboard (status-ring
+   pet circles + header chip). CSS-cropped from the full screenshot —
+   object-position keeps the top of the screen, so the share/avatar header
+   and both pets stay in frame. */
+.hero__phone {
+  width: min(300px, 78vw);
+  border: 1px solid var(--border);
+  border-radius: 32px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  background: #0a0a0c; /* app --bg, so the frame reads as the phone */
+  margin-top: 0.75rem;
+}
+
+.hero__phone img {
+  display: block;
+  width: 100%;
+  height: 430px;
+  object-fit: cover;
+  object-position: top;
+}
+
 .hero__badge {
   font-size: 2.6rem;
   line-height: 1;
@@ -2378,6 +2407,28 @@ a {
 
   .feature-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  /* Desktop hero: copy left, phone right */
+  .hero {
+    flex-direction: row;
+    justify-content: center;
+    text-align: left;
+    gap: 3rem;
+  }
+
+  .hero__copy {
+    align-items: flex-start;
+    max-width: 26rem;
+  }
+
+  .hero__phone {
+    margin-top: 0;
+    flex-shrink: 0;
+  }
+
+  .hero__phone img {
+    height: 480px;
   }
 
   .quickshow {

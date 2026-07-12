@@ -4,6 +4,10 @@ import { getRoadmap } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { SiteHeader } from '../components/SiteHeader';
 import { SiteFooter } from '../components/SiteFooter';
+// Real dashboard screenshot (demo account) — the hero product shot. Retake
+// via scripts/shoot-docs.mjs and re-copy from docs/images/ when the
+// overview screen changes noticeably.
+import dashboardShot from '../assets/landing-dashboard.png';
 
 // Static fallback for the roadmap teaser — shown until (or if never) the
 // live board loads. Keep it plausible but generic.
@@ -44,23 +48,34 @@ export function Landing() {
       <SiteHeader />
       <main className="page">
         <section className="hero">
-          <span className="hero__badge" aria-hidden="true">🐾</span>
-          <h1>Proof of shots, in seconds.</h1>
-          <p className="tagline">
-            Your pet's vaccine records on your phone.
-          </p>
-          <p className="subtle">
-            Daycare, groomer, boarding, the dog bar. They all want the
-            rabies cert <em>right now</em>, and it's always buried in an
-            email from your vet. Petshots keeps it one tap away.
-          </p>
-          <div className="actions">
-            <Link className="btn btn--primary btn--lg" to="/signup">
-              Get started — it's free
-            </Link>
-            <Link className="btn btn--lg" to="/login">
-              Log in
-            </Link>
+          <div className="hero__copy">
+            <span className="hero__badge" aria-hidden="true">🐾</span>
+            <h1>Proof of shots, in seconds.</h1>
+            <p className="tagline">
+              Your pet's vaccine records on your phone.
+            </p>
+            <p className="subtle">
+              Daycare, groomer, boarding, the dog bar. They all want the
+              rabies cert <em>right now</em>, and it's always buried in an
+              email from your vet. Petshots keeps it one tap away.
+            </p>
+            <div className="actions">
+              <Link className="btn btn--primary btn--lg" to="/signup">
+                Get started — it's free
+              </Link>
+              <Link className="btn btn--lg" to="/login">
+                Log in
+              </Link>
+            </div>
+          </div>
+          <div className="hero__phone" aria-hidden="true">
+            <img
+              src={dashboardShot}
+              alt=""
+              width={780}
+              height={1688}
+              loading="eager"
+            />
           </div>
         </section>
 

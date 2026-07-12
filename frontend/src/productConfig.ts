@@ -57,6 +57,15 @@ export const DASHBOARD = {
   MED_LOOKAHEAD_MAX_DAYS: 3,
 } as const;
 
+/**
+ * IPHONE APP PROMOTION (landing page "Better on your iPhone" section).
+ * Empty string = the app isn't publicly downloadable yet; the landing badge
+ * renders as "Coming soon to the App Store". When the App Store listing goes
+ * live, paste the real https://apps.apple.com/... URL here and the badge
+ * becomes a download link — no other code change needed.
+ */
+export const APP_STORE_URL = '';
+
 /** ACHIEVEMENTS (badge view behind each achievement card). */
 export const ACHIEVEMENTS = {
   /** A badge earned within this many days wears the "New!" ribbon. */

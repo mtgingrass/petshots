@@ -386,6 +386,109 @@ a {
   font-size: 0.88rem;
 }
 
+/* "Better on your iPhone" app-download section: CSS iPhone (thick bezel +
+   dynamic-island pill) around a real screenshot, copy + store badge beside
+   it. Badge is text-drawn — no Apple asset needed while it says "coming
+   soon"; APP_STORE_URL in productConfig.ts flips it to a live link. */
+.app-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 2rem 0 1rem;
+  text-align: center;
+}
+
+.app-cta__copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 26rem;
+}
+
+.app-cta__copy h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.app-cta__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+.app-cta__list li::before {
+  content: '✓ ';
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.app-cta__phone {
+  position: relative;
+  width: min(280px, 74vw);
+  border: 10px solid #2c2c30;
+  border-radius: 44px;
+  overflow: hidden;
+  background: #0a0a0c;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.app-cta__island {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 32%;
+  height: 22px;
+  border-radius: 999px;
+  background: #000;
+  z-index: 2;
+}
+
+.app-cta__phone img {
+  display: block;
+  width: 100%;
+  height: 500px;
+  object-fit: cover;
+  object-position: top;
+}
+
+.store-badge {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  padding: 0.55rem 1.3rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #000;
+  color: #fff;
+  text-decoration: none;
+  line-height: 1.15;
+  margin-top: 0.35rem;
+}
+
+.store-badge__pre {
+  font-size: 0.68rem;
+  color: var(--subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.store-badge__store {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.store-badge--soon {
+  opacity: 0.85;
+}
+
 .pledge {
   text-align: center;
   border: 1px dashed var(--border);
@@ -2407,6 +2510,18 @@ a {
 
   .feature-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  /* Desktop app-CTA: phone left, copy right */
+  .app-cta {
+    flex-direction: row;
+    justify-content: center;
+    gap: 3rem;
+    text-align: left;
+  }
+
+  .app-cta__copy {
+    align-items: flex-start;
   }
 
   /* Desktop hero: copy left, phone right */

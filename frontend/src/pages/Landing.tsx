@@ -4,10 +4,12 @@ import { getRoadmap } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { SiteHeader } from '../components/SiteHeader';
 import { SiteFooter } from '../components/SiteFooter';
-// Real dashboard screenshot (demo account) — the hero product shot. Retake
-// via scripts/shoot-docs.mjs and re-copy from docs/images/ when the
-// overview screen changes noticeably.
+// Real screenshots (demo account) — the hero product shot + the iPhone-app
+// section. Retake via scripts/shoot-docs.mjs and re-copy from docs/images/
+// when those screens change noticeably.
 import dashboardShot from '../assets/landing-dashboard.png';
+import albumsShot from '../assets/landing-albums.png';
+import { APP_STORE_URL } from '../productConfig';
 
 // Static fallback for the roadmap teaser — shown until (or if never) the
 // live board loads. Keep it plausible but generic.
@@ -136,6 +138,36 @@ export function Landing() {
             <p className="subtle">A shareable link with the records the groomer or boarder needs — no account required.</p>
           </li>
         </ul>
+
+        <section className="app-cta">
+          <div className="app-cta__phone" aria-hidden="true">
+            <span className="app-cta__island" />
+            <img src={albumsShot} alt="" width={780} height={1688} loading="lazy" />
+          </div>
+          <div className="app-cta__copy">
+            <h2>Better on your iPhone</h2>
+            <p className="subtle">
+              The same Petshots, plus the things only a phone can do:
+            </p>
+            <ul className="app-cta__list subtle">
+              <li>Push reminders that actually reach you</li>
+              <li>Camera button straight into your pet's album</li>
+              <li>GPS walk tracking from the home screen</li>
+              <li>Records ready at the door — even with no signal</li>
+            </ul>
+            {APP_STORE_URL ? (
+              <a className="store-badge" href={APP_STORE_URL}>
+                <span className="store-badge__pre">Download on the</span>
+                <span className="store-badge__store">App Store</span>
+              </a>
+            ) : (
+              <span className="store-badge store-badge--soon">
+                <span className="store-badge__pre">Coming soon to the</span>
+                <span className="store-badge__store">App Store</span>
+              </span>
+            )}
+          </div>
+        </section>
 
         <div className="pledge">
           <strong>No clutter, ever.</strong> No feeds, no upsells, no

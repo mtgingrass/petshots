@@ -88,6 +88,40 @@ export function Landing() {
           </li>
         </ol>
 
+        <h2 className="section-title">And after the door</h2>
+        <ul className="feature-grid">
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">🔔</span>
+            <strong>Reminders</strong>
+            <p className="subtle">Email and push before anything expires — vaccines, meds, birthdays.</p>
+          </li>
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">✅</span>
+            <strong>Daily care checklist</strong>
+            <p className="subtle">Feedings, meds, walks — shared with the family so nobody feeds the dog twice.</p>
+          </li>
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">📈</span>
+            <strong>Trends</strong>
+            <p className="subtle">Mood, weight, care, and walk charts — spot "he's been off all week" early.</p>
+          </li>
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">📸</span>
+            <strong>Photo albums</strong>
+            <p className="subtle">Casual snaps in a per-pet album, shared with your family in real time.</p>
+          </li>
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">🚶</span>
+            <strong>Walks & badges</strong>
+            <p className="subtle">GPS-tracked walks, achievement badges, and a family walk-off leaderboard.</p>
+          </li>
+          <li>
+            <span className="feature-grid__icon" aria-hidden="true">🎫</span>
+            <strong>Pet passport</strong>
+            <p className="subtle">A shareable link with the records the groomer or boarder needs — no account required.</p>
+          </li>
+        </ul>
+
         <div className="pledge">
           <strong>No clutter, ever.</strong> No feeds, no upsells, no
           vet-portal maze. Just your pet's records, free.

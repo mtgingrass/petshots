@@ -323,6 +323,40 @@ a {
   font-size: 0.92rem;
 }
 
+/* Landing "And after the door" feature grid — same inset-group cards as
+   .steps, icon instead of a step counter. */
+.feature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.feature-grid li {
+  background: var(--panel);
+  border: none;
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.feature-grid__icon {
+  display: block;
+  font-size: 1.3rem;
+  margin-bottom: 0.35rem;
+}
+
+.feature-grid strong {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.feature-grid .subtle {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
 .pledge {
   text-align: center;
   border: 1px dashed var(--border);
@@ -2340,6 +2374,10 @@ a {
   .steps li::before {
     left: 1rem;
     top: 1rem;
+  }
+
+  .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
   }
 
   .quickshow {

@@ -9,7 +9,7 @@ Format: `- [ ]` for open, `- [x]` for done. Add date when adding an item. Comple
 
 ## Marketing
 - [ ] Write App Store listing copy (2026-07-10)
-- [ ] Get screenshots of the app in use with representative data, for App Store review (2026-07-10)
+- [ ] Get screenshots of the app in use with representative data, for App Store review (2026-07-10) — **12 fresh marketing shots taken 2026-07-12** (`docs/images/app-*.png`, iPhone viewport @2x: landing, dashboard, records, daily, trends weekly+monthly, achievements, badges, walk history, albums, passport). Still open for App Store specifically: Apple wants exact device resolutions (6.7"/6.5" etc.) — retake from the simulator once build 2 exists, and consider swapping Bella's album stock photos for breed-matched ones.
 - [ ] Push to Apple App Store once TestFlight testers are through (2026-07-10)
 
 ## Open backlog

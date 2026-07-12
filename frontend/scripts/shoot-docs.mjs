@@ -97,13 +97,86 @@ await page.click('.tab-bar__tab:has-text("Records")');
 await page.waitForTimeout(1000);
 await shot('app-pet-records');
 
-// 3. Public passport page (no login — new context to prove it)
-const pub = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
-const pubPage = await pub.newPage();
-await pubPage.goto(passport.url, { waitUntil: 'domcontentloaded' });
-await pubPage.waitForTimeout(2500);
-await pubPage.screenshot({ path: `${OUT}/app-passport.png`, fullPage: false });
+// 3. Daily care checklist
+await page.click('.tabbar__item:has-text("Daily")');
+await page.waitForTimeout(1000);
+await shot('app-daily');
+
+// 4. Trends — weekly charts
+await page.click('.tabbar__item:has-text("Trends")');
+await page.waitForTimeout(1500);
+await shot('app-trends');
+
+// 5. Achievements — stat cards (walks/miles/photos/care streak).
+// Fresh load: the Pets tab remembers the pet-detail view we left it on, and
+// the header icon row only exists on the overview.
+await page.goto(BASE + '/dashboard', { waitUntil: 'domcontentloaded' });
+await page.waitForTimeout(2000);
+await page.click('.tabbar__item:has-text("Pets")');
+await page.waitForTimeout(800);
+await page.click('button[aria-label="View achievements"]');
+await page.waitForTimeout(1200);
+await shot('app-achievements');
+
+// 6. Badge ladder — Luna's care streak (3 of 4 earned reads well)
+await page.click('.albums-all__pet:has-text("Luna") .achievements__card:first-child');
+await page.waitForTimeout(1200);
+await shot('app-badges');
+
+// 7. Walk history (back to achievements first)
+await page.click('.screen-nav__back');
+await page.waitForTimeout(800);
+await page.click('button:has-text("Walk history")');
+await page.waitForTimeout(1200);
+await shot('app-walk-history');
+
+// 8. Photo albums (walk-history's back goes to achievements, so reload for
+// the overview's icon row again)
+await page.goto(BASE + '/dashboard', { waitUntil: 'domcontentloaded' });
+await page.waitForTimeout(2000);
+await page.click('.tabbar__item:has-text("Pets")');
+await page.waitForTimeout(800);
+await page.click('button[aria-label="View albums"]');
+await page.waitForTimeout(1500);
+await shot('app-albums');
+
+// 9. Landing page (logged out — fresh context)
+const anon = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+const anonPage = await anon.newPage();
+await anonPage.goto(BASE, { waitUntil: 'domcontentloaded' });
+await anonPage.evaluate(() => localStorage.setItem('petshots.theme', 'dark'));
+await anonPage.waitForTimeout(1500);
+await anonPage.screenshot({ path: `${OUT}/app-landing.png`, fullPage: false });
+await anonPage.screenshot({ path: `${OUT}/app-landing-full.png`, fullPage: true });
+console.log('✓ app-landing.png + app-landing-full.png');
+
+// 10. Public passport page (no login — same anon context proves it)
+await anonPage.goto(passport.url, { waitUntil: 'domcontentloaded' });
+await anonPage.waitForTimeout(2500);
+await anonPage.screenshot({ path: `${OUT}/app-passport.png`, fullPage: false });
 console.log('✓ app-passport.png');
+
+// 11. Paid tier — Trends monthly rollup (paid-beta account; skipped unless
+//     PAID_BETA_PASSWORD is set, since it's a different production account).
+if (process.env.PAID_BETA_PASSWORD) {
+  const paid = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+  const paidPage = await paid.newPage();
+  await paidPage.goto(BASE + '/login', { waitUntil: 'domcontentloaded' });
+  await paidPage.evaluate(() => localStorage.setItem('petshots.theme', 'dark'));
+  await paidPage.fill('input[type="email"]', 'paid-beta@petshots.app');
+  await paidPage.fill('input[type="password"]', process.env.PAID_BETA_PASSWORD);
+  await paidPage.click('button[type="submit"]');
+  await paidPage.waitForURL('**/dashboard', { timeout: 20000 });
+  await paidPage.waitForTimeout(2000);
+  await paidPage.click('.tabbar__item:has-text("Trends")');
+  await paidPage.waitForTimeout(1200);
+  await paidPage.click('button:has-text("Monthly")');
+  await paidPage.waitForTimeout(1500);
+  await paidPage.screenshot({ path: `${OUT}/app-trends-monthly.png`, fullPage: false });
+  console.log('✓ app-trends-monthly.png');
+} else {
+  console.log('… skipped app-trends-monthly (PAID_BETA_PASSWORD not set)');
+}
 
 await browser.close();
 console.log(`\nDone → ${OUT}`);

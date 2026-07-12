@@ -278,6 +278,18 @@ export const DAILY = {
   HISTORY_DAYS_PAID: 365,
 } as const;
 
+/** WALKS */
+export const WALKS = {
+  /**
+   * Dog energy burn estimate: kcal per kg of body weight per km walked
+   * (standard veterinary rule of thumb for a walking pace, ~0.8). Applied to
+   * each dog's LATEST logged weight; dogs with no weight log get no estimate
+   * (never a made-up default). Rendered with "≈" everywhere — it's an
+   * estimate, not a measurement.
+   */
+  DOG_KCAL_PER_KG_KM: 0.8,
+} as const;
+
 /** WEIGHT LOG */
 export const WEIGHTS = {
   /** Entries kept per pet (one per date; oldest beyond this are rejected). */

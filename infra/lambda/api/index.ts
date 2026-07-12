@@ -40,6 +40,7 @@ import {
   AI,
   EMAIL,
   ACHIEVEMENTS,
+  WALKS,
 } from '../shared/config';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the reminder Lambda's report emails — see that file's header.
@@ -158,6 +159,20 @@ interface WalkRecord {
 const isCatSpecies = (species?: string) => /cat/i.test(species ?? '');
 const METERS_PER_MILE = 1609.344;
 const toMiles = (meters: number) => Math.round((meters / METERS_PER_MILE) * 10) / 10;
+// Dog energy-burn estimate (WALKS.DOG_KCAL_PER_KG_KM, see config.ts):
+// kcal ≈ factor × latest-logged-weight(kg) × distance(km). null when the pet
+// has no weight log — an estimate from a made-up weight would be worse than
+// none. Rendered with "≈" everywhere.
+const LB_PER_KG = 2.204623;
+function latestWeightKg(entries: { date: string; weight: number; unit: 'lb' | 'kg' }[] | undefined): number | null {
+  if (!entries?.length) return null;
+  const latest = entries.reduce((a, b) => (a.date > b.date ? a : b));
+  return latest.unit === 'kg' ? latest.weight : latest.weight / LB_PER_KG;
+}
+function dogKcal(weightKg: number | null, distanceMeters: number): number | null {
+  if (weightKg === null || distanceMeters <= 0) return null;
+  return Math.round(WALKS.DOG_KCAL_PER_KG_KM * weightKg * (distanceMeters / 1000));
+}
 // All of a pool's walks live in ONE compact users/{poolSub}/walks-index.json
 // (records are ~120 bytes; years of daily walks stay well under 1 MB) instead
 // of one object per walk — the original per-object layout meant one S3
@@ -746,7 +761,8 @@ interface TrendsWeekPet {
   medsGiven: number;
   weight: { value: number; unit: string; deltaWeek: number | null } | null;
   // null for cats (no walk features), matching the achievements cards.
-  walks: { count: number; miles: number } | null;
+  // kcal: dog energy estimate for the window; null when no weight is logged.
+  walks: { count: number; miles: number; kcal: number | null } | null;
   insight: string | null;
   moodSeries: { date: string; value: number | null }[];
   weightSeries: { date: string; value: number | null }[];
@@ -762,7 +778,7 @@ interface TrendsMonthPet {
   medsGiven: number;
   medsGivenLastMonth: number;
   weight: { value: number; unit: string; deltaMonth: number | null } | null;
-  walks: { count: number; miles: number; countLast: number; milesLast: number } | null;
+  walks: { count: number; miles: number; kcal: number | null; countLast: number; milesLast: number } | null;
   checklist: { id: string; label: string; pctThis: number; pctLast: number }[];
   moodSeries: { date: string; value: number | null }[];
   weightSeries: { date: string; value: number | null }[];
@@ -840,6 +856,7 @@ async function computeTrendsView(
 
         // Walk tallies for a window: this pet's walks whose start date falls
         // inside it. Cats get null (no walk features), same as achievements.
+        const petKgForWalks = latestWeightKg(weights);
         const walksIn = (dates: string[]) => {
           const inWindow = poolWalks.filter(
             (w) =>
@@ -847,9 +864,11 @@ async function computeTrendsView(
               w.startedAt.slice(0, 10) >= dates[0] &&
               w.startedAt.slice(0, 10) <= dates[dates.length - 1],
           );
+          const meters = inWindow.reduce((sum, w) => sum + w.distanceMeters, 0);
           return {
             count: inWindow.length,
-            miles: toMiles(inWindow.reduce((sum, w) => sum + w.distanceMeters, 0)),
+            miles: toMiles(meters),
+            kcal: dogKcal(petKgForWalks, meters),
           };
         };
         const petIsCat = isCatSpecies(pet.species);
@@ -939,7 +958,7 @@ function composeReportEmail(
           if (w.moodAvg !== null) lines.push(`  Mood: ${w.moodAvg.toFixed(1)}/5`);
           for (const c of w.checklist) lines.push(`  ${c.label}: ${c.count} of ${c.total} days`);
           if (w.weight) lines.push(`  ${weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek)}`);
-          if (w.walks && w.walks.count > 0) lines.push(`  ${weeklyReportCopy.walks(w.walks.count, w.walks.miles)}`);
+          if (w.walks && w.walks.count > 0) lines.push(`  ${weeklyReportCopy.walks(w.walks.count, w.walks.miles, w.walks.kcal)}`);
           if (w.insight) lines.push(`  ${w.insight}`);
           return lines.join('\n');
         })
@@ -949,7 +968,7 @@ function composeReportEmail(
           for (const c of m.checklist) lines.push(`  ${c.label}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`);
           if (m.weight) lines.push(`  ${monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth)}`);
           if (m.walks && (m.walks.count > 0 || m.walks.countLast > 0)) {
-            lines.push(`  ${monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.countLast, m.walks.milesLast)}`);
+            lines.push(`  ${monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.kcal, m.walks.countLast, m.walks.milesLast)}`);
           }
           if (m.headline) lines.push(`  ${m.headline}`);
           return lines.join('\n');
@@ -991,7 +1010,7 @@ function composeReportEmailHtml(
           if (w.moodAvg !== null) rows.push(petRowHtml(`Mood: ${w.moodAvg.toFixed(1)}/5`));
           for (const c of w.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.count} of ${c.total} days`));
           if (w.weight) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek))));
-          if (w.walks && w.walks.count > 0) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.walks(w.walks.count, w.walks.miles))));
+          if (w.walks && w.walks.count > 0) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.walks(w.walks.count, w.walks.miles, w.walks.kcal))));
           const insight = w.insight ? insightRowHtml(escapeHtml(w.insight)) : '';
           return petCardHtml(w.name, rows.join('') + insight);
         })
@@ -1001,7 +1020,7 @@ function composeReportEmailHtml(
           for (const c of m.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`));
           if (m.weight) rows.push(petRowHtml(escapeHtml(monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth))));
           if (m.walks && (m.walks.count > 0 || m.walks.countLast > 0)) {
-            rows.push(petRowHtml(escapeHtml(monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.countLast, m.walks.milesLast))));
+            rows.push(petRowHtml(escapeHtml(monthlyReportCopy.walks(m.walks.count, m.walks.miles, m.walks.kcal, m.walks.countLast, m.walks.milesLast))));
           }
           const insight = m.headline ? insightRowHtml(escapeHtml(m.headline)) : '';
           return petCardHtml(m.name, rows.join('') + insight);
@@ -1895,7 +1914,29 @@ export const handler = async (
         const walks = [...(await readWalksIndex(poolSub))].sort((a, b) =>
           b.startedAt.localeCompare(a.startedAt),
         );
-        return json(200, { walks });
+        // Per-dog energy estimates for every walk (latest weight × distance).
+        // One weights+pet read per UNIQUE pet, not per walk. Cats never get
+        // an estimate (walk features are dog-only throughout).
+        const walkPetIds = [...new Set(walks.flatMap((w) => w.petIds))];
+        const kgByPet = new Map<string, number | null>();
+        await Promise.all(
+          walkPetIds.map(async (petId) => {
+            const [pet, stored] = await Promise.all([
+              readJson<{ species?: string }>(`users/${poolSub}/pets/${petId}/pet.json`),
+              readJson<{ entries: WeightEntry[] }>(`users/${poolSub}/pets/${petId}/weights.json`),
+            ]);
+            kgByPet.set(petId, isCatSpecies(pet?.species) ? null : latestWeightKg(stored?.entries));
+          }),
+        );
+        const withKcal = walks.map((w) => {
+          const kcalByPet: Record<string, number> = {};
+          for (const petId of w.petIds) {
+            const kcal = dogKcal(kgByPet.get(petId) ?? null, w.distanceMeters);
+            if (kcal !== null) kcalByPet[petId] = kcal;
+          }
+          return { ...w, kcalByPet };
+        });
+        return json(200, { walks: withKcal });
       }
 
       case 'POST /walks': {
@@ -1963,7 +2004,22 @@ export const handler = async (
           }),
         );
 
-        return json(200, { walk });
+        // Per-dog energy estimate rides back on the save response so the
+        // "Walk saved" toast can say who burned what (same math as GET /walks).
+        const kcalByPet: Record<string, number> = {};
+        await Promise.all(
+          confirmedPetIds.map(async (petId) => {
+            const [petInfo, stored] = await Promise.all([
+              readJson<{ species?: string }>(`${poolPrefix}${petId}/pet.json`),
+              readJson<{ entries: WeightEntry[] }>(`${poolPrefix}${petId}/weights.json`),
+            ]);
+            if (isCatSpecies(petInfo?.species)) return;
+            const kcal = dogKcal(latestWeightKg(stored?.entries), distanceMeters);
+            if (kcal !== null) kcalByPet[petId] = kcal;
+          }),
+        );
+
+        return json(200, { walk, kcalByPet });
       }
 
       case 'DELETE /walks/{id}': {

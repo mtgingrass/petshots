@@ -391,7 +391,7 @@ export interface TrendsWeekPet extends TrendsSeriesFields {
   checklist: TrendsChecklistItem[];
   medsGiven: number;
   weight: { value: number; unit: string; deltaWeek: number | null } | null;
-  walks: { count: number; miles: number } | null; // null for cats
+  walks: { count: number; miles: number; kcal: number | null } | null; // null for cats
   insight: string | null;
 }
 export interface TrendsMonthChecklistItem {
@@ -410,7 +410,7 @@ export interface TrendsMonthPet extends TrendsSeriesFields {
   medsGiven: number;
   medsGivenLastMonth: number;
   weight: { value: number; unit: string; deltaMonth: number | null } | null;
-  walks: { count: number; miles: number; countLast: number; milesLast: number } | null; // null for cats
+  walks: { count: number; miles: number; kcal: number | null; countLast: number; milesLast: number } | null; // null for cats
   checklist: TrendsMonthChecklistItem[];
 }
 export interface TrendsResponse<T> {
@@ -446,6 +446,9 @@ export interface WalkRecord {
   endedAt: string; // ISO timestamp
   distanceMeters: number;
   by?: string; // actor email, server-stamped; absent on pre-attribution walks
+  // Dog energy estimates (≈kcal, latest weight × distance), computed by the
+  // server per dog on the walk. Missing for cats / dogs with no weight log.
+  kcalByPet?: Record<string, number>;
 }
 
 export function listWalks(): Promise<{ walks: WalkRecord[] }> {
@@ -457,7 +460,7 @@ export function createWalk(
   startedAt: string,
   endedAt: string,
   distanceMeters: number,
-): Promise<{ walk: WalkRecord }> {
+): Promise<{ walk: WalkRecord; kcalByPet?: Record<string, number> }> {
   return request('POST', '/walks', { petIds, startedAt, endedAt, distanceMeters });
 }
 

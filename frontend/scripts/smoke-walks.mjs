@@ -120,6 +120,15 @@ async function main() {
   const fido = (await api(token, 'POST', '/pets', { name: 'Fido', species: 'dog' })).body.pet;
   check(!!fido, 'cat swapped for second dog');
 
+  // Rex gets a logged weight (30 kg) so his walks get a kcal estimate; Fido
+  // deliberately gets none — no weight, no estimate.
+  const wgt = await api(token, 'POST', `/pets/${rex.id}/weights`, {
+    date: new Date().toISOString().slice(0, 10),
+    weight: 30,
+    unit: 'kg',
+  });
+  check(wgt.status === 200, `Rex weight logged (got ${wgt.status})`);
+
   console.log('\n[2] validation: empty petIds, endedAt before startedAt, foreign petId');
   const now = new Date();
   const noPets = await api(token, 'POST', '/walks', {
@@ -162,18 +171,31 @@ async function main() {
     'bogus petId silently dropped, both real pets kept',
   );
   check(walk.body?.walk?.by === email, `walk attributed to the caller (got ${walk.body?.walk?.by})`);
+  // kcal estimate: 0.8 kcal/kg/km × 30 kg × (2.5 mi = 4.02336 km) = 96.56 → 97
+  check(
+    walk.body?.kcalByPet?.[rex.id] === 97,
+    `save response: Rex ≈97 kcal (got ${walk.body?.kcalByPet?.[rex.id]})`,
+  );
+  check(
+    walk.body?.kcalByPet?.[fido.id] === undefined,
+    'save response: no estimate for weightless Fido',
+  );
 
   const list = await api(token, 'GET', '/walks');
   check(list.body.walks.length === 1, 'GET /walks lists it');
   check(list.body.walks[0].by === email, 'attribution survives the round-trip');
+  check(list.body.walks[0].kcalByPet?.[rex.id] === 97, 'GET /walks carries the same kcal estimate');
 
   console.log('\n[3b] trends week view picks up the walk; solo account has no leaderboard');
   const trends = await api(token, 'GET', '/trends?view=week&offset=0');
   const rexTrend = trends.body?.pets?.find((p) => p.petId === rex.id);
+  const fidoTrend = trends.body?.pets?.find((p) => p.petId === fido.id);
   check(
     rexTrend?.walks?.count === 1 && rexTrend?.walks?.miles === 2.5,
     `trends shows 1 walk / 2.5 mi for Rex (got ${JSON.stringify(rexTrend?.walks)})`,
   );
+  check(rexTrend?.walks?.kcal === 97, `trends week kcal ≈97 for Rex (got ${rexTrend?.walks?.kcal})`);
+  check(fidoTrend?.walks?.kcal === null, `trends week kcal null for weightless Fido (got ${fidoTrend?.walks?.kcal})`);
 
   console.log('\n[4] ending the walk auto-checked the Daily "Walk" preset for both pets');
   const today = endedAt.slice(0, 10);

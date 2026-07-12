@@ -1457,6 +1457,7 @@ function WeeklyTrendsView({
             {t.walks && t.walks.count > 0 && (
               <p className="trends-all__row">
                 Walks: {t.walks.count} · {t.walks.miles} mi
+                {t.walks.kcal ? ` · ≈${t.walks.kcal} kcal` : ''}
               </p>
             )}
             {t.insight && (
@@ -1598,6 +1599,7 @@ function MonthlyTrendsView({
             {m.walks && (m.walks.count > 0 || m.walks.countLast > 0) && (
               <p className="trends-all__row">
                 Walks: {m.walks.count} · {m.walks.miles} mi
+                {m.walks.kcal ? ` · ≈${m.walks.kcal} kcal` : ''}
                 <span className="trends-all__row-caption"> (last month: {m.walks.countLast} · {m.walks.milesLast} mi)</span>
               </p>
             )}
@@ -5460,13 +5462,18 @@ function WalkScreen({
     if (selectedPetIds.size === 0 || !startedAtRef.current || !endedAtRef.current) return;
     setSaving(true);
     try {
-      await createWalk(
+      const res = await createWalk(
         [...selectedPetIds],
         new Date(startedAtRef.current).toISOString(),
         new Date(endedAtRef.current).toISOString(),
         distanceMeters,
       );
-      onSaved('Walk saved.');
+      // "Rex burned ≈77 kcal" when the server could estimate it (dogs with a
+      // logged weight); plain save message otherwise.
+      const burns = Object.entries(res.kcalByPet ?? {})
+        .map(([petId, kcal]) => `${pets.find((p) => p.id === petId)?.name ?? 'Pet'} ≈${kcal} kcal`)
+        .join(' · ');
+      onSaved(burns ? `Walk saved. ${burns} burned.` : 'Walk saved.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not save the walk');
       setSaving(false);
@@ -5886,6 +5893,10 @@ function WalkHistoryScreen({
                       </span>
                       <span className="walk-history__meta">
                         {w.petIds.map(petName).join(', ')}
+                        {(() => {
+                          const kcal = Object.values(w.kcalByPet ?? {}).reduce((a, b) => a + b, 0);
+                          return kcal > 0 ? ` · ≈${kcal} kcal` : '';
+                        })()}
                         {w.by ? ` · by ${w.by.split('@')[0]}` : ''}
                       </span>
                     </div>

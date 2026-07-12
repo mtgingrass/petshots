@@ -65,3 +65,12 @@ export function compressImage(file: File): Promise<File> {
 export function normalizeForAnalysis(file: File): Promise<File> {
   return canvasRoundTrip(file, 2000, 0.92);
 }
+
+// Album photos (swipe-right camera capture): same 2000px/0.92 transform as
+// normalizeForAnalysis — good enough for a full-screen viewer, and the EXIF
+// orientation fix matters even more here since these are raw camera shots,
+// not scanned documents. Separate export (not reusing normalizeForAnalysis
+// directly) so the name at each call site matches its actual purpose.
+export function compressPhoto(file: File): Promise<File> {
+  return canvasRoundTrip(file, 2000, 0.92);
+}

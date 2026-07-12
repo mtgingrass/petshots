@@ -6,7 +6,7 @@
 // headline number, a ring gauge, a gradient completion bar) — adapted to
 // pet-care data, which has no real equivalent of "cardio load" or "stress,"
 // so the metrics themselves stay ours (mood, weight, checklist completion).
-import { useId } from 'react';
+import { useId, useEffect } from 'react';
 import type { TrendsSeriesPoint, TrendsChecklistDots } from '../api';
 
 // A line + gradient-fill chart for a series with possible gaps (days
@@ -195,4 +195,94 @@ export function statusColor(pct: number): string {
   if (pct < 50) return 'var(--overdue)';
   if (pct < 80) return 'var(--warn)';
   return 'var(--ok)';
+}
+
+// Same whole-screen horizontal-swipe gesture as the Daily tab's swipe-back
+// history (PetDailyHistory in Dashboard.tsx) — written fresh here rather
+// than extracted from that already-working, already-tested code, so this
+// change carries zero risk of regressing it. "back" = swipe right (earlier
+// period), "forward" = swipe left — same direction convention as Daily.
+// Only mount this in ONE active view at a time (conditional rendering, not
+// CSS show/hide) — two mounted instances would both fire on a single swipe.
+export function useSwipeStep(onStep: (direction: 'back' | 'forward') => void) {
+  useEffect(() => {
+    let start: { x: number; y: number } | null = null;
+    const onStart = (e: TouchEvent) => {
+      start = e.touches.length === 1
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        : null;
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (!start) return;
+      const dx = e.changedTouches[0].clientX - start.x;
+      const dy = e.changedTouches[0].clientY - start.y;
+      start = null;
+      if (Math.abs(dx) > 60 && Math.abs(dy) < 50) onStep(dx > 0 ? 'back' : 'forward');
+    };
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchend', onEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onStart);
+      document.removeEventListener('touchend', onEnd);
+    };
+  });
+}
+
+// offset 0/1 get friendly words, further back is "N weeks/months ago" —
+// same voice as the rest of the app (no raw index shown to the user).
+export function offsetLabel(unit: 'week' | 'month', offset: number): string {
+  if (offset === 0) return `This ${unit}`;
+  if (offset === 1) return `Last ${unit}`;
+  return `${offset} ${unit}s ago`;
+}
+function formatRangeDates(start: string, end: string): string {
+  const fmt = (d: string) =>
+    new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `${fmt(start)} – ${fmt(end)}`;
+}
+
+// Prev/next steppers + a range label — same visual language as the Daily
+// tab's DateNav (reuses its .date-nav/.date-nav__step CSS) but simpler: no
+// dropdown/picker, just step back/forward one window at a time.
+export function TrendsRangeNav({
+  unit,
+  offset,
+  maxOffset,
+  rangeStart,
+  rangeEnd,
+  onStep,
+}: {
+  unit: 'week' | 'month';
+  offset: number;
+  maxOffset: number;
+  rangeStart: string;
+  rangeEnd: string;
+  onStep: (direction: 'back' | 'forward') => void;
+}) {
+  return (
+    <div className="date-nav trends-range-nav">
+      <button
+        type="button"
+        className="date-nav__step"
+        aria-label={`Previous ${unit}`}
+        disabled={offset >= maxOffset}
+        onClick={() => onStep('back')}
+      >
+        ‹
+      </button>
+      <span className="date-nav__btn trends-range-nav__label">
+        {offsetLabel(unit, offset)}
+        <span className="trends-range-nav__dates">{formatRangeDates(rangeStart, rangeEnd)}</span>
+      </span>
+      <button
+        type="button"
+        className="date-nav__step"
+        aria-label={`Next ${unit}`}
+        disabled={offset <= 0}
+        onClick={() => onStep('forward')}
+      >
+        ›
+      </button>
+    </div>
+  );
 }

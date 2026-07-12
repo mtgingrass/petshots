@@ -6,7 +6,7 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { HttpApi, HttpMethod, CorsHttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpApi, HttpMethod, CorsHttpMethod, CfnStage } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { Construct } from 'constructs';
@@ -120,6 +120,18 @@ export class ApiStack extends cdk.Stack {
         // DELETE /account removes the caller's own Cognito user (always the
         // verified JWT's sub, never a client-supplied name).
         USER_POOL_ID: userPool.userPoolId,
+
+        // Real-time push (e.g. "new photo added" to household members) —
+        // same secrets ReminderFn's daily/weekly nudges already use.
+        VAPID_SECRET_NAME: 'petshots/vapid',
+        APNS_SECRET_NAME: 'petshots/apns',
+
+        // Photo album (casual per-pet photos, separate from vaccine docs
+        // and the single-slot avatar). Daily-per-pet cap, not a total cap —
+        // see WEIGHTS/LIMITS_FREE-style comments in shared/config.ts.
+        MAX_PHOTOS_PER_DAY: String(LIMITS_FREE.MAX_PHOTOS_PER_DAY),
+        PAID_MAX_PHOTOS_PER_DAY: String(LIMITS_PAID.MAX_PHOTOS_PER_DAY),
+        MAX_PHOTO_BYTES: String(UPLOADS.MAX_PHOTO_BYTES),
       },
       bundling: {
         externalModules: [],
@@ -140,6 +152,8 @@ export class ApiStack extends cdk.Stack {
         actions: ['secretsmanager:GetSecretValue'],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/vapid-*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/apns-*`,
         ],
       }),
     );
@@ -155,10 +169,19 @@ export class ApiStack extends cdk.Stack {
     );
 
     // Family invite emails (POST /household/invites with an email address).
+    // Scoped to our sending identity — the role can only send AS petshots.app,
+    // not via any other identity that ever lands in this account. Sends run
+    // through the petshots-email configuration set (bounce/complaint events →
+    // SNS), and SES authorizes against BOTH ARNs, so the set must be listed
+    // too (the family smoke caught exactly this, 2026-07-12).
+    const sesSendResources = [
+      `arn:aws:ses:${this.region}:${this.account}:identity/petshots.app`,
+      `arn:aws:ses:${this.region}:${this.account}:configuration-set/petshots-email`,
+    ];
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ses:SendEmail', 'sesv2:SendEmail'],
-        resources: ['*'],
+        resources: sesSendResources,
       }),
     );
 
@@ -183,6 +206,8 @@ export class ApiStack extends cdk.Stack {
 
     const httpApi = new HttpApi(this, 'HttpApi', {
       apiName: 'petshots-api',
+      // Stage-level throttle is set on the $default stage below (CfnStage
+      // escape hatch — the L2 construct exposes no throttle prop).
       corsPreflight: {
         allowOrigins: ORIGINS,
         allowMethods: [
@@ -198,7 +223,19 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
-    const integration = new HttpLambdaIntegration('ApiIntegration', apiFn);
+    // scopePermissionToRoute: false — by default CDK adds a separate
+    // fine-grained Lambda resource-policy statement PER ROUTE using this
+    // integration; with ~45 routes on one Lambda that blew past the 20 KB
+    // Lambda resource-policy size cap (hit adding the photos routes,
+    // 2026-07-12). false collapses it to one wildcard `*/*/*` statement
+    // shared across every route on this API instead. Not a security
+    // regression: the resource policy only gates "can API Gateway invoke
+    // this Lambda at all" — the real authz boundary is the Cognito JWT
+    // authorizer plus the sub-scoped S3 key prefixing inside the handler,
+    // neither of which this touches.
+    const integration = new HttpLambdaIntegration('ApiIntegration', apiFn, {
+      scopePermissionToRoute: false,
+    });
 
     // Daily reminder Lambda — triggered by EventBridge, not API Gateway.
     const reminderFn = new lambdaNode.NodejsFunction(this, 'ReminderFn', {
@@ -237,7 +274,7 @@ export class ApiStack extends cdk.Stack {
     reminderFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ses:SendEmail', 'sesv2:SendEmail'],
-        resources: ['*'],
+        resources: sesSendResources,
       }),
     );
 
@@ -314,9 +351,17 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.POST, '/pets'],
       [HttpMethod.GET, '/trends'],
       [HttpMethod.POST, '/trends/send'],
+      [HttpMethod.GET, '/walks'],
+      [HttpMethod.POST, '/walks'],
+      [HttpMethod.DELETE, '/walks/{id}'],
+      [HttpMethod.GET, '/achievements'],
       [HttpMethod.PUT, '/pets/{petId}'],
       [HttpMethod.DELETE, '/pets/{petId}'],
       [HttpMethod.POST, '/pets/{petId}/avatar/upload-url'],
+      [HttpMethod.GET, '/pets/{petId}/photos'],
+      [HttpMethod.POST, '/pets/{petId}/photos/upload-url'],
+      [HttpMethod.POST, '/pets/{petId}/photos/{id}/confirm'],
+      [HttpMethod.DELETE, '/pets/{petId}/photos/{id}'],
       [HttpMethod.GET, '/pets/{petId}/docs'],
       [HttpMethod.POST, '/pets/{petId}/docs/upload-url'],
       [HttpMethod.POST, '/pets/{petId}/docs/analyze-upload-url'],
@@ -378,6 +423,13 @@ export class ApiStack extends cdk.Stack {
     // Unsubscribe-from-all-email — reached from an email link with no login;
     // the Lambda validates the per-user unsubToken itself.
     httpApi.addRoutes({ path: '/unsubscribe', methods: [HttpMethod.POST], integration });
+
+    // Per-API throttle so the public (no-auth) endpoints can't be hammered
+    // into unbounded Lambda/S3 spend — numbers documented on INFRA in config.ts.
+    (httpApi.defaultStage!.node.defaultChild as CfnStage).defaultRouteSettings = {
+      throttlingRateLimit: INFRA.API_THROTTLE_RATE_RPS,
+      throttlingBurstLimit: INFRA.API_THROTTLE_BURST,
+    };
 
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: httpApi.apiEndpoint,

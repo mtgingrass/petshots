@@ -44,6 +44,14 @@ export const LIMITS_FREE = {
   MAX_MEMBERS: 1,
   /** AI document scans per user per day (bounds worst-case Bedrock spend). */
   MAX_AI_SCANS_PER_DAY: 10,
+  /**
+   * Casual album photos SAVED per pet per day (a discard never counts — see
+   * POST /pets/{petId}/photos/upload-url). Deliberately a daily cap, not a
+   * lifetime total, so a normal photo session never feels throttled.
+   * Deliberately NOT surfaced anywhere in the UI proactively — only shown
+   * as an alert once someone actually hits it (Mark's call, 2026-07-12).
+   */
+  MAX_PHOTOS_PER_DAY: 10,
 } as const;
 
 /**
@@ -57,6 +65,7 @@ export const LIMITS_PAID = {
   MAX_MEDS: 20,
   MAX_MEMBERS: 5,
   MAX_AI_SCANS_PER_DAY: 50,
+  MAX_PHOTOS_PER_DAY: 100,
 } as const;
 
 /**
@@ -72,6 +81,12 @@ export const UPLOADS = {
   MAX_FILE_BYTES: 20 * 1024 * 1024, // 20 MB
   /** Pet photo cap (images only; the client compresses to ~300 KB anyway). */
   MAX_AVATAR_BYTES: 5 * 1024 * 1024, // 5 MB
+  /**
+   * Album photo cap — a raw phone-camera JPEG (2-6 MB typical), bigger than
+   * the avatar cap since these aren't client-compressed. MUST MATCH
+   * MAX_PHOTO_BYTES in frontend/src/productConfig.ts (client pre-check).
+   */
+  MAX_PHOTO_BYTES: 12 * 1024 * 1024, // 12 MB
   /**
    * Largest file the AI scan accepts. Bedrock InvokeModel caps the request
    * body at 25 MB and base64 inflates by 4/3, so ~15 MB is the practical
@@ -267,6 +282,55 @@ export const DAILY = {
 export const WEIGHTS = {
   /** Entries kept per pet (one per date; oldest beyond this are rejected). */
   MAX_ENTRIES: 500,
+  /**
+   * Days since a pet's last weight entry before nudging to update it (push
+   * notification from the main daily scan + a line in the weekly digest,
+   * replacing the digest's normal "Weight: X" line for that pet). Repeats
+   * every this-many-days after the first nudge (same flat-modulo cadence as
+   * REMINDERS.OVERDUE_MONTHLY_INTERVAL_DAYS) until a fresh weight is logged
+   * — no separate "already nudged" state to track.
+   */
+  STALE_NUDGE_DAYS: 30,
+} as const;
+
+/**
+ * ACHIEVEMENT BADGES (GET /achievements)
+ * Thresholds for the locked/unlocked badges behind each achievement card.
+ * The badge catalog itself (ids, names, icons, copy) lives next to the
+ * achievements route in infra/lambda/api/index.ts; only the numbers live
+ * here. Once earned a badge is persisted in the pet's badges.json and never
+ * un-earns, so raising a threshold later only affects future earns.
+ * Week-based badges evaluate on calendar weeks (Mon-Sun) over full history,
+ * including the current partial week.
+ */
+export const ACHIEVEMENTS = {
+  /** "Hat Trick": walks in one calendar week. */
+  WALKS_IN_WEEK: 3,
+  /** "Seven for Seven": distinct days walked in one calendar week. */
+  WALK_DAYS_IN_WEEK: 7,
+  /** "Three-Week Streak": consecutive calendar weeks with >= 1 walk. */
+  WALK_WEEK_STREAK: 3,
+  /** All-time mileage tiers: First Mile / 10-Mile Club / Marathon / Century Club. */
+  MILES_FIRST: 1,
+  MILES_CLUB: 10,
+  MILES_MARATHON: 26.2,
+  MILES_CENTURY: 100,
+  /** "Camera Ready": distinct days with a photo in one calendar week. */
+  PHOTO_DAYS_IN_WEEK: 3,
+  /** "Paparazzi Week": a photo every day of a calendar week. */
+  PHOTO_DAYS_PERFECT_WEEK: 7,
+  /** "Shutterbug": photos saved all-time (currently stored; deletes count down). */
+  PHOTOS_TOTAL: 100,
+  /** Care-streak tiers: consecutive days with EVERY active Daily item checked. */
+  CARE_STREAK_SHORT: 3,
+  CARE_STREAK_WEEK: 7,
+  CARE_STREAK_HABIT: 30,
+  /**
+   * How far back the care-streak scan reads (live daily.json + archive).
+   * Must stay > CARE_STREAK_HABIT with buffer; the card caps its displayed
+   * streak at this many days ("N+" beyond it).
+   */
+  CARE_STREAK_LOOKBACK_DAYS: 60,
 } as const;
 
 /** MEDICATIONS */
@@ -331,4 +395,13 @@ export const INFRA = {
   /** Reminder Lambda: scans every user sequentially once a day. */
   REMINDER_MEMORY_MB: 256,
   REMINDER_TIMEOUT_MINUTES: 5,
+  /**
+   * HTTP API stage throttling (requests/second steady-state + burst). The
+   * default is NO per-API limit (account-level 10k rps), which lets anyone
+   * hammer the public endpoints (passport, roadmap, webhook, unsubscribe)
+   * into real Lambda/S3 spend. 50/100 is ~two orders of magnitude above
+   * current traffic while capping worst-case abuse cost.
+   */
+  API_THROTTLE_RATE_RPS: 50,
+  API_THROTTLE_BURST: 100,
 } as const;

@@ -4,7 +4,7 @@
 // never pass through this API.
 import { config } from './config';
 import { getAccessToken } from './auth/cognito';
-import { compressImage, normalizeForAnalysis } from './utils/compressImage';
+import { compressImage, normalizeForAnalysis, compressPhoto } from './utils/compressImage';
 import { DEFAULT_REMINDER_DAYS, FREE_PLAN_LIMITS } from './productConfig';
 
 const COMPRESSIBLE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -356,8 +356,10 @@ export function listPets(): Promise<{ pets: Pet[]; limits?: Limits; family?: Fam
 }
 
 // ---- trends (bottom-bar "Trends" tab) ----
-// Week is available on every plan; month is a paid perk (server omits it —
-// `null` — for free accounts), same free/paid split as Limits.dailyHistoryDays.
+// One view (week or month) at a time now, swipeable back in time. Week is
+// available on every plan (free capped at offset 1 — two weeks total);
+// month is a paid perk at any offset (GET 403s for free instead of just
+// omitting data — the tab itself is locked, not just its content).
 export interface TrendsChecklistItem {
   id: string;
   label: string;
@@ -375,16 +377,21 @@ export interface TrendsChecklistDots {
   label: string;
   days: boolean[]; // one per date in the window, oldest first
 }
-export interface TrendsWeek {
+interface TrendsSeriesFields {
+  moodSeries: TrendsSeriesPoint[];
+  weightSeries: TrendsSeriesPoint[];
+  weightUnit: string | null;
+  checklistSeries: TrendsChecklistDots[];
+}
+export interface TrendsWeekPet extends TrendsSeriesFields {
+  petId: string;
+  name: string;
+  careConsistency: number;
   moodAvg: number | null;
   checklist: TrendsChecklistItem[];
   medsGiven: number;
   weight: { value: number; unit: string; deltaWeek: number | null } | null;
   insight: string | null;
-  moodSeries: TrendsSeriesPoint[];
-  weightSeries: TrendsSeriesPoint[];
-  weightUnit: string | null;
-  checklistSeries: TrendsChecklistDots[];
 }
 export interface TrendsMonthChecklistItem {
   id: string;
@@ -392,33 +399,94 @@ export interface TrendsMonthChecklistItem {
   pctThis: number;
   pctLast: number;
 }
-export interface TrendsMonth {
+export interface TrendsMonthPet extends TrendsSeriesFields {
+  petId: string;
+  name: string;
   headline: string | null;
+  careConsistency: number;
   moodAvg: number | null;
   moodAvgLastMonth: number | null;
   medsGiven: number;
   medsGivenLastMonth: number;
+  weight: { value: number; unit: string; deltaMonth: number | null } | null;
   checklist: TrendsMonthChecklistItem[];
-  moodSeries: TrendsSeriesPoint[];
-  weightSeries: TrendsSeriesPoint[];
-  weightUnit: string | null;
-  checklistSeries: TrendsChecklistDots[];
 }
-export interface TrendsPet {
-  petId: string;
-  name: string;
-  week: TrendsWeek;
-  month: TrendsMonth | null;
+export interface TrendsResponse<T> {
+  plan: 'free' | 'paid';
+  view: 'week' | 'month';
+  offset: number;
+  maxOffset: number;
+  rangeStart: string;
+  rangeEnd: string;
+  pets: T[];
 }
-export function getTrends(): Promise<{ plan: 'free' | 'paid'; pets: TrendsPet[] }> {
-  return request('GET', '/trends');
+export function getTrendsWeek(offset = 0): Promise<TrendsResponse<TrendsWeekPet>> {
+  return request('GET', `/trends?view=week&offset=${offset}`);
+}
+export function getTrendsMonth(offset = 0): Promise<TrendsResponse<TrendsMonthPet>> {
+  return request('GET', `/trends?view=month&offset=${offset}`);
 }
 
-// "Email me this report" — week is available on every plan; month 403s on
-// a free account (the button that calls this is hidden for free users to
-// begin with, but the server enforces it regardless).
+// "Email me this report" — always the current (offset 0) period. Week is
+// available on every plan; month 403s on a free account (the button that
+// calls this is hidden for free users to begin with, but the server
+// enforces it regardless).
 export function sendTrendsReport(period: 'week' | 'month'): Promise<{ ok: true; sent: boolean; reason?: string }> {
   return request('POST', '/trends/send', { period });
+}
+
+// ---- walks (account-level — one walk can cover multiple pets) ----
+
+export interface WalkRecord {
+  id: string;
+  petIds: string[];
+  startedAt: string; // ISO timestamp
+  endedAt: string; // ISO timestamp
+  distanceMeters: number;
+}
+
+export function listWalks(): Promise<{ walks: WalkRecord[] }> {
+  return request('GET', '/walks');
+}
+
+export function createWalk(
+  petIds: string[],
+  startedAt: string,
+  endedAt: string,
+  distanceMeters: number,
+): Promise<{ walk: WalkRecord }> {
+  return request('POST', '/walks', { petIds, startedAt, endedAt, distanceMeters });
+}
+
+export function deleteWalk(id: string): Promise<void> {
+  return request('DELETE', `/walks/${id}`);
+}
+
+// ---- achievements (account-level, swipe-left from the overview screen) ----
+
+export interface AchievementBadge {
+  id: string;
+  icon: string;
+  name: string;
+  description: string; // the goal, shown while locked
+  congrats: string; // celebration line, shown once earned
+  earnedAt: string | null; // local YYYY-MM-DD, null = still locked
+}
+export interface AchievementCard {
+  id: string;
+  icon: string;
+  label: string;
+  value: string;
+  badges: AchievementBadge[];
+}
+export interface PetAchievements {
+  petId: string;
+  petName: string;
+  cards: AchievementCard[];
+}
+
+export function getAchievements(): Promise<{ pets: PetAchievements[] }> {
+  return request('GET', '/achievements');
 }
 
 // ---- family / household ----
@@ -501,6 +569,42 @@ export async function uploadAvatar(petId: string, file: File): Promise<void> {
     { contentType: toUpload.type },
   );
   await postToS3(presign, toUpload);
+}
+
+// ---- photos (casual per-pet album — swipe-right camera / swipe-left
+// albums on the overview screen) ----
+
+export interface Photo {
+  id: string;
+  filename: string;
+  size: number;
+  uploadedAt: string;
+  url: string; // short-lived presigned GET URL
+}
+
+export function listPhotos(petId: string): Promise<{ photos: Photo[] }> {
+  return request('GET', `/pets/${petId}/photos`);
+}
+
+// Presign -> upload -> confirm in one call, so callers (the camera capture
+// flow) don't need to know it's a two-request round trip. The confirm call
+// is what triggers the household push — see infra/lambda/api/index.ts's
+// POST /pets/{petId}/photos/{id}/confirm. A 409 here means the daily save
+// limit was hit; its message is already the full toast text (see that
+// route's comment — deliberately the only place the cap is ever mentioned).
+export async function uploadPhoto(petId: string, file: File): Promise<void> {
+  const toUpload = COMPRESSIBLE_TYPES.has(file.type) ? await compressPhoto(file) : file;
+  const presign = await request<{ url: string; fields: Record<string, string>; photoId: string }>(
+    'POST',
+    `/pets/${petId}/photos/upload-url`,
+    { filename: toUpload.name, contentType: toUpload.type },
+  );
+  await postToS3(presign, toUpload);
+  await request('POST', `/pets/${petId}/photos/${presign.photoId}/confirm`);
+}
+
+export function deletePhoto(petId: string, id: string): Promise<void> {
+  return request('DELETE', `/pets/${petId}/photos/${id}`);
 }
 
 // ---- documents (per pet) ----

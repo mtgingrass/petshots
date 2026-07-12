@@ -37,7 +37,11 @@ const env = Object.fromEntries(
 );
 
 const EMAIL = 'demo@petshots.app';
-const PASSWORD = process.env.DEMO_PASSWORD ?? 'Petshots#Demo2026';
+const PASSWORD = process.env.DEMO_PASSWORD; // never hardcode - this is a real production account
+if (!PASSWORD) {
+  console.error('Set DEMO_PASSWORD (credentials live in Claude memory, never in git).');
+  process.exit(1);
+}
 const ACTOR = EMAIL;
 const DAYS_BACK = 92; // ~3 months
 const LIVE_WINDOW_DAYS = 14; // must match DAILY.LOG_RETENTION_DAYS in shared/config.ts

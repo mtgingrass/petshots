@@ -1198,6 +1198,449 @@ a {
   font-weight: 700;
 }
 
+/* Albums (swipe-left from the overview screen) — v1, deliberately simple:
+   one thumbnail-grid section per pet. Same "-all" composition as Passports/
+   Trends/Daily above. */
+.albums-all {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.albums-all__loading {
+  color: var(--subtle);
+  padding: 1rem 0;
+}
+
+.albums-all__pet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.albums-all__pet-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.albums-all__pet-count {
+  margin-left: auto;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--subtle);
+}
+
+.albums-all__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 0.5rem;
+}
+
+.albums-all__thumb {
+  aspect-ratio: 1;
+  border: none;
+  border-radius: 10px;
+  overflow: hidden;
+  padding: 0;
+  cursor: pointer;
+  background: var(--panel);
+}
+
+.albums-all__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.albums-all__see-all {
+  align-self: flex-start;
+  margin-top: -0.25rem;
+}
+
+/* Per-pet full album ("See all" from the capped overview) — day-grouped
+   sections, same thumbnail grid as the overview preview. */
+.pet-album__title {
+  margin: 0;
+}
+
+.pet-album__day + .pet-album__day {
+  margin-top: 1.25rem;
+}
+
+.pet-album__day-header {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--subtle);
+  margin-bottom: 0.5rem;
+}
+
+/* Photo confirm screen (swipe-right camera capture — save/discard, then a
+   pet picker if there's more than one pet). Same dark-full-screen chrome as
+   .present, deliberately a separate class family since its content shape
+   (one preview image + actions, not a doc carousel) is different enough
+   that reusing .present's classes would fight its own layout rules. */
+.photo-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  padding: 1.5rem;
+}
+
+.photo-confirm__exit {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  right: 1rem;
+  z-index: 10;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.photo-confirm__preview {
+  max-width: 100%;
+  max-height: 65vh;
+  border-radius: 12px;
+  object-fit: contain;
+}
+
+.photo-confirm__status {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+}
+
+.photo-confirm__picker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+}
+
+.photo-confirm__picker-title {
+  color: #fff;
+  font-weight: 600;
+  margin: 0;
+}
+
+.photo-confirm__picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.25rem;
+}
+
+.photo-confirm__picker-pet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  font-size: 0.85rem;
+}
+
+/* Walk tracking (🚶 header button) — same dark full-screen chrome as
+   .photo-confirm/.present; reuses .photo-confirm__picker-title/-grid for the
+   summary screen's pet picker, since the layout is identical, just with a
+   multi-select state added below. */
+.walk-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  padding: 1.5rem;
+  color: #fff;
+  text-align: center;
+}
+
+.walk-screen__exit {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  right: 1rem;
+  z-index: 10;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.walk-screen__ready {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.walk-screen__icon {
+  font-size: 3rem;
+}
+
+.walk-screen__active {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.walk-screen__stat {
+  font-size: 2.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.walk-screen__stat-label {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 1rem;
+}
+
+.walk-screen__active .btn {
+  margin-top: 1rem;
+}
+
+.walk-screen__summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+}
+
+/* The summary's escape hatch — visually quiet next to Save, but always there
+   so an accidental walk never has to be saved. */
+.walk-screen__discard {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+}
+
+.walk-screen__summary-stats {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.walk-screen__picker-pet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+.walk-screen__picker-pet--selected {
+  opacity: 1;
+}
+
+.walk-screen__picker-check {
+  position: absolute;
+  top: -2px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Achievements (swipe-left from overview) — reuses .albums-all's per-pet
+   section layout, just a card grid instead of a photo grid. */
+.achievements__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 0.75rem;
+}
+
+.achievements__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 1rem 0.5rem;
+  background: var(--panel);
+  border-radius: 12px;
+  text-align: center;
+  /* it's a <button> now (taps into the badge ladder) — reset chrome */
+  border: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.achievements__card-icon {
+  font-size: 1.5rem;
+}
+
+.achievements__card-value {
+  font-size: 1.3rem;
+  font-weight: 800;
+}
+
+.achievements__card-label {
+  font-size: 0.75rem;
+  color: var(--subtle);
+}
+
+.achievements__card-badges {
+  font-size: 0.7rem;
+  color: var(--subtle);
+  margin-top: 0.25rem;
+}
+
+/* Badge ladder behind each achievement card */
+.badges {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.badges__hero {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.badges__hero-icon {
+  font-size: 2.2rem;
+}
+
+.badges__hero-title {
+  font-size: 1.2rem;
+  font-weight: 800;
+  margin: 0;
+}
+
+.badges__hero-sub {
+  font-size: 0.8rem;
+  color: var(--subtle);
+  margin: 0.15rem 0 0;
+}
+
+.badges__section-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--subtle);
+  margin: 0.5rem 0 0;
+}
+
+.badges__empty {
+  color: var(--subtle);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.badges__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.badge-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: var(--panel);
+  border-radius: 12px;
+}
+
+.badge-row__icon {
+  font-size: 1.6rem;
+}
+
+.badge-row--locked {
+  opacity: 0.55;
+}
+
+.badge-row--locked .badge-row__icon {
+  filter: grayscale(1);
+}
+
+.badge-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1;
+}
+
+.badge-row__name {
+  font-weight: 700;
+}
+
+.badge-row__new {
+  margin-left: 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  background: var(--accent, #6c5ce7);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  vertical-align: middle;
+}
+
+.badge-row__desc {
+  font-size: 0.85rem;
+  color: var(--subtle);
+}
+
+.badge-row__date {
+  font-size: 0.75rem;
+  color: var(--subtle);
+}
+
+.badge-row__lock {
+  font-size: 0.9rem;
+}
+
 /* Trends tab — plain stats, no charts yet (v2). */
 .trends-all {
   display: flex;
@@ -1210,17 +1653,11 @@ a {
   padding: 0.5rem 0.1rem;
 }
 
-.trends-all__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
 .trends-all__send-buttons {
   display: flex;
+  justify-content: center;
   gap: 1rem;
+  margin-bottom: 0.25rem;
 }
 
 .trends-all__pet-name {
@@ -2237,6 +2674,36 @@ a {
   color: rgba(255, 255, 255, 0.4);
   min-width: 3rem;
   text-align: right;
+}
+
+/* PhotoViewerScreen reuses .present's chrome (dark full-screen carousel);
+   this is its one addition — a delete action opposite the exit button. */
+.photo-viewer__delete {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  left: 1rem;
+  z-index: 10;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  font-size: 1.1rem;
+}
+
+.photo-viewer__delete--confirm {
+  width: auto;
+  border-radius: 22px;
+  padding: 0 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--overdue);
 }
 
 /* ---------- Share / Passport tab ---------- */
@@ -3730,6 +4197,30 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   transform: translateY(2px);
 }
 
+/* Trends tab's week/month stepper — reuses .date-nav/.date-nav__step, but
+   the label stacks two lines (period word + actual date range) instead of
+   DateNav's single-line title + dropdown chevron. */
+.trends-range-nav {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+
+.trends-range-nav__label {
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  min-width: 9rem;
+  font-weight: 700;
+  cursor: default;
+}
+
+.trends-range-nav__dates {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--subtle);
+}
+
 .date-nav__dropdown {
   position: absolute;
   left: 0;
@@ -3903,6 +4394,43 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   font-weight: 800;
   letter-spacing: -0.02em;
   line-height: 1.1;
+}
+
+/* Overview screen's title row — the camera/albums icon buttons are the
+   desktop (mouse, no touch) fallback for the swipe-right/swipe-left
+   gestures, so they need to sit somewhere visible without touch. */
+.pets-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pets-header-row .large-title {
+  margin-bottom: 0;
+}
+
+.pets-header-row__actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.pets-header-row__icon-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pets-header-row__icon-btn:hover {
+  background: var(--border);
 }
 
 /* ---------- Screen transitions (iOS push/pop/sheet) ---------- */

@@ -118,6 +118,18 @@ async function main() {
   const push = (dry.wouldPush ?? []).find((w) => w.email === email);
   check(!!push && push.devices === 1, `reminder would also push to 1 device (got ${JSON.stringify(push)})`);
 
+  console.log('\n[2b] weight staleness nudge — second pet with only a 40-day-old weight');
+  const stalePet = (await api(token, 'POST', '/pets', { name: 'Rusty', species: 'dog' })).body.pet;
+  await api(token, 'POST', `/pets/${stalePet.id}/weights`, { date: ymd(-40), weight: 55, unit: 'lb' });
+  dry = invokeDryRun();
+  digest = (dry.wouldSend ?? []).find((w) => w.email === email && /at a glance/.test(w.subject));
+  check(!!digest && /Rusty/.test(digest.body), 'second pet included in the same digest');
+  check(
+    !!digest && /It's been 40 days since Rusty's last weight update/.test(digest.body),
+    'weight-stale nudge line included',
+  );
+  check(!!digest && !/Rusty[\s\S]{0,80}Weight: 55/.test(digest.body), 'no normal Weight: line for the stale pet');
+
   console.log('\n[3] digest toggle off suppresses it');
   await api(token, 'PUT', '/settings', { email, remindersEnabled: true, reminderDays: [7], weeklyDigest: false });
   dry = invokeDryRun();
@@ -133,7 +145,8 @@ async function main() {
   console.log('\n[5] cleanup');
   await api(token, 'PUT', '/settings', { email: '', remindersEnabled: false, reminderDays: [] });
   await api(token, 'DELETE', `/pets/${pet.id}`);
-  check((await api(token, 'GET', '/pets')).body.pets.length === 0, 'pet deleted, settings email cleared');
+  await api(token, 'DELETE', `/pets/${stalePet.id}`);
+  check((await api(token, 'GET', '/pets')).body.pets.length === 0, 'pets deleted, settings email cleared');
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===`);
   process.exit(fail ? 1 : 0);

@@ -459,7 +459,30 @@ async function main() {
     check(!msg.body.includes('Overdue:') && !msg.body.includes('Due today:'), 'no reminder sections in a birthday-only email');
   }
 
-  console.log('\n[11] cleanup (pets deleted; caller must delete the user + S3 prefix)');
+  console.log('\n[11] weight staleness nudge — push only, rides vaccine-reminder consent');
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: daysFromToday(-30), weight: 42, unit: 'lb' });
+  check(r.status === 200, 'weight entry seeded exactly 30 days ago');
+  r = await api(token, 'POST', '/push/subscribe', {
+    subscription: {
+      endpoint: `https://updates.push.services.mozilla.com/wpush/v2/reminder-smoke-${Date.now()}`,
+      keys: {
+        p256dh: 'BFakeKeyForDryRunCounting0000000000000000000000000000000000000000000000000000000000000',
+        auth: 'FakeAuthSecret16',
+      },
+    },
+  });
+  check(r.status === 200, 'push subscription seeded');
+  dry = invokeDryRun(fnName);
+  let weightPush = (dry.wouldPush ?? []).find((w) => w.email === email && w.subject === '🐾 Weight check-in');
+  check(!!weightPush && weightPush.devices === 1, `weight-stale push present at exactly 30 days (got ${JSON.stringify(weightPush)})`);
+
+  r = await api(token, 'POST', `/pets/${petId}/weights`, { date: daysFromToday(-10), weight: 42, unit: 'lb' });
+  check(r.status === 200, 'newer weight entry added (10 days ago) — latest is no longer stale');
+  dry = invokeDryRun(fnName);
+  weightPush = (dry.wouldPush ?? []).find((w) => w.email === email && w.subject === '🐾 Weight check-in');
+  check(!weightPush, 'no weight-stale push once the latest entry is recent');
+
+  console.log('\n[12] cleanup (pets deleted; caller must delete the user + S3 prefix)');
   await api(token, 'DELETE', `/pets/${petId}`);
   r = await api(token, 'GET', '/pets');
   check(r.body.pets.length === 0, 'pets deleted');

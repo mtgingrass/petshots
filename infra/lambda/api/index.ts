@@ -39,6 +39,7 @@ import {
   FAMILY,
   AI,
   EMAIL,
+  ACHIEVEMENTS,
 } from '../shared/config';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the reminder Lambda's report emails — see that file's header.
@@ -52,7 +53,11 @@ import {
 } from '../shared/dailyStats';
 // "Email me this report" (POST /trends/send) reuses the exact same copy the
 // proactive monthly report email uses — see shared/copy/digest.ts.
-import { monthlyReportCopy, weeklyReportCopy } from '../shared/copy';
+import { monthlyReportCopy, weeklyReportCopy, photoCopy } from '../shared/copy';
+import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
+// Real-time push (e.g. "new photo added" to household members) — shared with
+// the reminder Lambda's daily/weekly nudges. See that file's header.
+import { sendPushes } from '../shared/push';
 
 // One Lambda fronts every route (a tiny router on event.routeKey). Fewer moving
 // parts than a function per route, and IAM is identical across them anyway.
@@ -75,6 +80,15 @@ const MAX_DOCS = Number(process.env.MAX_DOCS ?? LIMITS_FREE.MAX_DOCS);
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? UPLOADS.MAX_FILE_BYTES);
 const MAX_AVATAR_BYTES = UPLOADS.MAX_AVATAR_BYTES;
 const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+// Casual album photos — a daily-per-pet cap (like MAX_AI_SCANS below), not a
+// total count-under-prefix cap like docs, so a normal photo session never
+// feels throttled. Deliberately not surfaced in the UI until someone hits it.
+const MAX_PHOTOS_PER_DAY = Number(process.env.MAX_PHOTOS_PER_DAY ?? LIMITS_FREE.MAX_PHOTOS_PER_DAY);
+const PAID_MAX_PHOTOS_PER_DAY = Number(
+  process.env.PAID_MAX_PHOTOS_PER_DAY ?? LIMITS_PAID.MAX_PHOTOS_PER_DAY,
+);
+const MAX_PHOTO_BYTES = Number(process.env.MAX_PHOTO_BYTES ?? UPLOADS.MAX_PHOTO_BYTES);
+const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
   statusCode,
@@ -116,6 +130,204 @@ const cleanExpiry = (v: unknown): string | undefined =>
 
 const isUuid = (v: string | undefined): v is string =>
   !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+// Client-generated walk start/end timestamps — a real ISO string, not
+// wildly out of range (guards against garbage, not a precise clock check;
+// the client's own clock is trusted the same way daily-check dates are).
+const isIsoTimestamp = (v: unknown): v is string => {
+  if (typeof v !== 'string') return false;
+  const t = Date.parse(v);
+  return !Number.isNaN(t) && Math.abs(t - Date.now()) < 24 * 3600_000;
+};
+
+// ---- walks (see the GET/POST/DELETE /walks + GET /achievements cases) ----
+interface WalkRecord {
+  id: string;
+  petIds: string[];
+  startedAt: string; // ISO timestamp
+  endedAt: string; // ISO timestamp
+  distanceMeters: number;
+}
+// All of a pool's walks live in ONE compact users/{poolSub}/walks-index.json
+// (records are ~120 bytes; years of daily walks stay well under 1 MB) instead
+// of one object per walk — the original per-object layout meant one S3
+// GetObject PER WALK on every walks/achievements view, unbounded as history
+// grows (hardening pass, 2026-07-12). Legacy per-walk objects under
+// users/{poolSub}/walks/ are folded in lazily the first time the index is
+// read, then left in place (deletes remove both copies so a re-backfill can
+// never resurrect a deleted walk).
+async function readWalksIndex(poolSub: string): Promise<WalkRecord[]> {
+  const key = `users/${poolSub}/walks-index.json`;
+  const stored = await readJson<{ walks: WalkRecord[] }>(key);
+  if (stored) return stored.walks;
+  const list = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `users/${poolSub}/walks/` }),
+  );
+  const legacy = (
+    await Promise.all((list.Contents ?? []).map((it) => readJson<WalkRecord>(it.Key!)))
+  ).filter((w): w is WalkRecord => w !== null);
+  await putJson(key, { walks: legacy });
+  return legacy;
+}
+// Read-modify-write under an ETag guard — two family phones can save walks
+// at the same moment (same pattern as daily.json / household.json).
+async function mutateWalksIndex(
+  poolSub: string,
+  fn: (walks: WalkRecord[]) => WalkRecord[],
+): Promise<boolean> {
+  const key = `users/${poolSub}/walks-index.json`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { value, etag } = await readJsonTagged<{ walks: WalkRecord[] }>(key);
+    // Missing index: run the lazy backfill first so a mutation never races
+    // the legacy fold-in and drops history.
+    if (value === null) {
+      await readWalksIndex(poolSub);
+      continue;
+    }
+    if (await putJsonGuarded(key, { walks: fn(value.walks) }, etag)) return true;
+  }
+  return false;
+}
+
+// ---- achievement badges (see the GET /achievements case) ----
+// Each stat card carries a ladder of locked/unlocked badges. Earned badges
+// persist in the pet's badges.json and NEVER un-earn (deleting a walk drops
+// the card's number but keeps the trophy) — so week-shaped conditions are
+// evaluated against the best calendar week (Mon-Sun) in full history, not
+// just the card's rolling 7-day window, and a raised threshold only affects
+// future earns. Thresholds live in shared/config.ts (ACHIEVEMENTS); the
+// catalog (ids, icons, copy) lives here because only this route serves it.
+interface BadgeDef {
+  id: string;
+  icon: string;
+  name: string;
+  /** The goal, phrased as something still to do. Shown on locked badges. */
+  description: string;
+  /** Celebration line shown once earned (frontend prefixes the 🎉). */
+  congrats: string;
+}
+interface PetBadgeStats {
+  totalWalks: number;
+  totalMiles: number;
+  maxWalksInWeek: number;
+  maxWalkDaysInWeek: number;
+  longestWalkWeekStreak: number;
+  totalPhotos: number;
+  maxPhotoDaysInWeek: number;
+  hasPerfectCareDay: boolean;
+  longestCareStreak: number;
+}
+interface BadgesFile {
+  earned: Record<string, { earnedAt: string }>; // badgeId -> local YYYY-MM-DD
+}
+const badgeCatalog: Record<string, { def: BadgeDef; done: (s: PetBadgeStats) => boolean }[]> = {
+  'walks-week': [
+    {
+      def: { id: 'walk-first', icon: '🐾', name: 'First Steps', description: 'Log your first walk.', congrats: 'You logged your first walk!' },
+      done: (s) => s.totalWalks >= 1,
+    },
+    {
+      def: { id: 'walk-week-count', icon: '🎩', name: 'Hat Trick', description: `Walk ${ACHIEVEMENTS.WALKS_IN_WEEK} times in one week.`, congrats: `You walked ${ACHIEVEMENTS.WALKS_IN_WEEK} times in one week!` },
+      done: (s) => s.maxWalksInWeek >= ACHIEVEMENTS.WALKS_IN_WEEK,
+    },
+    {
+      def: { id: 'walk-week-days', icon: '🌟', name: 'Seven for Seven', description: 'Walk every day of a week.', congrats: 'You walked all 7 days this week!' },
+      done: (s) => s.maxWalkDaysInWeek >= ACHIEVEMENTS.WALK_DAYS_IN_WEEK,
+    },
+    {
+      def: { id: 'walk-week-streak', icon: '🔥', name: 'Three-Week Streak', description: `Walk at least once a week, ${ACHIEVEMENTS.WALK_WEEK_STREAK} weeks in a row.`, congrats: `You've walked ${ACHIEVEMENTS.WALK_WEEK_STREAK} weeks in a row!` },
+      done: (s) => s.longestWalkWeekStreak >= ACHIEVEMENTS.WALK_WEEK_STREAK,
+    },
+  ],
+  'distance-week': [
+    {
+      def: { id: 'miles-first', icon: '🥇', name: 'First Mile', description: 'Walk your first mile, all-time.', congrats: 'You walked your first mile!' },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_FIRST,
+    },
+    {
+      def: { id: 'miles-club', icon: '🏅', name: '10-Mile Club', description: `Walk ${ACHIEVEMENTS.MILES_CLUB} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_CLUB} miles walked together!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_CLUB,
+    },
+    {
+      def: { id: 'miles-marathon', icon: '🏆', name: 'Marathon', description: `Walk ${ACHIEVEMENTS.MILES_MARATHON} miles, all-time.`, congrats: `A full marathon — ${ACHIEVEMENTS.MILES_MARATHON} miles walked!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_MARATHON,
+    },
+    {
+      def: { id: 'miles-century', icon: '💯', name: 'Century Club', description: `Walk ${ACHIEVEMENTS.MILES_CENTURY} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_CENTURY} miles walked — century club!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_CENTURY,
+    },
+  ],
+  'photo-days-week': [
+    {
+      def: { id: 'photo-first', icon: '🖼️', name: 'First Portrait', description: 'Save your first photo.', congrats: 'You saved your first photo!' },
+      done: (s) => s.totalPhotos >= 1,
+    },
+    {
+      def: { id: 'photo-week-days', icon: '🎬', name: 'Camera Ready', description: `Take photos on ${ACHIEVEMENTS.PHOTO_DAYS_IN_WEEK} different days in one week.`, congrats: `Photos on ${ACHIEVEMENTS.PHOTO_DAYS_IN_WEEK} different days this week!` },
+      done: (s) => s.maxPhotoDaysInWeek >= ACHIEVEMENTS.PHOTO_DAYS_IN_WEEK,
+    },
+    {
+      def: { id: 'photo-week-perfect', icon: '✨', name: 'Paparazzi Week', description: 'Take a photo every day for a week.', congrats: 'A photo every single day this week!' },
+      done: (s) => s.maxPhotoDaysInWeek >= ACHIEVEMENTS.PHOTO_DAYS_PERFECT_WEEK,
+    },
+    {
+      def: { id: 'photo-total', icon: '📷', name: 'Shutterbug', description: `Save ${ACHIEVEMENTS.PHOTOS_TOTAL} photos, all-time.`, congrats: `${ACHIEVEMENTS.PHOTOS_TOTAL} photos saved!` },
+      done: (s) => s.totalPhotos >= ACHIEVEMENTS.PHOTOS_TOTAL,
+    },
+  ],
+  'care-streak': [
+    {
+      def: { id: 'care-day', icon: '✅', name: 'Perfect Day', description: 'Check off every Daily item in one day.', congrats: 'Every Daily item checked in one day!' },
+      done: (s) => s.hasPerfectCareDay,
+    },
+    {
+      def: { id: 'care-streak-short', icon: '🔥', name: 'Three in a Row', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_SHORT} days in a row.`, congrats: `${ACHIEVEMENTS.CARE_STREAK_SHORT} perfect days in a row!` },
+      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_SHORT,
+    },
+    {
+      def: { id: 'care-streak-week', icon: '🗓️', name: 'Full Week', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_WEEK} days in a row.`, congrats: `A full week of perfect care!` },
+      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_WEEK,
+    },
+    {
+      def: { id: 'care-streak-habit', icon: '💎', name: 'Habit Formed', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_HABIT} days in a row.`, congrats: `${ACHIEVEMENTS.CARE_STREAK_HABIT} days straight — it's a habit now!` },
+      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_HABIT,
+    },
+  ],
+};
+
+// Monday of the calendar week containing `ymd` — badge conditions group
+// walks/photos by these keys.
+function weekStartOf(ymd: string): string {
+  const back = (new Date(`${ymd}T00:00:00Z`).getUTCDay() + 6) % 7;
+  return addToDay(ymd, { days: -back });
+}
+// Given per-day event dates, the best calendar week by count and by distinct
+// days, plus the longest run of consecutive weeks with >= 1 event.
+function weeklyBests(dates: string[]): { maxCount: number; maxDays: number; longestStreak: number } {
+  const weeks = new Map<string, { count: number; days: Set<string> }>();
+  for (const d of dates) {
+    const ws = weekStartOf(d);
+    const w = weeks.get(ws) ?? { count: 0, days: new Set<string>() };
+    w.count++;
+    w.days.add(d);
+    weeks.set(ws, w);
+  }
+  let maxCount = 0;
+  let maxDays = 0;
+  for (const w of weeks.values()) {
+    maxCount = Math.max(maxCount, w.count);
+    maxDays = Math.max(maxDays, w.days.size);
+  }
+  let longestStreak = 0;
+  let run = 0;
+  let prev: string | null = null;
+  for (const ws of [...weeks.keys()].sort()) {
+    run = prev !== null && addToDay(prev, { days: 7 }) === ws ? run + 1 : 1;
+    longestStreak = Math.max(longestStreak, run);
+    prev = ws;
+  }
+  return { maxCount, maxDays, longestStreak };
+}
 
 // ---- medications ----
 // Per-pet medication list stored whole in meds.json (same no-DB pattern as
@@ -509,23 +721,69 @@ function dailyPresetsFor(species: string | undefined): DailyItem[] {
 const mergedDailyEntries = (petPrefix: string, daily: DailyFile | null, dates: string[], todayKey: string) =>
   mergedDailyEntriesShared(BUCKET, petPrefix, daily, dates, todayKey, DAILY_LOG_RETENTION_DAYS, addToDay);
 
-// Every pet in a pool's week (every plan) + month (paid only) rollup —
-// exactly what GET /trends renders, also reused by POST /trends/send (the
-// "email me this report" button) so the two never drift apart.
-async function computeTrendsPets(poolPrefix: string, plan: 'free' | 'paid') {
+// One pet's stats for ONE view+offset — week (every plan) or month (paid
+// only), swipeable back in time (offset 0 = most recent window, offset N =
+// N windows further back, non-overlapping). Reused by both GET /trends (the
+// Trends tab) and POST /trends/send ("email me this report") so they never
+// drift apart. Overloaded purely for call-site typing — week and month
+// pets have different shapes (count/total vs pctThis/pctLast, insight vs
+// headline) and callers already know which one they asked for.
+interface TrendsWeekPet {
+  petId: string; name: string;
+  careConsistency: number;
+  moodAvg: number | null;
+  checklist: { id: string; label: string; count: number; total: number }[];
+  medsGiven: number;
+  weight: { value: number; unit: string; deltaWeek: number | null } | null;
+  insight: string | null;
+  moodSeries: { date: string; value: number | null }[];
+  weightSeries: { date: string; value: number | null }[];
+  weightUnit: string | null;
+  checklistSeries: { id: string; label: string; days: boolean[] }[];
+}
+interface TrendsMonthPet {
+  petId: string; name: string;
+  headline: string | null;
+  careConsistency: number;
+  moodAvg: number | null;
+  moodAvgLastMonth: number | null;
+  medsGiven: number;
+  medsGivenLastMonth: number;
+  weight: { value: number; unit: string; deltaMonth: number | null } | null;
+  checklist: { id: string; label: string; pctThis: number; pctLast: number }[];
+  moodSeries: { date: string; value: number | null }[];
+  weightSeries: { date: string; value: number | null }[];
+  weightUnit: string | null;
+  checklistSeries: { id: string; label: string; days: boolean[] }[];
+}
+async function computeTrendsView(
+  poolPrefix: string, view: 'week', offset: number,
+): Promise<{ pets: TrendsWeekPet[]; rangeStart: string; rangeEnd: string }>;
+async function computeTrendsView(
+  poolPrefix: string, view: 'month', offset: number,
+): Promise<{ pets: TrendsMonthPet[]; rangeStart: string; rangeEnd: string }>;
+async function computeTrendsView(
+  poolPrefix: string,
+  view: 'week' | 'month',
+  offset: number,
+): Promise<{ pets: (TrendsWeekPet | TrendsMonthPet)[]; rangeStart: string; rangeEnd: string }> {
   const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix }));
   const trendsPetIds = (list.Contents ?? [])
     .filter((it) => it.Key!.endsWith('/pet.json'))
     .map((it) => it.Key!.slice(poolPrefix.length).split('/')[0]);
 
   const todayKey = new Date().toISOString().slice(0, 10);
-  const weekDates = Array.from({ length: DIGEST.LOOKBACK_DAYS }, (_, i) =>
-    addToDay(todayKey, { days: -(DIGEST.LOOKBACK_DAYS - 1 - i) }),
-  );
-  const monthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(29 - i) }));
-  const priorMonthDates = Array.from({ length: 30 }, (_, i) => addToDay(todayKey, { days: -(59 - i) }));
+  const windowLen = view === 'week' ? DIGEST.LOOKBACK_DAYS : 30;
+  // offset 0 = today back (windowLen-1) days; offset N = the Nth window back,
+  // non-overlapping with offset 0 — "swipe back" one window per step.
+  const rangeDates = (o: number) =>
+    Array.from({ length: windowLen }, (_, i) => addToDay(todayKey, { days: -(o * windowLen + windowLen - 1 - i) }));
+  const thisDates = rangeDates(offset);
+  // Month's "vs last month" comparison always looks at the window immediately
+  // before the one being viewed, regardless of offset.
+  const priorDates = rangeDates(offset + 1);
 
-  return (
+  const pets = (
     await Promise.all(
       trendsPetIds.map(async (petId) => {
         const petPrefix = `${poolPrefix}${petId}/`;
@@ -535,29 +793,15 @@ async function computeTrendsPets(poolPrefix: string, plan: 'free' | 'paid') {
           readJson<{ entries: WeightEntry[] }>(`${petPrefix}weights.json`),
         ]);
         if (!pet?.name) return null;
-        const petName = pet.name; // narrowed once — TS doesn't carry the guard into the nested async IIFE below
+        const petName = pet.name;
         const weights = weightsStored?.entries ?? [];
         const activeItems = (daily?.items ?? dailyPresetsFor(pet.species)).filter((i) =>
           itemVisibleOn(i, todayKey),
         );
         const itemLabel = (id: string) => activeItems.find((i) => i.id === id)?.name ?? id;
-        const asChecklist = (stats: RangeStats) =>
-          activeItems.map((i) => ({
-            id: i.id,
-            label: i.name,
-            count: stats.checkCountsByItemId.get(i.id) ?? 0,
-            total: stats.totalDays,
-          }));
 
-        // Chart data (sparklines + the checklist dot-strip) rides on the
-        // same merged-entries maps used for the aggregate stats above — no
-        // extra S3 reads, just a second pass building per-day series.
-        const weightUnit = weights[0]?.unit ?? null;
-        const seriesFor = (entries: MergedEntries, dates: string[]) => ({
+        const seriesFor = (entries: MergedEntries, dates: string[], weightUnit: string | null) => ({
           moodSeries: dates.map((d) => ({ date: d, value: entries[d]?.mood?.value ?? null })),
-          // Aligned to the same one-entry-per-date shape as moodSeries (most
-          // days null — weigh-ins are sparse) so the client never has to
-          // date-match a sparse log against the day range itself.
           weightSeries: dates.map((d) => ({ date: d, value: weights.find((w) => w.date === d)?.weight ?? null })),
           weightUnit,
           checklistSeries: activeItems.map((i) => ({
@@ -566,103 +810,103 @@ async function computeTrendsPets(poolPrefix: string, plan: 'free' | 'paid') {
             days: dates.map((d) => Boolean(entries[d]?.checks?.[i.id])),
           })),
         });
+        const weightUnit = weights[0]?.unit ?? null;
 
-        const weekEntries = await mergedDailyEntries(petPrefix, daily, weekDates, todayKey);
-        const weekStats = rangeStats(weekEntries, weekDates, weights);
-        const week = {
-          moodAvg: weekStats.moodAvg,
-          checklist: asChecklist(weekStats),
-          medsGiven: weekStats.medsGiven,
-          weight: weekStats.weightLatest && {
-            value: weekStats.weightLatest.weight,
-            unit: weekStats.weightLatest.unit,
-            deltaWeek:
-              weekStats.weightFirst &&
-              weekStats.weightFirst.unit === weekStats.weightLatest.unit &&
-              weekStats.weightFirst !== weekStats.weightLatest
-                ? Math.round((weekStats.weightLatest.weight - weekStats.weightFirst.weight) * 100) / 100
+        // Month view needs the prior window too — start both merges together
+        // instead of paying the archive round-trips twice in sequence.
+        const priorEntriesPromise =
+          view === 'month' ? mergedDailyEntries(petPrefix, daily, priorDates, todayKey) : null;
+        const thisEntries = await mergedDailyEntries(petPrefix, daily, thisDates, todayKey);
+        const thisStats = rangeStats(thisEntries, thisDates, weights);
+
+        if (view === 'week') {
+          const weekPet: TrendsWeekPet = {
+            petId, name: petName,
+            careConsistency: overallCompletionPct(thisStats, activeItems.map((i) => i.id)),
+            moodAvg: thisStats.moodAvg,
+            checklist: activeItems.map((i) => ({
+              id: i.id, label: i.name,
+              count: thisStats.checkCountsByItemId.get(i.id) ?? 0,
+              total: thisStats.totalDays,
+            })),
+            medsGiven: thisStats.medsGiven,
+            weight: thisStats.weightLatest && {
+              value: thisStats.weightLatest.weight,
+              unit: thisStats.weightLatest.unit,
+              deltaWeek:
+                thisStats.weightFirst &&
+                thisStats.weightFirst.unit === thisStats.weightLatest.unit &&
+                thisStats.weightFirst !== thisStats.weightLatest
+                  ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
+                  : null,
+            },
+            insight: pickInsight(petName, thisStats, itemLabel),
+            ...seriesFor(thisEntries, thisDates, weightUnit),
+          };
+          return weekPet;
+        }
+
+        const priorEntries = await priorEntriesPromise!;
+        const priorStats = rangeStats(priorEntries, priorDates, weights);
+        const monthPet: TrendsMonthPet = {
+          petId, name: petName,
+          headline: pickInsight(petName, thisStats, itemLabel),
+          careConsistency: overallCompletionPct(thisStats, activeItems.map((i) => i.id)),
+          moodAvg: thisStats.moodAvg,
+          moodAvgLastMonth: priorStats.moodAvg,
+          medsGiven: thisStats.medsGiven,
+          medsGivenLastMonth: priorStats.medsGiven,
+          weight: thisStats.weightLatest && {
+            value: thisStats.weightLatest.weight,
+            unit: thisStats.weightLatest.unit,
+            deltaMonth:
+              thisStats.weightFirst &&
+              thisStats.weightFirst.unit === thisStats.weightLatest.unit &&
+              thisStats.weightFirst !== thisStats.weightLatest
+                ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
                 : null,
           },
-          insight: pickInsight(pet.name, weekStats, itemLabel),
-          ...seriesFor(weekEntries, weekDates),
+          checklist: activeItems.map((i) => ({
+            id: i.id, label: i.name,
+            pctThis: Math.round(((thisStats.checkCountsByItemId.get(i.id) ?? 0) / thisStats.totalDays) * 100),
+            pctLast: Math.round(((priorStats.checkCountsByItemId.get(i.id) ?? 0) / priorStats.totalDays) * 100),
+          })),
+          ...seriesFor(thisEntries, thisDates, weightUnit),
         };
-
-        const month =
-          plan === 'paid'
-            ? await (async () => {
-                const [thisMonthEntries, lastMonthEntries] = await Promise.all([
-                  mergedDailyEntries(petPrefix, daily, monthDates, todayKey),
-                  mergedDailyEntries(petPrefix, daily, priorMonthDates, todayKey),
-                ]);
-                const thisMonthStats = rangeStats(thisMonthEntries, monthDates, weights);
-                const lastMonthStats = rangeStats(lastMonthEntries, priorMonthDates, weights);
-                return {
-                  headline: pickInsight(petName, thisMonthStats, itemLabel),
-                  careConsistency: overallCompletionPct(thisMonthStats, activeItems.map((i) => i.id)),
-                  moodAvg: thisMonthStats.moodAvg,
-                  moodAvgLastMonth: lastMonthStats.moodAvg,
-                  medsGiven: thisMonthStats.medsGiven,
-                  medsGivenLastMonth: lastMonthStats.medsGiven,
-                  weight: thisMonthStats.weightLatest && {
-                    value: thisMonthStats.weightLatest.weight,
-                    unit: thisMonthStats.weightLatest.unit,
-                    deltaMonth:
-                      thisMonthStats.weightFirst &&
-                      thisMonthStats.weightFirst.unit === thisMonthStats.weightLatest.unit &&
-                      thisMonthStats.weightFirst !== thisMonthStats.weightLatest
-                        ? Math.round((thisMonthStats.weightLatest.weight - thisMonthStats.weightFirst.weight) * 100) / 100
-                        : null,
-                  },
-                  checklist: activeItems.map((i) => ({
-                    id: i.id,
-                    label: i.name,
-                    pctThis: Math.round(((thisMonthStats.checkCountsByItemId.get(i.id) ?? 0) / thisMonthStats.totalDays) * 100),
-                    pctLast: Math.round(((lastMonthStats.checkCountsByItemId.get(i.id) ?? 0) / lastMonthStats.totalDays) * 100),
-                  })),
-                  ...seriesFor(thisMonthEntries, monthDates),
-                };
-              })()
-            : null;
-
-        return { petId, name: pet.name, week, month };
+        return monthPet;
       }),
     )
   ).filter((p): p is NonNullable<typeof p> => p !== null);
+
+  return { pets, rangeStart: thisDates[0], rangeEnd: thisDates[thisDates.length - 1] };
 }
 
-// Renders the same content computeTrendsPets returns as a plain-text email
-// — the on-demand ("email me this report") and eventually any future
-// in-app share flow. Week and month have slightly different shapes
-// (count/total vs pctThis/pctLast, insight vs headline), so this stays two
-// short branches rather than forcing one generic formatter over both.
+// Renders computeTrendsView's output as a plain-text email — the on-demand
+// ("email me this report") flow. Always offset 0 (the current week/month);
+// swiping to older periods is a Trends-tab-only feature for now.
 function composeReportEmail(
   period: 'week' | 'month',
-  pets: Awaited<ReturnType<typeof computeTrendsPets>>,
+  pets: TrendsWeekPet[] | TrendsMonthPet[],
   unsubUrl: string,
 ): { subject: string; body: string } {
   const sections =
     period === 'week'
-      ? pets.map((p) => {
-          const w = p.week;
-          const lines = [p.name];
+      ? (pets as TrendsWeekPet[]).map((w) => {
+          const lines = [w.name];
           if (w.moodAvg !== null) lines.push(`  Mood: ${w.moodAvg.toFixed(1)}/5`);
           for (const c of w.checklist) lines.push(`  ${c.label}: ${c.count} of ${c.total} days`);
           if (w.weight) lines.push(`  ${weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek)}`);
           if (w.insight) lines.push(`  ${w.insight}`);
           return lines.join('\n');
         })
-      : pets
-          .map((p) => {
-            if (!p.month) return null;
-            const m = p.month;
-            const lines = [p.name, `  ${monthlyReportCopy.careConsistency(m.careConsistency)}`];
-            if (m.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth)}`);
-            for (const c of m.checklist) lines.push(`  ${c.label}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`);
-            if (m.weight) lines.push(`  ${monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth)}`);
-            if (m.headline) lines.push(`  ${m.headline}`);
-            return lines.join('\n');
-          })
-          .filter((s): s is string => s !== null);
+      : (pets as TrendsMonthPet[]).map((m) => {
+          const lines = [m.name, `  ${monthlyReportCopy.careConsistency(m.careConsistency)}`];
+          if (m.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth)}`);
+          for (const c of m.checklist) lines.push(`  ${c.label}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`);
+          if (m.weight) lines.push(`  ${monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth)}`);
+          if (m.headline) lines.push(`  ${m.headline}`);
+          return lines.join('\n');
+        });
 
   const copy = period === 'month' ? monthlyReportCopy : weeklyReportCopy;
   const petNames = pets.map((p) => p.name);
@@ -683,6 +927,42 @@ function composeReportEmail(
     copy.unsubscribeLine(unsubUrl),
   ].join('\n');
   return { subject, body };
+}
+
+// HTML twin of composeReportEmail — same pets data, rendered as one card per
+// pet (same visual language as the reminder/digest/monthly-report emails,
+// see shared/emailHtml.ts).
+function composeReportEmailHtml(
+  period: 'week' | 'month',
+  pets: TrendsWeekPet[] | TrendsMonthPet[],
+  unsubUrl: string,
+): string {
+  const sectionsHtml =
+    period === 'week'
+      ? (pets as TrendsWeekPet[]).map((w) => {
+          const rows: string[] = [];
+          if (w.moodAvg !== null) rows.push(petRowHtml(`Mood: ${w.moodAvg.toFixed(1)}/5`));
+          for (const c of w.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.count} of ${c.total} days`));
+          if (w.weight) rows.push(petRowHtml(escapeHtml(weeklyReportCopy.weight(w.weight.value, w.weight.unit, w.weight.deltaWeek))));
+          const insight = w.insight ? insightRowHtml(escapeHtml(w.insight)) : '';
+          return petCardHtml(w.name, rows.join('') + insight);
+        })
+      : (pets as TrendsMonthPet[]).map((m) => {
+          const rows: string[] = [petRowHtml(escapeHtml(monthlyReportCopy.careConsistency(m.careConsistency)))];
+          if (m.moodAvg !== null) rows.push(petRowHtml(escapeHtml(monthlyReportCopy.mood(m.moodAvg, m.moodAvgLastMonth))));
+          for (const c of m.checklist) rows.push(petRowHtml(`${escapeHtml(c.label)}: ${c.pctThis}% of days (last month: ${c.pctLast}%)`));
+          if (m.weight) rows.push(petRowHtml(escapeHtml(monthlyReportCopy.weight(m.weight.value, m.weight.unit, m.weight.deltaMonth))));
+          const insight = m.headline ? insightRowHtml(escapeHtml(m.headline)) : '';
+          return petCardHtml(m.name, rows.join('') + insight);
+        });
+
+  const copy = period === 'month' ? monthlyReportCopy : weeklyReportCopy;
+  const footerHtml = `<a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+  return emailHtml(
+    copy.intro,
+    sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'See the full breakdown'),
+    footerHtml,
+  );
 }
 
 const MAX_DAILY_ITEMS = DAILY.MAX_ITEMS;
@@ -1010,6 +1290,23 @@ async function bumpAiQuota(
   cap: number,
 ): Promise<{ ok: true; remaining: number } | { ok: false }> {
   const key = `users/${sub}/ai-usage.json`;
+  const today = new Date().toISOString().slice(0, 10);
+  const usage = await readJson<{ date?: string; count?: number }>(key);
+  const count = usage?.date === today ? Math.max(0, Number(usage.count) || 0) : 0;
+  if (count >= cap) return { ok: false };
+  await putJson(key, { date: today, count: count + 1 });
+  return { ok: true, remaining: cap - count - 1 };
+}
+
+// Same shape as bumpAiQuota, scoped per-pet instead of per-user (Mark's call:
+// "10/100 saved photos, not photos shot" — so this is bumped once per SAVED
+// photo, at upload-url time, not per shutter press; a discard never calls
+// this at all).
+async function bumpPhotoQuota(
+  petPrefix: string,
+  cap: number,
+): Promise<{ ok: true; remaining: number } | { ok: false }> {
+  const key = `${petPrefix}photo-usage.json`;
   const today = new Date().toISOString().slice(0, 10);
   const usage = await readJson<{ date?: string; count?: number }>(key);
   const count = usage?.date === today ? Math.max(0, Number(usage.count) || 0) : 0;
@@ -1389,6 +1686,7 @@ export const handler = async (
   const petKey = `${petPrefix}pet.json`;
   const avatarKey = `${petPrefix}avatar`;
   const docsPrefix = `${petPrefix}docs/`;
+  const photosPrefix = `${petPrefix}photos/`;
 
   try {
     switch (event.routeKey) {
@@ -1462,20 +1760,39 @@ export const handler = async (
       case 'GET /trends': {
         // Account-level, not pet-scoped — every pet in the caller's pool
         // (their own, or their household's if they're a member). Weekly
-        // summary is free-tier; the monthly rollup + trend headline is a
-        // paid perk, same free/paid split as DAILY.HISTORY_DAYS_*.
+        // summary is free-tier (swipeable back 1 window, 2 weeks total);
+        // monthly is a paid perk (any offset within dailyHistoryDays), same
+        // free/paid split as DAILY.HISTORY_DAYS_*. offset 0 = most recent
+        // window; each step back is one full window further (swipe-to-go-
+        // back-in-time on the Trends tab).
         const membership = await readMemberOf(sub);
         const poolSub = membership?.ownerSub ?? sub;
         const poolPrefix = `users/${poolSub}/pets/`;
         const ent = await getEntitlements(poolSub);
-        const trendsPets = await computeTrendsPets(poolPrefix, ent.plan);
-        return json(200, { plan: ent.plan, pets: trendsPets });
+        const view = event.queryStringParameters?.view === 'month' ? 'month' : 'week';
+        const offsetRaw = Number(event.queryStringParameters?.offset ?? '0');
+        const offset = Number.isInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
+        if (view === 'month' && ent.plan !== 'paid') {
+          return json(403, { error: 'Monthly trends are a paid feature' });
+        }
+        const windowLen = view === 'week' ? DIGEST.LOOKBACK_DAYS : 30;
+        const maxOffset = Math.max(0, Math.floor(ent.dailyHistoryDays / windowLen) - 1);
+        if (offset > maxOffset) {
+          return json(403, { error: 'HISTORY_LIMIT', maxOffset });
+        }
+        const { pets, rangeStart, rangeEnd } =
+          view === 'week'
+            ? await computeTrendsView(poolPrefix, 'week', offset)
+            : await computeTrendsView(poolPrefix, 'month', offset);
+        return json(200, { plan: ent.plan, view, offset, maxOffset, rangeStart, rangeEnd, pets });
       }
 
       case 'POST /trends/send': {
         // On-demand version of the same content GET /trends renders — "email
-        // me this report" from the Trends tab. Week is available to every
-        // plan; month is paid-only (403 otherwise), same split as the tab.
+        // me this report" from the Trends tab. Always the current (offset 0)
+        // period; emailing an older swiped-to period isn't supported yet.
+        // Week is available to every plan; month is paid-only (403
+        // otherwise), same split as the tab.
         const input = JSON.parse(event.body ?? '{}');
         const period = input.period === 'month' ? 'month' : 'week';
         const membership = await readMemberOf(sub);
@@ -1489,13 +1806,16 @@ export const handler = async (
         if (!settings?.email || !settings.unsubToken) {
           return json(400, { error: 'Add your email in Settings before requesting a report' });
         }
-        const trendsPets = await computeTrendsPets(poolPrefix, ent.plan);
-        const withData = trendsPets.filter((p) => (period === 'month' ? p.month !== null : true));
+        const { pets: withData } =
+          period === 'week'
+            ? await computeTrendsView(poolPrefix, 'week', 0)
+            : await computeTrendsView(poolPrefix, 'month', 0);
         if (withData.length === 0) {
           return json(200, { ok: true, sent: false, reason: 'Nothing to report yet' });
         }
         const unsubUrl = `${APP_URL}/unsubscribe?u=${sub}&t=${settings.unsubToken}`;
         const { subject, body } = composeReportEmail(period, withData, unsubUrl);
+        const html = composeReportEmailHtml(period, withData, unsubUrl);
         await ses.send(
           new SendEmailCommand({
             FromEmailAddress: FROM_EMAIL,
@@ -1503,12 +1823,252 @@ export const handler = async (
             Content: {
               Simple: {
                 Subject: { Data: subject, Charset: 'UTF-8' },
-                Body: { Text: { Data: body, Charset: 'UTF-8' } },
+                Body: {
+                  Text: { Data: body, Charset: 'UTF-8' },
+                  Html: { Data: html, Charset: 'UTF-8' },
+                },
               },
             },
           }),
         );
         return json(200, { ok: true, sent: true });
+      }
+
+      // ---- walks (account-level, not pet-scoped — one walk can cover
+      // multiple pets, e.g. walking two dogs together, so it can't nest
+      // under a single pet's prefix like docs/meds/photos/weights do).
+      // Same pool-resolution pattern as GET /trends above. ----
+      case 'GET /walks': {
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const walks = [...(await readWalksIndex(poolSub))].sort((a, b) =>
+          b.startedAt.localeCompare(a.startedAt),
+        );
+        return json(200, { walks });
+      }
+
+      case 'POST /walks': {
+        const input = JSON.parse(event.body ?? '{}');
+        const petIds = Array.isArray(input.petIds)
+          ? [...new Set(input.petIds.filter((id: unknown) => isUuid(typeof id === 'string' ? id : undefined)))]
+          : [];
+        const startedAt = isIsoTimestamp(input.startedAt) ? input.startedAt : null;
+        const endedAt = isIsoTimestamp(input.endedAt) ? input.endedAt : null;
+        const distanceMeters =
+          typeof input.distanceMeters === 'number' && input.distanceMeters >= 0
+            ? Math.round(input.distanceMeters)
+            : 0;
+        if (petIds.length === 0) return json(400, { error: 'at least one pet is required' });
+        if (!startedAt || !endedAt || Date.parse(endedAt) < Date.parse(startedAt)) {
+          return json(400, { error: 'startedAt/endedAt required (endedAt >= startedAt)' });
+        }
+
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
+        // Confirm every petId actually belongs to this pool before writing —
+        // a walk can't be tagged onto a pet the caller can't see.
+        const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix }));
+        const validIds = new Set(
+          (list.Contents ?? [])
+            .filter((it) => it.Key!.endsWith('/pet.json'))
+            .map((it) => it.Key!.slice(poolPrefix.length).split('/')[0]),
+        );
+        const confirmedPetIds = petIds.filter((id): id is string => validIds.has(id as string));
+        if (confirmedPetIds.length === 0) return json(404, { error: 'no matching pets found' });
+
+        const walk: WalkRecord = {
+          id: randomUUID(),
+          petIds: confirmedPetIds,
+          startedAt,
+          endedAt,
+          distanceMeters,
+        };
+        if (!(await mutateWalksIndex(poolSub, (walks) => [...walks, walk]))) {
+          return json(409, { error: 'could not save the walk, try again' });
+        }
+
+        // Auto-check the existing Daily "Walk" preset for each pet on the
+        // walk, for the local day it ended — written fresh (not by calling
+        // into POST /pets/{petId}/daily/check) since that route also carries
+        // med side-effects and counter logic this doesn't need. Best-effort
+        // per pet: one pet's daily.json contention shouldn't fail the walk
+        // save that already landed.
+        const walkDay = endedAt.slice(0, 10);
+        const who = await actorEmail(sub);
+        await Promise.all(
+          confirmedPetIds.map(async (petId) => {
+            const dailyKey = `${poolPrefix}${petId}/daily.json`;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const { value, etag } = await readJsonTagged<DailyFile>(dailyKey);
+              const file: DailyFile = value ?? { items: null, log: {} };
+              const day = file.log[walkDay] ?? {};
+              if (day['preset-walk']) return; // already checked today
+              day['preset-walk'] = { by: who, at: new Date().toISOString() };
+              file.log[walkDay] = day;
+              if (await putJsonGuarded(dailyKey, file, etag)) return;
+            }
+          }),
+        );
+
+        return json(200, { walk });
+      }
+
+      case 'DELETE /walks/{id}': {
+        const id = event.pathParameters?.id;
+        if (!id || !isUuid(id)) return json(400, { error: 'id required' });
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        await mutateWalksIndex(poolSub, (walks) => walks.filter((w) => w.id !== id));
+        // Remove any legacy per-walk object too, so a future index backfill
+        // can never resurrect a deleted walk.
+        await s3.send(
+          new DeleteObjectCommand({ Bucket: BUCKET, Key: `users/${poolSub}/walks/${id}.json` }),
+        );
+        return { statusCode: 204 };
+      }
+
+      // ---- achievements (account-level) — live rolling stat cards per pet,
+      // each carrying its ladder of locked/unlocked badges (catalog +
+      // persistence notes at badgeCatalog above). Card numbers stay the
+      // rolling last-7-days window; badge conditions use best-ever calendar
+      // weeks / all-time totals so trophies never un-earn. Cats get no walk
+      // cards (Mark, 2026-07-13); the care-streak card (consecutive days
+      // with EVERY active Daily item checked) is the cat-friendly metric,
+      // shown for all species because it's just as meaningful for dogs.
+      // The care scan reads the daily archive regardless of plan — it powers
+      // one aggregate number, not history browsing, so DAILY.HISTORY_DAYS_FREE
+      // (a read-entitlement for the Daily tab) deliberately doesn't gate it.
+      case 'GET /achievements': {
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const windowDates = new Set(
+          Array.from({ length: DIGEST.LOOKBACK_DAYS }, (_, i) =>
+            addToDay(todayKey, { days: -(DIGEST.LOOKBACK_DAYS - 1 - i) }),
+          ),
+        );
+        const windowStart = [...windowDates].sort()[0];
+
+        // All-time walks, not window-filtered: badge conditions need full history.
+        const [petList, allWalks] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix })),
+          readWalksIndex(poolSub),
+        ]);
+        const petIds = (petList.Contents ?? [])
+          .filter((it) => it.Key!.endsWith('/pet.json'))
+          .map((it) => it.Key!.slice(poolPrefix.length).split('/')[0]);
+
+        const pets = await Promise.all(
+          petIds.map(async (petId) => {
+            const petPrefix = `${poolPrefix}${petId}/`;
+            const [pet, daily, photosList] = await Promise.all([
+              readJson<{ name?: string; species?: string }>(`${petPrefix}pet.json`),
+              readJson<DailyFile>(`${petPrefix}daily.json`),
+              s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${petPrefix}photos/` })),
+            ]);
+            if (!pet?.name) return null;
+
+            const petWalks = allWalks.filter((w) => w.petIds.includes(petId));
+            const weekWalks = petWalks.filter((w) => w.startedAt.slice(0, 10) >= windowStart);
+            const weekMeters = weekWalks.reduce((sum, w) => sum + w.distanceMeters, 0);
+            const weekMiles = Math.round((weekMeters / 1609.344) * 10) / 10;
+            const walkBests = weeklyBests(petWalks.map((w) => w.startedAt.slice(0, 10)));
+
+            const photoDates = (photosList.Contents ?? [])
+              .map((it) => it.LastModified?.toISOString().slice(0, 10))
+              .filter((d): d is string => !!d);
+            const daysWithPhoto = new Set(photoDates.filter((d) => windowDates.has(d)));
+            const photoBests = weeklyBests(photoDates);
+
+            // Care streak: a day is "perfect" when every Daily item active
+            // THAT day is checked (effective-dated items, presets included;
+            // counters count as done at >= 1 increment). A pet with no items
+            // on a date can't be perfect that date. Today-in-progress doesn't
+            // zero the current streak — it just doesn't count yet.
+            const lookback = ACHIEVEMENTS.CARE_STREAK_LOOKBACK_DAYS;
+            const careDates = Array.from({ length: lookback }, (_, i) =>
+              addToDay(todayKey, { days: -(lookback - 1 - i) }),
+            );
+            const careEntries = await mergedDailyEntries(petPrefix, daily, careDates, todayKey);
+            const items = daily?.items ?? dailyPresetsFor(pet.species);
+            const perfect = (d: string) => {
+              const active = items.filter((i) => itemVisibleOn(i, d));
+              return active.length > 0 && active.every((i) => Boolean(careEntries[d]?.checks?.[i.id]));
+            };
+            let hasPerfectCareDay = false;
+            let longestCareStreak = 0;
+            let run = 0;
+            for (const d of careDates) {
+              if (perfect(d)) {
+                hasPerfectCareDay = true;
+                longestCareStreak = Math.max(longestCareStreak, ++run);
+              } else run = 0;
+            }
+            let idx = careDates.length - 1;
+            if (!perfect(careDates[idx])) idx--;
+            let currentStreak = 0;
+            while (idx >= 0 && perfect(careDates[idx])) {
+              currentStreak++;
+              idx--;
+            }
+
+            const stats: PetBadgeStats = {
+              totalWalks: petWalks.length,
+              totalMiles: petWalks.reduce((sum, w) => sum + w.distanceMeters, 0) / 1609.344,
+              maxWalksInWeek: walkBests.maxCount,
+              maxWalkDaysInWeek: walkBests.maxDays,
+              longestWalkWeekStreak: walkBests.longestStreak,
+              totalPhotos: photoDates.length,
+              maxPhotoDaysInWeek: photoBests.maxDays,
+              hasPerfectCareDay,
+              longestCareStreak,
+            };
+
+            const badgesKey = `${petPrefix}badges.json`;
+            const stored = (await readJson<BadgesFile>(badgesKey)) ?? { earned: {} };
+            let newlyEarned = false;
+            const badgesFor = (cardId: string) =>
+              badgeCatalog[cardId].map(({ def, done }) => {
+                let earnedAt = stored.earned[def.id]?.earnedAt ?? null;
+                if (!earnedAt && done(stats)) {
+                  earnedAt = todayKey;
+                  stored.earned[def.id] = { earnedAt };
+                  newlyEarned = true;
+                }
+                return { ...def, earnedAt };
+              });
+
+            const careCard = {
+              id: 'care-streak',
+              icon: '💚',
+              label: 'Care streak (days)',
+              value: currentStreak >= lookback ? `${lookback}+` : String(currentStreak),
+              badges: badgesFor('care-streak'),
+            };
+            const photoCard = {
+              id: 'photo-days-week',
+              icon: '📸',
+              label: 'Days photographed this week',
+              value: `${daysWithPhoto.size}/${DIGEST.LOOKBACK_DAYS}`,
+              badges: badgesFor('photo-days-week'),
+            };
+            // Cats never evaluate walk badges at all — no stray earns if a
+            // walk gets tagged onto a cat in a mixed-species outing.
+            const cards = /cat/i.test(pet.species ?? '')
+              ? [careCard, photoCard]
+              : [
+                  { id: 'walks-week', icon: '🚶', label: 'Walks this week', value: String(weekWalks.length), badges: badgesFor('walks-week') },
+                  { id: 'distance-week', icon: '🗺️', label: 'Miles this week', value: weekMiles.toFixed(1), badges: badgesFor('distance-week') },
+                  photoCard,
+                  careCard,
+                ];
+            if (newlyEarned) await putJson(badgesKey, stored);
+            return { petId, petName: pet.name, cards };
+          }),
+        );
+        return json(200, { pets: pets.filter((p): p is NonNullable<typeof p> => p !== null) });
       }
 
       case 'POST /pets': {
@@ -1597,6 +2157,132 @@ export const handler = async (
           Expires: UPLOADS.UPLOAD_URL_TTL_SECONDS,
         });
         return json(200, { url, fields });
+      }
+
+      // ---- photos (casual per-pet album — swipe-right camera / swipe-left
+      // albums on the overview screen). Separate from both the single-slot
+      // avatar above and the formal vaccine docs below: a growing collection
+      // of candid photos, key shape users/{sub}/pets/{petId}/photos/{photoId}/
+      // {filename}, same presigned-POST-direct-to-S3 pattern as docs. Limits
+      // are a DAILY per-pet SAVE count (see bumpPhotoQuota), not a lifetime
+      // total — deliberately never surfaced in the UI until it's hit. ----
+      case 'GET /pets/{petId}/photos': {
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: photosPrefix }),
+        );
+        const items = (list.Contents ?? []).sort(
+          (a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0),
+        );
+        const photos = await Promise.all(
+          items.map(async (it) => {
+            const key = it.Key!;
+            // key shape: users/{sub}/pets/{petId}/photos/{photoId}/{filename}
+            const parts = key.split('/');
+            const url = await getSignedUrl(
+              s3,
+              new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+              { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
+            );
+            return {
+              id: parts[5],
+              filename: parts.slice(6).join('/'),
+              size: it.Size,
+              uploadedAt: it.LastModified,
+              url,
+            };
+          }),
+        );
+        return json(200, { photos });
+      }
+
+      case 'POST /pets/{petId}/photos/upload-url': {
+        const input = JSON.parse(event.body ?? '{}');
+        const filename = String(input.filename ?? 'photo.jpg')
+          .replace(/[^\w.\- ]/g, '_')
+          .slice(0, 200);
+        const contentType = String(input.contentType ?? '');
+        if (!PHOTO_TYPES.includes(contentType)) {
+          return json(400, { error: 'photo must be a JPEG, PNG, or WebP image' });
+        }
+        const [pet, ent] = await Promise.all([
+          readJson<{ name?: string }>(petKey),
+          getEntitlements(dataSub),
+        ]);
+        if (pet === null) return json(404, { error: 'not found' });
+        if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
+          return json(403, { error: READ_ONLY_PET_ERROR });
+        }
+        // Bumped here (not at /confirm) — issuing the URL is our proxy for
+        // "the user tapped Save," same best-effort-not-billing tradeoff as
+        // bumpAiQuota. A shutter press that's later discarded never reaches
+        // this route at all, so it never counts. Human-readable error string
+        // (not a machine code) — same convention as the doc-count 409 above,
+        // this is the ONLY place the cap is ever surfaced to the user.
+        const cap = ent.plan === 'paid' ? PAID_MAX_PHOTOS_PER_DAY : MAX_PHOTOS_PER_DAY;
+        const quota = await bumpPhotoQuota(petPrefix, cap);
+        if (!quota.ok) {
+          return json(409, {
+            error: `You've reached today's photo limit for ${pet?.name ?? 'this pet'} — try again tomorrow.`,
+          });
+        }
+
+        const photoId = randomUUID();
+        const key = `${photosPrefix}${photoId}/${filename}`;
+        const { url, fields } = await createPresignedPost(s3, {
+          Bucket: BUCKET,
+          Key: key,
+          Conditions: [
+            ['content-length-range', 1, MAX_PHOTO_BYTES],
+            ['eq', '$Content-Type', contentType],
+          ],
+          Fields: { 'Content-Type': contentType },
+          Expires: UPLOADS.UPLOAD_URL_TTL_SECONDS,
+        });
+        return json(200, { url, fields, photoId });
+      }
+
+      // Called by the client after the direct-to-S3 upload succeeds (the API
+      // Lambda never sees a presigned POST land otherwise). HEAD-checks the
+      // object is actually there before pushing, so an aborted upload or a
+      // closed app never triggers a false "new photo" notification to the
+      // household. Broadcasts to every OTHER household member sharing this
+      // pet — not the uploader.
+      case 'POST /pets/{petId}/photos/{id}/confirm': {
+        const id = event.pathParameters?.id;
+        if (!id) return json(400, { error: 'id required' });
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${photosPrefix}${id}/` }),
+        );
+        if ((list.Contents ?? []).length === 0) {
+          return json(200, { ok: true, notified: false });
+        }
+        const pet = await readJson<{ name?: string }>(petKey);
+        if (pet?.name) {
+          const household = await readHousehold(dataSub);
+          const notifySubs = [dataSub, ...household.members.map((m) => m.sub)].filter(
+            (s) => s !== sub,
+          );
+          await Promise.all(
+            notifySubs.map((notifySub) =>
+              sendPushes(BUCKET, `users/${notifySub}/`, photoCopy.title, photoCopy.body(pet.name!), APP_URL),
+            ),
+          );
+        }
+        return json(200, { ok: true, notified: true });
+      }
+
+      case 'DELETE /pets/{petId}/photos/{id}': {
+        const id = event.pathParameters?.id;
+        if (!id) return json(400, { error: 'id required' });
+        const list = await s3.send(
+          new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${photosPrefix}${id}/` }),
+        );
+        await Promise.all(
+          (list.Contents ?? []).map((it) =>
+            s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),
+          ),
+        );
+        return { statusCode: 204 };
       }
 
       // ---- documents (per pet) ----

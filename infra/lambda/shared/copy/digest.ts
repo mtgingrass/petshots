@@ -22,6 +22,10 @@ export const digestInsightCopy = {
     `We noticed ${pet}'s walks dropped to ${n} of the last ${total} days — anything keeping you two inside?`,
   lowGeneric: (pet: string, itemName: string, n: number, total: number) =>
     `We noticed ${pet}'s ${itemName} was only logged ${n} of the last ${total} days — just a logging gap, or worth a check-in?`,
+  /** Replaces the digest's normal "Weight: X" line when the latest entry
+   *  predates the digest window by WEIGHTS.STALE_NUDGE_DAYS or more. */
+  weightStale: (pet: string, days: number) =>
+    `It's been ${days} days since ${pet}'s last weight update — worth logging one?`,
 } as const;
 
 export const digestCopy = {

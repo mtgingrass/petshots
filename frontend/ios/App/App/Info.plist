@@ -30,6 +30,8 @@
 	<string>Petshots uses the camera so you can photograph vaccination records and your pets.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Petshots uses your photo library so you can upload vaccination records and pet photos.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Petshots uses your location to track distance while you're on a walk with your pet.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

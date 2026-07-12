@@ -32,6 +32,10 @@ export const UPLOADS = {
   /** Pet photo cap. MUST MATCH backend UPLOADS.MAX_AVATAR_BYTES. The client
    *  compresses to ~300 KB before upload anyway, so this rarely bites. */
   MAX_AVATAR_BYTES: 5 * 1024 * 1024, // 5 MB
+  /** Album photo cap (camera-captured, not client-compressed). MUST MATCH
+   *  backend UPLOADS.MAX_PHOTO_BYTES. Size-only pre-check — the daily photo
+   *  COUNT limit is deliberately not surfaced anywhere until it's hit. */
+  MAX_PHOTO_BYTES: 12 * 1024 * 1024, // 12 MB
 } as const;
 
 /** DASHBOARD STATUS BADGES */
@@ -49,6 +53,12 @@ export const DASHBOARD = {
   MED_LOOKAHEAD_MAX_DAYS: 3,
 } as const;
 
+/** ACHIEVEMENTS (badge view behind each achievement card). */
+export const ACHIEVEMENTS = {
+  /** A badge earned within this many days wears the "New!" ribbon. */
+  NEW_BADGE_RIBBON_DAYS: 3,
+} as const;
+
 /**
  * OVERVIEW NOTICE STRIP (the dismissible banners above "Your Pets").
  * Windows are days-until-expiry bands; how long a dismissal lasts per band
@@ -56,16 +66,19 @@ export const DASHBOARD = {
  * utils/notices.ts — it's UX texture, not a product number.
  */
 export const NOTICES = {
-  /** <= this many days: urgent band, re-surfaces daily even if dismissed. */
+  /** <= this many days: urgent band. Dismissing is permanent (the pet-pin's
+   *  status ring is the persistent signal) until the record's own expiry
+   *  date changes. */
   CRITICAL_DAYS: 7,
-  /** Up to this many days: warning band, re-surfaces after 7 days. */
+  /** Up to this many days: warning band, same permanent-dismiss rule. */
   WARNING_DAYS: 30,
-  /** Up to this many days: heads-up band, re-surfaces after 14 days. */
+  /** Up to this many days: heads-up band, same permanent-dismiss rule. */
   HEADSUP_DAYS: 60,
   /** Show the birthday notice within this many days of the big day. */
   BIRTHDAY_DAYS: 14,
-  /** Re-nudge about a missing date of birth after this many days. */
-  DOB_NUDGE_DAYS: 90,
+  /** Re-nudge about a missing date of birth after this many days (only a
+   *  "few days" — non-medical, per the dismiss-persistence redesign, 2026-07-13). */
+  DOB_NUDGE_DAYS: 3,
   /** Most notices shown at once (highest priority wins). */
   MAX_NOTICES: 4,
 } as const;

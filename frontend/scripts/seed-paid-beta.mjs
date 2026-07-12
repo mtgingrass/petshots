@@ -30,8 +30,17 @@ const env = Object.fromEntries(
     .map((l) => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()]; }),
 );
 
-const EMAIL = 'paid-beta@petshots.app';
-const PASSWORD = process.env.PAID_BETA_PASSWORD ?? 'Petshots#Paid2026';
+const EMAIL = 'paid-beta@petshots.app'; // Cognito login — unchanged
+const PASSWORD = process.env.PAID_BETA_PASSWORD; // never hardcode - this is a real production account
+if (!PASSWORD) {
+  console.error('Set PAID_BETA_PASSWORD (credentials live in Claude memory, never in git).');
+  process.exit(1);
+}
+// Notification email is deliberately a REAL inbox, not the login address —
+// Mark needs to actually receive the report emails this account is for
+// testing. Login (Cognito username) and notification email are independent
+// fields in this product; don't "fix" this back to EMAIL.
+const NOTIFY_EMAIL = process.env.PAID_BETA_NOTIFY_EMAIL ?? 'mark.gingrass@gmail.com';
 const ACTOR = EMAIL;
 const DAYS_BACK = 92;
 const LIVE_WINDOW_DAYS = 14; // must match DAILY.LOG_RETENTION_DAYS in shared/config.ts
@@ -184,7 +193,7 @@ for (const w of weightSeries({ start: 68.0, end: 70.5, points: 13, rng })) {
 }
 console.log('  ✓ Weight: 68.0 → 70.5 lb across 13 entries');
 
-await api(token, 'PUT', '/settings', { email: EMAIL, remindersEnabled: true, reminderDays: [7, 30], weeklyDigest: true });
+await api(token, 'PUT', '/settings', { email: NOTIFY_EMAIL, remindersEnabled: true, reminderDays: [7, 30], weeklyDigest: true });
 console.log('  ✓ Settings: reminders + weekly digest on');
 
 s3PutJson(`users/${sub}/plan.json`, { plan: 'paid' });

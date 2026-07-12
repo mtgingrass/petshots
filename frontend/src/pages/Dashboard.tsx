@@ -9,6 +9,11 @@ import {
   updatePet,
   deletePet,
   uploadAvatar,
+  listPhotos,
+  uploadPhoto,
+  deletePhoto,
+  createWalk,
+  getAchievements,
   listDocs,
   updateDoc,
   deleteDoc,
@@ -38,7 +43,8 @@ import {
   listWeights,
   logWeight,
   deleteWeight,
-  getTrends,
+  getTrendsWeek,
+  getTrendsMonth,
   sendTrendsReport,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
@@ -56,14 +62,19 @@ import {
   type CommitRecord,
   type ProfilePatch,
   type DuplicateInfo,
-  type TrendsPet,
+  type TrendsResponse,
+  type TrendsWeekPet,
+  type TrendsMonthPet,
+  type Photo,
+  type PetAchievements,
 } from '../api';
 import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
 import { OnboardingTour, TOUR_DONE_KEY } from '../components/OnboardingTour';
-import { Sparkline, GaugeDial, ChecklistPercentRow, moodStatus, statusColor } from '../components/TrendsCharts';
+import { Sparkline, GaugeDial, ChecklistPercentRow, moodStatus, statusColor, useSwipeStep, TrendsRangeNav } from '../components/TrendsCharts';
 import { isNative, hapticTap, hapticSuccess, hapticWarning } from '../native';
+import { Geolocation } from '@capacitor/geolocation';
 import {
   computeNotices,
   isDismissed,
@@ -75,6 +86,7 @@ import {
 import {
   UPLOADS,
   DASHBOARD as DASHBOARD_CONFIG,
+  ACHIEVEMENTS as ACHIEVEMENTS_CONFIG,
   PAID_PLAN_LIMITS,
   REMINDER_DAY_OPTIONS,
   VACCINE_CADENCES,
@@ -90,6 +102,10 @@ const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_FILE_BYTES = UPLOADS.MAX_FILE_BYTES;
 const MAX_AVATAR_BYTES = UPLOADS.MAX_AVATAR_BYTES;
 const DUE_SOON_DAYS = DASHBOARD_CONFIG.DUE_SOON_DAYS;
+// Pure UI tuning (not backend-enforced, so it lives here rather than
+// productConfig.ts) — how many photos show per pet on the Albums overview
+// before "See all" is needed. 6 makes a clean 2x3/3x2 grid.
+const ALBUM_PREVIEW_COUNT = 6;
 
 type Status = 'overdue' | 'due-soon' | 'current' | 'none';
 
@@ -287,7 +303,20 @@ type DashView =
   // header avatar menu.
   | { type: 'settings'; section: SettingsSection }
   // Combined every-pet daily view — the bottom tab bar's "Daily" tab.
-  | { type: 'daily' };
+  | { type: 'daily' }
+  // Casual per-pet photo album — reached by swipe-right on the overview
+  // screen (see useSwipeStep wiring near the overview render). Shows a
+  // capped preview grid per pet (ALBUM_PREVIEW_COUNT); "See all" pushes to
+  // the 'album' screen below for that one pet's full, day-grouped grid.
+  | { type: 'albums' }
+  | { type: 'album'; petId: string }
+  // Live rolling stat cards per pet (walks, distance, photos, care streak) —
+  // reached by swipe-left on the overview screen, the gesture freed up
+  // when swipe-to-camera was dropped. Tapping a card pushes to its 'badges'
+  // ladder (earned vs still-to-earn), same push-a-level pattern as
+  // albums -> album.
+  | { type: 'achievements' }
+  | { type: 'badges'; petId: string; cardId: string };
 
 type EditView =
   | { type: 'list' }
@@ -349,6 +378,67 @@ export function Dashboard() {
   function dismissPresentHint() {
     localStorage.setItem('petshots.presentHint', '1');
     setShowPresentHint(false);
+  }
+  // Swipe-right-to-camera / swipe-left-to-albums (overview screen), and
+  // swipe-right-back (albums screen) — see useSwipeStep call near the
+  // bottom of this component for why a single always-mounted hook guarded
+  // by dashView.type is used instead of one per screen.
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<File | null>(null);
+  const [savingPhoto, setSavingPhoto] = useState(false);
+  const [showPhotoHint, setShowPhotoHint] = useState(
+    () =>
+      window.matchMedia('(pointer: coarse)').matches &&
+      !localStorage.getItem('petshots.photoHint'),
+  );
+  function dismissPhotoHint() {
+    localStorage.setItem('petshots.photoHint', '1');
+    setShowPhotoHint(false);
+  }
+  function openCamera() {
+    // .click() FIRST, synchronously, before any other work — iOS Safari's
+    // "user activation" grant for opening the native camera (as opposed to
+    // a plain file picker) is easy to lose if anything else runs first,
+    // especially when this is called from a touchend handler rather than a
+    // direct click on the triggering element (see useSwipeStep call below).
+    cameraInputRef.current?.click();
+    dismissPhotoHint();
+  }
+  function handleCameraChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // lets the same shot be retaken/reselected later
+    if (file) setCapturedPhoto(file);
+  }
+  async function handleSavePhoto(petId: string) {
+    if (!capturedPhoto) return;
+    const file = capturedPhoto;
+    setSavingPhoto(true);
+    try {
+      await uploadPhoto(petId, file);
+      const savedTo = pets?.find((p) => p.id === petId);
+      showNotice(`Saved to ${savedTo?.name ?? "pet"}'s album.`);
+      hapticSuccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the photo');
+    } finally {
+      setSavingPhoto(false);
+      setCapturedPhoto(null);
+    }
+  }
+  // Walk tracking overlay — a boolean is enough (unlike the photo flow,
+  // there's no intermediate "captured file" to hold; WalkScreen owns its
+  // own start/elapsed/distance state internally and only reports back on
+  // save via onSaved).
+  const [walkActive, setWalkActive] = useState(false);
+  // Last GET /achievements result, kept so BadgeScreen (a drill-down of the
+  // achievements screen) doesn't re-run the most S3-expensive endpoint just
+  // to show a card it was tapped from. Refreshed every time the achievements
+  // screen mounts.
+  const [achievementsCache, setAchievementsCache] = useState<PetAchievements[] | null>(null);
+  async function handleWalkSaved(msg: string) {
+    setWalkActive(false);
+    showNotice(msg);
+    hapticSuccess();
   }
   // First-run tour (once per device, phones + native): four cards ending in
   // the push-notification ask — the system dialog only fires once on iOS, so
@@ -478,6 +568,9 @@ export function Dashboard() {
     ? (pets?.find((p) => p.id === presentingPetId) ?? null)
     : null;
   const presentingDocs = presentingPet ? (allDocs[presentingPet.id] ?? []) : [];
+
+  const albumPet =
+    dashView.type === 'album' ? (pets?.find((p) => p.id === dashView.petId) ?? null) : null;
 
   const loadPets = useCallback(async () => {
     setError(null);
@@ -620,6 +713,29 @@ export function Dashboard() {
     setEditView({ type: 'list' });
   }
 
+  // Always mounted (not conditionally called) so the hook order never
+  // changes — dashView.type is checked INSIDE the callback instead. That's
+  // the single active listener for this gesture: it no-ops on every screen
+  // except overview/albums/achievements, so it never conflicts with Daily's
+  // own swipe listener or the Trends tabs' useSwipeStep calls (each of those
+  // is its own mounted-only-when-active component, this is the app-shell-
+  // level one). 'back' = swipe right, 'forward' = swipe left (useSwipeStep's
+  // own convention). Right -> albums; left -> achievements (the gesture
+  // freed up when swipe-to-camera was dropped, 2026-07-13). Each screen's
+  // OPPOSITE swipe direction goes back to overview.
+  useSwipeStep((dir) => {
+    if (dashView.type === 'overview') {
+      if (dir === 'back') setDashView({ type: 'albums' });
+      else setDashView({ type: 'achievements' });
+    } else if (dashView.type === 'albums' && dir === 'forward') {
+      backToOverview();
+    } else if (dashView.type === 'achievements' && dir === 'back') {
+      backToOverview();
+    } else if (dashView.type === 'badges' && dir === 'back') {
+      setDashView({ type: 'achievements' });
+    }
+  });
+
   // Deliberate destruction only: the caller (Edit Profile's danger zone) has
   // already made the user TYPE the pet's name, so this deletes immediately —
   // the old optimistic-remove + 10s undo toast was too easy to trip and too
@@ -711,6 +827,19 @@ export function Dashboard() {
             doesn't matter once an element is taken out of flow). */}
         {pets !== null && <TabBar active={activeTab} onSelect={handleTabSelect} />}
 
+        {/* Hidden — swipe-right (or the camera icon button) triggers .click()
+            on this. capture="environment" opens the native camera directly
+            (mobile web and the Capacitor iOS shell both honor it) instead of
+            a gallery/file picker. */}
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleCameraChange}
+          style={{ display: 'none' }}
+        />
+
         {notice && <p className="notice" role="status">{notice}</p>}
         {error && (
           <p className="error" role="alert" onClick={() => setError(null)} title="Dismiss">
@@ -780,6 +909,7 @@ export function Dashboard() {
         ) : dashView.type === 'trends' ? (
           <TrendsAllScreen
             pets={pets}
+            plan={limits.plan}
             onError={setError}
             onNotice={showNotice}
             onAddPet={() => setDashView({ type: 'add-pet' })}
@@ -792,6 +922,34 @@ export function Dashboard() {
             onNotice={showNotice}
             onError={setError}
             onAddPet={() => setDashView({ type: 'add-pet' })}
+          />
+        ) : dashView.type === 'albums' ? (
+          <AlbumsAllScreen
+            pets={pets}
+            onError={setError}
+            onNotice={showNotice}
+            onAddPet={() => setDashView({ type: 'add-pet' })}
+            onOpenPet={(petId) => setDashView({ type: 'album', petId })}
+          />
+        ) : dashView.type === 'album' && albumPet ? (
+          <PetAlbumScreen
+            pet={albumPet}
+            onError={setError}
+            onNotice={showNotice}
+          />
+        ) : dashView.type === 'achievements' ? (
+          <AchievementsAllScreen
+            onError={setError}
+            onLoaded={setAchievementsCache}
+            onOpenBadges={(petId, cardId) => setDashView({ type: 'badges', petId, cardId })}
+          />
+        ) : dashView.type === 'badges' ? (
+          <BadgeScreen
+            petId={dashView.petId}
+            cardId={dashView.cardId}
+            preloaded={achievementsCache}
+            onBack={() => setDashView({ type: 'achievements' })}
+            onError={setError}
           />
         ) : dashView.type === 'profile' && detailPet ? (
           editView.type === 'edit-profile' ? (
@@ -910,7 +1068,63 @@ export function Dashboard() {
                 )
               }
             />
-            <h1 className="large-title">Pets</h1>
+            <div className="pets-header-row">
+              <h1 className="large-title">Pets</h1>
+              {/* Swipe is touch-only (no desktop affordance) — these mirror
+                  it for mouse/desktop, same pairing as TrendsRangeNav's
+                  buttons alongside its own swipe gesture. */}
+              <div className="pets-header-row__actions">
+                <button
+                  type="button"
+                  className="pets-header-row__icon-btn"
+                  onClick={openCamera}
+                  aria-label="Take a photo"
+                  title="Take a photo"
+                >
+                  📷
+                </button>
+                <button
+                  type="button"
+                  className="pets-header-row__icon-btn"
+                  onClick={() => setDashView({ type: 'albums' })}
+                  aria-label="View albums"
+                  title="View albums"
+                >
+                  🖼️
+                </button>
+                <button
+                  type="button"
+                  className="pets-header-row__icon-btn"
+                  onClick={() => setWalkActive(true)}
+                  aria-label="Start a walk"
+                  title="Start a walk"
+                >
+                  🚶
+                </button>
+                <button
+                  type="button"
+                  className="pets-header-row__icon-btn"
+                  onClick={() => setDashView({ type: 'achievements' })}
+                  aria-label="View achievements"
+                  title="View achievements"
+                >
+                  🏆
+                </button>
+              </div>
+            </div>
+            {showPhotoHint && (
+              <p className="daily-swipe-hint" role="status">
+                <span>Swipe right for albums, swipe left for achievements.</span>
+                <button
+                  type="button"
+                  className="daily-swipe-hint__close"
+                  aria-label="Dismiss tip"
+                  onClick={dismissPhotoHint}
+                >
+                  ✕
+                </button>
+              </p>
+            )}
             {showPresentHint &&
               pets.some((p) => (allDocs[p.id]?.length ?? 0) > 0) && (
                 <p className="daily-swipe-hint" role="status">
@@ -1018,6 +1232,23 @@ export function Dashboard() {
           onExit={() => setPresentingPetId(null)}
         />
       )}
+      {capturedPhoto && pets && pets.length > 0 && (
+        <PhotoConfirmScreen
+          file={capturedPhoto}
+          pets={pets}
+          saving={savingPhoto}
+          onSave={handleSavePhoto}
+          onDiscard={() => setCapturedPhoto(null)}
+        />
+      )}
+      {walkActive && pets && pets.length > 0 && (
+        <WalkScreen
+          pets={pets}
+          onSaved={handleWalkSaved}
+          onCancel={() => setWalkActive(false)}
+          onError={setError}
+        />
+      )}
       {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
     </>
   );
@@ -1027,46 +1258,28 @@ export function Dashboard() {
 // per pet, plus a monthly rollup with a one-line "what's moving the needle"
 // headline as a paid perk. Fetches its own data (GET /trends) rather than
 // riding the pets/limits load, since it's the one screen that needs it.
+// "On track / Slipping / Off track" — the same 0-100 threshold as
+// statusColor's red/amber/green, phrased as a gauge label.
+function gaugeStatusLabel(pct: number): string {
+  return pct >= 80 ? 'On track' : pct >= 50 ? 'Slipping' : 'Off track';
+}
+
 function TrendsAllScreen({
   pets,
+  plan,
   onError,
   onNotice,
   onAddPet,
   onUpgrade,
 }: {
   pets: Pet[];
+  plan: 'free' | 'paid';
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
   onAddPet: () => void;
   onUpgrade: () => void;
 }) {
-  const [trends, setTrends] = useState<TrendsPet[] | null>(null);
-  const [plan, setPlan] = useState<'free' | 'paid'>('free');
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState<'week' | 'month' | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    getTrends()
-      .then((res) => { if (!cancelled) { setTrends(res.pets); setPlan(res.plan); } })
-      .catch((e: Error) => { if (!cancelled) onError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function handleSend(period: 'week' | 'month') {
-    setSending(period);
-    try {
-      const res = await sendTrendsReport(period);
-      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setSending(null);
-    }
-  }
+  const [activeView, setActiveView] = useState<'week' | 'month'>('week');
 
   if (pets.length === 0) {
     return (
@@ -1082,146 +1295,287 @@ function TrendsAllScreen({
 
   return (
     <div className="trends-all">
-      <div className="trends-all__header">
-        <h1 className="large-title">Trends</h1>
-        <div className="trends-all__send-buttons">
-          <button className="btn btn--link btn--sm" disabled={sending !== null} onClick={() => void handleSend('week')}>
-            {sending === 'week' ? 'Sending…' : 'Email week →'}
-          </button>
-          {plan === 'paid' && (
-            <button className="btn btn--link btn--sm" disabled={sending !== null} onClick={() => void handleSend('month')}>
-              {sending === 'month' ? 'Sending…' : 'Email month →'}
-            </button>
-          )}
-        </div>
+      <h1 className="large-title">Trends</h1>
+      <div className="tab-bar">
+        <button
+          className={`tab-bar__tab${activeView === 'week' ? ' tab-bar__tab--active' : ''}`}
+          onClick={() => { hapticTap(); setActiveView('week'); }}
+        >
+          Weekly
+        </button>
+        <button
+          className={`tab-bar__tab${activeView === 'month' ? ' tab-bar__tab--active' : ''}`}
+          onClick={() => { hapticTap(); setActiveView('month'); }}
+        >
+          Monthly
+        </button>
       </div>
-      {loading || trends === null ? (
-        <p className="trends-all__loading">Loading trends…</p>
+      {activeView === 'week' ? (
+        <WeeklyTrendsView plan={plan} onError={onError} onNotice={onNotice} />
       ) : (
-        trends.map((t) => {
-          // A single at-a-glance number: mean of this window's per-item
-          // completion rates. Real and derived from data already shown
-          // below, not a fabricated composite metric.
-          const weekPct = t.week.checklist.length
-            ? Math.round(
-                t.week.checklist.reduce((sum, c) => sum + (c.total ? (c.count / c.total) * 100 : 0), 0) /
-                  t.week.checklist.length,
-              )
-            : 0;
-          const monthPct =
-            t.month && t.month.checklist.length
-              ? Math.round(t.month.checklist.reduce((sum, c) => sum + c.pctThis, 0) / t.month.checklist.length)
-              : 0;
-          const gaugeLabel = (pct: number) => (pct >= 80 ? 'On track' : pct >= 50 ? 'Slipping' : 'Off track');
-          const weekMood = t.week.moodAvg !== null ? moodStatus(t.week.moodAvg) : null;
-          const monthMood = t.month?.moodAvg != null ? moodStatus(t.month.moodAvg) : null;
-
-          return (
-            <section key={t.petId} className="card trends-all__pet">
-              <div className="trends-hero">
-                <div className="trends-hero__text">
-                  <h2 className="trends-all__pet-name">{t.name}</h2>
-                  <p className="trends-hero__caption">This week's care consistency</p>
-                </div>
-                <GaugeDial
-                  pct={weekPct}
-                  value={`${weekPct}%`}
-                  label={gaugeLabel(weekPct)}
-                  color={statusColor(weekPct)}
-                />
-              </div>
-
-              <div className="trends-all__section-label">This week</div>
-              <div className="trends-chart-block">
-                <div className="trends-chart-block__caption">
-                  Mood
-                  {weekMood && <span className="trends-status" style={{ color: weekMood.color }}> · {weekMood.label}</span>}
-                </div>
-                <Sparkline points={t.week.moodSeries} color="var(--primary)" />
-              </div>
-              {t.week.weight && (
-                <div className="trends-chart-block">
-                  <div className="trends-chart-block__caption">
-                    Weight — {t.week.weight.value} {t.week.weight.unit}
-                    {t.week.weight.deltaWeek != null &&
-                      ` (${t.week.weight.deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(t.week.weight.deltaWeek)} ${t.week.weight.unit} this week)`}
-                  </div>
-                  <Sparkline points={t.week.weightSeries} color="var(--ok)" />
-                </div>
-              )}
-              <div className="trends-dotrows">
-                {t.week.checklist.map((c) => (
-                  <ChecklistPercentRow
-                    key={c.id}
-                    item={c}
-                    pct={c.total ? Math.round((c.count / c.total) * 100) : 0}
-                    caption={`${c.count}/${c.total} days`}
-                  />
-                ))}
-              </div>
-              {t.week.medsGiven > 0 && (
-                <p className="trends-all__row">Meds given: {t.week.medsGiven}</p>
-              )}
-              {t.week.insight && (
-                <div className="notice-card notice-card--headsup trends-all__insight">
-                  <p className="notice-card__body">{t.week.insight}</p>
-                </div>
-              )}
-
-              {t.month ? (
-                <>
-                  <div className="trends-all__section-label">This month</div>
-                  <div className="trends-hero trends-hero--compact">
-                    <p className="trends-hero__caption">Monthly care consistency</p>
-                    <GaugeDial
-                      pct={monthPct}
-                      value={`${monthPct}%`}
-                      label={gaugeLabel(monthPct)}
-                      color={statusColor(monthPct)}
-                      size={64}
-                    />
-                  </div>
-                  {t.month.headline && (
-                    <div className="notice-card notice-card--headsup trends-all__insight">
-                      <p className="notice-card__body">{t.month.headline}</p>
-                    </div>
-                  )}
-                  <div className="trends-chart-block">
-                    <div className="trends-chart-block__caption">
-                      Mood
-                      {monthMood && <span className="trends-status" style={{ color: monthMood.color }}> · {monthMood.label}</span>}
-                      {t.month.moodAvgLastMonth != null && ` (last month: ${t.month.moodAvgLastMonth.toFixed(1)})`}
-                    </div>
-                    <Sparkline points={t.month.moodSeries} color="var(--primary)" />
-                  </div>
-                  {t.month.weightSeries.some((p) => p.value !== null) && (
-                    <div className="trends-chart-block">
-                      <div className="trends-chart-block__caption">Weight{t.month.weightUnit && ` (${t.month.weightUnit})`}</div>
-                      <Sparkline points={t.month.weightSeries} color="var(--ok)" />
-                    </div>
-                  )}
-                  <div className="trends-dotrows">
-                    {t.month.checklist.map((c) => (
-                      <ChecklistPercentRow key={c.id} item={c} pct={c.pctThis} caption={`last month: ${c.pctLast}%`} />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="trends-all__upgrade">
-                  {/* App Store 3.1.1: no external-purchase steering on iOS */}
-                  Monthly trends are a paid feature.{' '}
-                  {!isNative && (
-                    <button className="btn btn--link" onClick={onUpgrade}>
-                      Upgrade to unlock →
-                    </button>
-                  )}
-                </p>
-              )}
-            </section>
-          );
-        })
+        <MonthlyTrendsView plan={plan} onError={onError} onNotice={onNotice} onUpgrade={onUpgrade} />
       )}
     </div>
+  );
+}
+
+// Swipe-back-in-time boundary notice — same voice as the Daily tab's
+// (PetDailyHistory in this file): plan-aware, one line, no error styling.
+function historyLimitNotice(plan: 'free' | 'paid', unit: 'week' | 'month'): string {
+  return plan === 'paid'
+    ? 'That’s the end of the saved history.'
+    : `${unit === 'week' ? 'Weekly' : 'Monthly'} trends go back 2 weeks on your plan.`;
+}
+
+function WeeklyTrendsView({
+  plan,
+  onError,
+  onNotice,
+}: {
+  plan: 'free' | 'paid';
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<TrendsResponse<TrendsWeekPet> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getTrendsWeek(offset)
+      .then((res) => { if (!cancelled) setData(res); })
+      .catch((e: Error) => { if (!cancelled) onError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offset]);
+
+  function step(direction: 'back' | 'forward') {
+    if (direction === 'forward') {
+      if (offset <= 0) return;
+      hapticTap();
+      setOffset((o) => o - 1);
+      return;
+    }
+    if (data && offset >= data.maxOffset) {
+      onNotice(historyLimitNotice(plan, 'week'));
+      return;
+    }
+    hapticTap();
+    setOffset((o) => o + 1);
+  }
+  useSwipeStep(step);
+
+  async function handleSend() {
+    setSending(true);
+    try {
+      const res = await sendTrendsReport('week');
+      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (loading || !data) return <p className="trends-all__loading">Loading trends…</p>;
+
+  return (
+    <>
+      <TrendsRangeNav unit="week" offset={data.offset} maxOffset={data.maxOffset} rangeStart={data.rangeStart} rangeEnd={data.rangeEnd} onStep={step} />
+      {offset === 0 && (
+        <div className="trends-all__send-buttons">
+          <button className="btn btn--link btn--sm" disabled={sending} onClick={() => void handleSend()}>
+            {sending ? 'Sending…' : 'Email this week →'}
+          </button>
+        </div>
+      )}
+      {data.pets.map((t) => {
+        const mood = t.moodAvg !== null ? moodStatus(t.moodAvg) : null;
+        return (
+          <section key={t.petId} className="card trends-all__pet">
+            <div className="trends-hero">
+              <div className="trends-hero__text">
+                <h2 className="trends-all__pet-name">{t.name}</h2>
+                <p className="trends-hero__caption">Care consistency</p>
+              </div>
+              <GaugeDial
+                pct={t.careConsistency}
+                value={`${t.careConsistency}%`}
+                label={gaugeStatusLabel(t.careConsistency)}
+                color={statusColor(t.careConsistency)}
+              />
+            </div>
+            <div className="trends-chart-block">
+              <div className="trends-chart-block__caption">
+                Mood
+                {mood && <span className="trends-status" style={{ color: mood.color }}> · {mood.label}</span>}
+              </div>
+              <Sparkline points={t.moodSeries} color="var(--primary)" />
+            </div>
+            {t.weight && (
+              <div className="trends-chart-block">
+                <div className="trends-chart-block__caption">
+                  Weight — {t.weight.value} {t.weight.unit}
+                  {t.weight.deltaWeek != null &&
+                    ` (${t.weight.deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(t.weight.deltaWeek)} ${t.weight.unit})`}
+                </div>
+                <Sparkline points={t.weightSeries} color="var(--ok)" />
+              </div>
+            )}
+            <div className="trends-dotrows">
+              {t.checklist.map((c) => (
+                <ChecklistPercentRow
+                  key={c.id}
+                  item={c}
+                  pct={c.total ? Math.round((c.count / c.total) * 100) : 0}
+                  caption={`${c.count}/${c.total} days`}
+                />
+              ))}
+            </div>
+            {t.medsGiven > 0 && <p className="trends-all__row">Meds given: {t.medsGiven}</p>}
+            {t.insight && (
+              <div className="notice-card notice-card--headsup trends-all__insight">
+                <p className="notice-card__body">{t.insight}</p>
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </>
+  );
+}
+
+function MonthlyTrendsView({
+  plan,
+  onError,
+  onNotice,
+  onUpgrade,
+}: {
+  plan: 'free' | 'paid';
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+  onUpgrade: () => void;
+}) {
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<TrendsResponse<TrendsMonthPet> | null>(null);
+  const [loading, setLoading] = useState(plan === 'paid');
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    if (plan !== 'paid') return;
+    let cancelled = false;
+    setLoading(true);
+    getTrendsMonth(offset)
+      .then((res) => { if (!cancelled) setData(res); })
+      .catch((e: Error) => { if (!cancelled) onError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offset, plan]);
+
+  function step(direction: 'back' | 'forward') {
+    if (plan !== 'paid') return;
+    if (direction === 'forward') {
+      if (offset <= 0) return;
+      hapticTap();
+      setOffset((o) => o - 1);
+      return;
+    }
+    if (data && offset >= data.maxOffset) {
+      onNotice(historyLimitNotice(plan, 'month'));
+      return;
+    }
+    hapticTap();
+    setOffset((o) => o + 1);
+  }
+  useSwipeStep(step);
+
+  async function handleSend() {
+    setSending(true);
+    try {
+      const res = await sendTrendsReport('month');
+      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (plan !== 'paid') {
+    return (
+      <p className="trends-all__upgrade">
+        {/* App Store 3.1.1: no external-purchase steering on iOS */}
+        Monthly trends are a paid feature.{' '}
+        {!isNative && (
+          <button className="btn btn--link" onClick={onUpgrade}>
+            Upgrade to unlock →
+          </button>
+        )}
+      </p>
+    );
+  }
+
+  if (loading || !data) return <p className="trends-all__loading">Loading trends…</p>;
+
+  return (
+    <>
+      <TrendsRangeNav unit="month" offset={data.offset} maxOffset={data.maxOffset} rangeStart={data.rangeStart} rangeEnd={data.rangeEnd} onStep={step} />
+      {offset === 0 && (
+        <div className="trends-all__send-buttons">
+          <button className="btn btn--link btn--sm" disabled={sending} onClick={() => void handleSend()}>
+            {sending ? 'Sending…' : 'Email this month →'}
+          </button>
+        </div>
+      )}
+      {data.pets.map((m) => {
+        const mood = m.moodAvg !== null ? moodStatus(m.moodAvg) : null;
+        return (
+          <section key={m.petId} className="card trends-all__pet">
+            <div className="trends-hero">
+              <div className="trends-hero__text">
+                <h2 className="trends-all__pet-name">{m.name}</h2>
+                <p className="trends-hero__caption">Care consistency</p>
+              </div>
+              <GaugeDial
+                pct={m.careConsistency}
+                value={`${m.careConsistency}%`}
+                label={gaugeStatusLabel(m.careConsistency)}
+                color={statusColor(m.careConsistency)}
+              />
+            </div>
+            {m.headline && (
+              <div className="notice-card notice-card--headsup trends-all__insight">
+                <p className="notice-card__body">{m.headline}</p>
+              </div>
+            )}
+            <div className="trends-chart-block">
+              <div className="trends-chart-block__caption">
+                Mood
+                {mood && <span className="trends-status" style={{ color: mood.color }}> · {mood.label}</span>}
+                {m.moodAvgLastMonth != null && ` (prior period: ${m.moodAvgLastMonth.toFixed(1)})`}
+              </div>
+              <Sparkline points={m.moodSeries} color="var(--primary)" />
+            </div>
+            {m.weightSeries.some((p) => p.value !== null) && (
+              <div className="trends-chart-block">
+                <div className="trends-chart-block__caption">Weight{m.weightUnit && ` (${m.weightUnit})`}</div>
+                <Sparkline points={m.weightSeries} color="var(--ok)" />
+              </div>
+            )}
+            <div className="trends-dotrows">
+              {m.checklist.map((c) => (
+                <ChecklistPercentRow key={c.id} item={c} pct={c.pctThis} caption={`prior: ${c.pctLast}%`} />
+              ))}
+            </div>
+            {m.medsGiven > 0 && <p className="trends-all__row">Meds given: {m.medsGiven}</p>}
+          </section>
+        );
+      })}
+    </>
   );
 }
 
@@ -4865,6 +5219,829 @@ export function PresentScreen({
         )}
         {ordered.length > 1 && (
           <span className="present__counter">{current + 1} / {ordered.length}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- photo confirm (swipe-right camera capture) ----
+// Shown as soon as the hidden camera <input> returns a file. Save/Discard,
+// then a pet picker only when there's more than one pet (skip straight to
+// upload for a single-pet account). A 409 from the daily save cap — the
+// ONLY place that limit is ever surfaced — closes this screen and shows up
+// in the shared error banner, same as every other error path in this app.
+// The native camera's own "Use Photo" screen already asked save-or-discard —
+// asking again here would be a redundant extra tap (Mark, 2026-07-13). A
+// single-pet account just needs a moment of "Saving…" feedback (auto-fires
+// on mount); a multi-pet account only needs to answer "which pet," so that's
+// the only interaction left. A ✕ stays as a pure cancel/escape hatch (e.g.
+// the camera fired by accident), not framed as "discard this good photo."
+function PhotoConfirmScreen({
+  file,
+  pets,
+  saving,
+  onSave,
+  onDiscard,
+}: {
+  file: File;
+  pets: Pet[];
+  saving: boolean;
+  onSave: (petId: string) => void;
+  onDiscard: () => void;
+}) {
+  const [previewUrl] = useState(() => URL.createObjectURL(file));
+  useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !saving) onDiscard();
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onDiscard, saving]);
+
+  const onlyPet = pets.length === 1 ? pets[0] : null;
+  useEffect(() => {
+    if (onlyPet && !saving) onSave(onlyPet.id);
+    // Fire once, right when this single-pet screen mounts — not on every
+    // `saving` flip (that would re-trigger the save after it completes).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="photo-confirm" role="dialog" aria-label={onlyPet ? 'Saving photo' : 'Save photo'}>
+      {!saving && (
+        <button className="photo-confirm__exit" onClick={onDiscard} aria-label="Cancel">
+          ✕
+        </button>
+      )}
+      <img src={previewUrl} alt="" className="photo-confirm__preview" />
+      {onlyPet ? (
+        <p className="photo-confirm__status">Saving…</p>
+      ) : (
+        <div className="photo-confirm__picker">
+          <p className="photo-confirm__picker-title">Save to which pet?</p>
+          <div className="photo-confirm__picker-grid">
+            {pets.map((pet) => (
+              <button
+                key={pet.id}
+                type="button"
+                className="photo-confirm__picker-pet"
+                onClick={() => onSave(pet.id)}
+                disabled={saving}
+              >
+                <PetAvatar pet={pet} size={56} />
+                <span>{pet.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- walk tracking (the 🚶 header button — GPS session, then a multi-pet
+// picker since one walk can cover more than one pet) ----
+
+// Pure math, no dependency — great-circle distance between two GPS fixes.
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6_371_000; // Earth radius, meters
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+// Foreground-only tracking (no "Always" location permission, no background
+// App Store review complexity — confirmed with Mark, 2026-07-13). Three
+// internal phases: 'ready' (requesting permission + first GPS fix — "Get
+// ready for a walk…"), 'active' (live elapsed/distance), 'summary' (ended,
+// multi-select which pet(s) were on it, save). GPS fixes closer than 3m
+// apart are ignored as jitter rather than counted as movement.
+function WalkScreen({
+  pets,
+  onSaved,
+  onCancel,
+  onError,
+}: {
+  pets: Pet[];
+  onSaved: (msg: string) => void;
+  onCancel: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [phase, setPhase] = useState<'ready' | 'active' | 'summary'>('ready');
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [distanceMeters, setDistanceMeters] = useState(0);
+  const [selectedPetIds, setSelectedPetIds] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const startedAtRef = useRef<number | null>(null);
+  const endedAtRef = useRef<number | null>(null);
+  const lastCoordRef = useRef<{ lat: number; lon: number } | null>(null);
+  const watchIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        let perm = await Geolocation.checkPermissions();
+        if (perm.location !== 'granted') perm = await Geolocation.requestPermissions();
+        if (perm.location !== 'granted') {
+          if (!cancelled) {
+            onError("Location access is needed to track a walk — check Settings and try again.");
+            onCancel();
+          }
+          return;
+        }
+        startedAtRef.current = Date.now();
+        const id = await Geolocation.watchPosition({ enableHighAccuracy: true }, (pos) => {
+          if (!pos) return;
+          const { latitude, longitude } = pos.coords;
+          if (lastCoordRef.current) {
+            const d = haversineMeters(lastCoordRef.current.lat, lastCoordRef.current.lon, latitude, longitude);
+            if (d > 3) setDistanceMeters((prev) => prev + d);
+          }
+          lastCoordRef.current = { lat: latitude, lon: longitude };
+        });
+        if (cancelled) {
+          void Geolocation.clearWatch({ id });
+          return;
+        }
+        watchIdRef.current = id;
+        setPhase('active');
+      } catch (e) {
+        if (!cancelled) {
+          onError(e instanceof Error ? e.message : 'Could not start location tracking');
+          onCancel();
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (phase !== 'active') return;
+    const timer = setInterval(() => {
+      if (startedAtRef.current) setElapsedMs(Date.now() - startedAtRef.current);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [phase]);
+
+  function handleEndWalk() {
+    if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    endedAtRef.current = Date.now();
+    setPhase('summary');
+    if (pets.length === 1) setSelectedPetIds(new Set([pets[0].id]));
+  }
+
+  function togglePet(petId: string) {
+    setSelectedPetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(petId)) next.delete(petId);
+      else next.add(petId);
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    if (selectedPetIds.size === 0 || !startedAtRef.current || !endedAtRef.current) return;
+    setSaving(true);
+    try {
+      await createWalk(
+        [...selectedPetIds],
+        new Date(startedAtRef.current).toISOString(),
+        new Date(endedAtRef.current).toISOString(),
+        distanceMeters,
+      );
+      onSaved('Walk saved.');
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not save the walk');
+      setSaving(false);
+    }
+  }
+
+  function handleCancel() {
+    if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    onCancel();
+  }
+
+  const miles = (distanceMeters / 1609.344).toFixed(2);
+
+  return (
+    <div className="walk-screen" role="dialog" aria-label="Walk tracking">
+      {/* Escape hatch on EVERY phase — an accidental 🚶 tap must never force
+          saving a junk walk. The summary phase also gets an explicit Discard
+          below (Mark hit exactly this trap, 2026-07-12). */}
+      <button
+        className="walk-screen__exit"
+        onClick={handleCancel}
+        disabled={saving}
+        aria-label="Cancel walk"
+      >
+        ✕
+      </button>
+      {phase === 'ready' && (
+        <div className="walk-screen__ready">
+          <span className="walk-screen__icon" aria-hidden="true">🚶</span>
+          <p>Get ready for a walk…</p>
+        </div>
+      )}
+      {phase === 'active' && (
+        <div className="walk-screen__active">
+          <div className="walk-screen__stat">{formatElapsed(elapsedMs)}</div>
+          <div className="walk-screen__stat-label">Elapsed</div>
+          <div className="walk-screen__stat">{miles} mi</div>
+          <div className="walk-screen__stat-label">Distance</div>
+          <button type="button" className="btn btn--primary btn--lg" onClick={handleEndWalk}>
+            End Walk
+          </button>
+        </div>
+      )}
+      {phase === 'summary' && (
+        <div className="walk-screen__summary">
+          <p className="walk-screen__summary-stats">
+            {formatElapsed(elapsedMs)} · {miles} mi
+          </p>
+          <p className="photo-confirm__picker-title">Who was on this walk?</p>
+          <div className="photo-confirm__picker-grid">
+            {pets.map((pet) => (
+              <button
+                key={pet.id}
+                type="button"
+                className={`walk-screen__picker-pet${selectedPetIds.has(pet.id) ? ' walk-screen__picker-pet--selected' : ''}`}
+                onClick={() => togglePet(pet.id)}
+                disabled={saving}
+              >
+                <PetAvatar pet={pet} size={56} />
+                <span>{pet.name}</span>
+                {selectedPetIds.has(pet.id) && (
+                  <span className="walk-screen__picker-check" aria-hidden="true">✓</span>
+                )}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleSave}
+            disabled={saving || selectedPetIds.size === 0}
+          >
+            {saving ? 'Saving…' : 'Save Walk'}
+          </button>
+          <button
+            type="button"
+            className="btn btn--link walk-screen__discard"
+            onClick={handleCancel}
+            disabled={saving}
+          >
+            Discard walk
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- achievements (swipe-left from overview) ----
+// Live rolling stat cards computed server-side (GET /achievements), each a
+// button pushing to that card's badge ladder (BadgeScreen below). Cats get
+// no walk cards; every species gets the care-streak card. An earned-count
+// dot on the card hints there's something behind the tap.
+function AchievementsAllScreen({
+  onError,
+  onLoaded,
+  onOpenBadges,
+}: {
+  onError: (msg: string | null) => void;
+  onLoaded: (pets: PetAchievements[]) => void;
+  onOpenBadges: (petId: string, cardId: string) => void;
+}) {
+  const [pets, setPets] = useState<PetAchievements[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getAchievements();
+        if (!cancelled) {
+          setPets(res.pets);
+          onLoaded(res.pets); // cached for the badge drill-down screen
+        }
+      } catch (err) {
+        if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load achievements');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onError]);
+
+  return (
+    <div className="albums-all">
+      <h1 className="large-title">Achievements</h1>
+      {pets === null ? (
+        <p className="albums-all__loading">Loading…</p>
+      ) : pets.length === 0 ? (
+        <p className="albums-all__loading">Add a pet to start earning achievements.</p>
+      ) : (
+        pets.map((pet) => (
+          <section key={pet.petId} className="albums-all__pet">
+            <div className="albums-all__pet-header">
+              <span>{pet.petName}</span>
+            </div>
+            <div className="achievements__grid">
+              {pet.cards.map((card) => {
+                const earned = card.badges.filter((b) => b.earnedAt).length;
+                return (
+                  <button
+                    key={card.id}
+                    type="button"
+                    className="achievements__card"
+                    onClick={() => onOpenBadges(pet.petId, card.id)}
+                  >
+                    <span className="achievements__card-icon" aria-hidden="true">{card.icon}</span>
+                    <span className="achievements__card-value">{card.value}</span>
+                    <span className="achievements__card-label">{card.label}</span>
+                    <span className="achievements__card-badges">
+                      🏅 {earned}/{card.badges.length}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ))
+      )}
+    </div>
+  );
+}
+
+// One card's badge ladder: earned trophies (congrats line + date, "New!"
+// ribbon while fresh) on top, still-locked goals dimmed below. Earned state
+// is server-persisted and never un-earns — the card's live number can drop
+// (e.g. a deleted walk) while the trophies stay.
+function BadgeScreen({
+  petId,
+  cardId,
+  preloaded,
+  onBack,
+  onError,
+}: {
+  petId: string;
+  cardId: string;
+  preloaded: PetAchievements[] | null;
+  onBack: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  // Normally served straight from the achievements screen's fetch (this is
+  // always reached by tapping a card there); the fallback fetch only runs if
+  // that cache is somehow empty (e.g. after an error on the parent screen).
+  const [pets, setPets] = useState<PetAchievements[] | null>(preloaded);
+
+  useEffect(() => {
+    if (preloaded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getAchievements();
+        if (!cancelled) setPets(res.pets);
+      } catch (err) {
+        if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load badges');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onError]);
+
+  const pet = pets?.find((p) => p.petId === petId);
+  const card = pet?.cards.find((c) => c.id === cardId);
+  const earned = card?.badges.filter((b) => b.earnedAt) ?? [];
+  const locked = card?.badges.filter((b) => !b.earnedAt) ?? [];
+  // daysUntil() is negative for past dates: earned 2 days ago -> -2.
+  const isNew = (earnedAt: string) => -daysUntil(earnedAt) < ACHIEVEMENTS_CONFIG.NEW_BADGE_RIBBON_DAYS;
+
+  return (
+    <div className="screen-view">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ‹ Achievements
+        </button>
+        <span className="screen-nav__title">Badges</span>
+      </nav>
+      <div className="screen-view__body">
+        {pets === null ? (
+          <p className="albums-all__loading">Loading…</p>
+        ) : !pet || !card ? (
+          <p className="albums-all__loading">Couldn't find that achievement.</p>
+        ) : (
+          <div className="badges">
+            <div className="badges__hero">
+              <span className="badges__hero-icon" aria-hidden="true">{card.icon}</span>
+              <div>
+                <h1 className="badges__hero-title">{card.label}</h1>
+                <p className="badges__hero-sub">
+                  {pet.petName} · now: {card.value} · {earned.length} of {card.badges.length} badges earned
+                </p>
+              </div>
+            </div>
+
+            <h2 className="badges__section-title">Earned</h2>
+            {earned.length === 0 ? (
+              <p className="badges__empty">Nothing earned yet — the first badge is the easiest one.</p>
+            ) : (
+              <ul className="badges__list">
+                {earned.map((b) => (
+                  <li key={b.id} className="badge-row badge-row--earned">
+                    <span className="badge-row__icon" aria-hidden="true">{b.icon}</span>
+                    <div className="badge-row__text">
+                      <span className="badge-row__name">
+                        {b.name}
+                        {b.earnedAt && isNew(b.earnedAt) && <span className="badge-row__new">New!</span>}
+                      </span>
+                      <span className="badge-row__desc">🎉 {b.congrats}</span>
+                      {b.earnedAt && <span className="badge-row__date">Earned {formatDate(b.earnedAt)}</span>}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {locked.length > 0 && (
+              <>
+                <h2 className="badges__section-title">Still to earn</h2>
+                <ul className="badges__list">
+                  {locked.map((b) => (
+                    <li key={b.id} className="badge-row badge-row--locked">
+                      <span className="badge-row__icon" aria-hidden="true">{b.icon}</span>
+                      <div className="badge-row__text">
+                        <span className="badge-row__name">{b.name}</span>
+                        <span className="badge-row__desc">{b.description}</span>
+                      </div>
+                      <span className="badge-row__lock" aria-hidden="true">🔒</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- albums (swipe-right from overview) ----
+// v1 scope, deliberately simple: one section per pet, a thumbnail grid,
+// tapping a thumbnail opens the full-screen viewer below. Mark flagged the
+// presentation as likely needing another pass once he sees it — this favors
+// a working mechanism over polish, same call as the rest of this session.
+function AlbumsAllScreen({
+  pets,
+  onError,
+  onNotice,
+  onAddPet,
+  onOpenPet,
+}: {
+  pets: Pet[];
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+  onAddPet: () => void;
+  onOpenPet: (petId: string) => void;
+}) {
+  const [byPet, setByPet] = useState<Record<string, Photo[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [viewer, setViewer] = useState<{ petId: string; index: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const entries = await Promise.all(
+          pets.map(async (pet) => [pet.id, (await listPhotos(pet.id)).photos] as const),
+        );
+        if (!cancelled) setByPet(Object.fromEntries(entries));
+      } catch (err) {
+        if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load albums');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // pets.length, not the pets array itself — a new array identity from an
+    // unrelated reload (e.g. after saving a doc) shouldn't re-fetch every
+    // pet's photos again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pets.length]);
+
+  async function handleDelete(petId: string, photoId: string) {
+    try {
+      await deletePhoto(petId, photoId);
+      setByPet((prev) => ({
+        ...prev,
+        [petId]: (prev[petId] ?? []).filter((p) => p.id !== photoId),
+      }));
+      onNotice('Photo deleted');
+      setViewer(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not delete the photo');
+    }
+  }
+
+  if (pets.length === 0) {
+    return (
+      <div className="empty-overview">
+        <span className="empty-state__icon" aria-hidden="true">🐾</span>
+        <p>Albums start with a pet. Add yours to get going.</p>
+        <button className="btn btn--primary" onClick={onAddPet}>
+          Add your first pet
+        </button>
+      </div>
+    );
+  }
+
+  const viewerPet = viewer ? pets.find((p) => p.id === viewer.petId) : undefined;
+  const viewerPhotos = viewer ? (byPet[viewer.petId] ?? []) : [];
+
+  return (
+    <div className="albums-all">
+      <h1 className="large-title">Albums</h1>
+      {loading ? (
+        <p className="albums-all__loading">Loading…</p>
+      ) : (
+        pets.map((pet) => {
+          const photos = byPet[pet.id] ?? [];
+          // Capped preview — dozens of photos would otherwise overwhelm the
+          // first screen (Mark, 2026-07-13). "See all" pushes to a per-pet
+          // screen with the full set grouped by day.
+          const preview = photos.slice(0, ALBUM_PREVIEW_COUNT);
+          return (
+            <section key={pet.id} className="albums-all__pet">
+              <div className="albums-all__pet-header">
+                <PetAvatar pet={pet} size={40} />
+                <span>{pet.name}</span>
+                <span className="albums-all__pet-count">
+                  {photos.length === 0 ? 'No photos yet' : `${photos.length} photo${photos.length === 1 ? '' : 's'}`}
+                </span>
+              </div>
+              {preview.length > 0 && (
+                <div className="albums-all__grid">
+                  {preview.map((photo, i) => (
+                    <button
+                      key={photo.id}
+                      type="button"
+                      className="albums-all__thumb"
+                      onClick={() => setViewer({ petId: pet.id, index: i })}
+                    >
+                      <img src={photo.url} alt="" loading="lazy" />
+                    </button>
+                  ))}
+                </div>
+              )}
+              {photos.length > ALBUM_PREVIEW_COUNT && (
+                <button
+                  type="button"
+                  className="btn btn--link albums-all__see-all"
+                  onClick={() => onOpenPet(pet.id)}
+                >
+                  See all {photos.length} photos →
+                </button>
+              )}
+            </section>
+          );
+        })
+      )}
+      {viewer && viewerPet && viewerPhotos.length > 0 && (
+        <PhotoViewerScreen
+          pet={viewerPet}
+          photos={viewerPhotos.slice(0, ALBUM_PREVIEW_COUNT)}
+          startIndex={viewer.index}
+          onExit={() => setViewer(null)}
+          onDelete={(photoId) => handleDelete(viewer.petId, photoId)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Groups a (newest-first) photo list into day buckets, day-newest-first —
+// Map preserves insertion order, so no separate sort is needed as long as
+// the input is already newest-first (which GET /pets/{petId}/photos returns).
+function groupPhotosByDay(photos: Photo[]): { day: string; photos: Photo[] }[] {
+  const map = new Map<string, Photo[]>();
+  for (const photo of photos) {
+    const day = toYMD(new Date(photo.uploadedAt));
+    if (!map.has(day)) map.set(day, []);
+    map.get(day)!.push(photo);
+  }
+  return [...map.entries()].map(([day, dayPhotos]) => ({ day, photos: dayPhotos }));
+}
+
+// One pet's full album, reached via "See all" from AlbumsAllScreen — the
+// day-grouped view a dozens-of-photos collection actually needs (v1's
+// combined overview screen deliberately only shows a capped preview).
+function PetAlbumScreen({
+  pet,
+  onError,
+  onNotice,
+}: {
+  pet: Pet;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [photos, setPhotos] = useState<Photo[] | null>(null);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await listPhotos(pet.id);
+        if (!cancelled) setPhotos(res.photos);
+      } catch (err) {
+        if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load the album');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pet.id, onError]);
+
+  async function handleDelete(photoId: string) {
+    if (!photos) return;
+    try {
+      await deletePhoto(pet.id, photoId);
+      setPhotos(photos.filter((p) => p.id !== photoId));
+      onNotice('Photo deleted');
+      setViewerIndex(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not delete the photo');
+    }
+  }
+
+  const groups = photos ? groupPhotosByDay(photos) : [];
+  // Index within the FULL flat list (not the day's subset) — so the viewer's
+  // swipe carries across day boundaries instead of being trapped in one day.
+  const indexById = new Map((photos ?? []).map((p, i) => [p.id, i]));
+
+  return (
+    <div className="albums-all pet-album">
+      <div className="albums-all__pet-header">
+        <PetAvatar pet={pet} size={40} />
+        <h1 className="large-title pet-album__title">{pet.name}'s photos</h1>
+      </div>
+      {photos === null ? (
+        <p className="albums-all__loading">Loading…</p>
+      ) : photos.length === 0 ? (
+        <p className="albums-all__loading">No photos yet.</p>
+      ) : (
+        groups.map((group) => (
+          <section key={group.day} className="pet-album__day">
+            <div className="pet-album__day-header">{formatDate(group.day)}</div>
+            <div className="albums-all__grid">
+              {group.photos.map((photo) => (
+                <button
+                  key={photo.id}
+                  type="button"
+                  className="albums-all__thumb"
+                  onClick={() => setViewerIndex(indexById.get(photo.id) ?? 0)}
+                >
+                  <img src={photo.url} alt="" loading="lazy" />
+                </button>
+              ))}
+            </div>
+          </section>
+        ))
+      )}
+      {photos && viewerIndex !== null && (
+        <PhotoViewerScreen
+          pet={pet}
+          photos={photos}
+          startIndex={viewerIndex}
+          onExit={() => setViewerIndex(null)}
+          onDelete={handleDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+// Full-screen swipeable viewer — same CSS scroll-snap/dots/counter structure
+// as PresentScreen above, adapted for photos (image-only, plus a delete
+// action; no PDF branch since album photos are always images).
+function PhotoViewerScreen({
+  pet,
+  photos,
+  startIndex,
+  onExit,
+  onDelete,
+}: {
+  pet: Pet;
+  photos: Photo[];
+  startIndex: number;
+  onExit: () => void;
+  onDelete: (photoId: string) => void;
+}) {
+  const [current, setCurrent] = useState(startIndex);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const slidesRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onExit();
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onExit]);
+
+  // Swiping to a different photo cancels an in-flight "confirm delete" —
+  // it should never apply to a photo the user isn't looking at anymore.
+  useEffect(() => setConfirmingDelete(false), [current]);
+
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = slidesRef.current;
+    if (!el) return;
+    el.scrollLeft = startIndex * el.clientWidth;
+    // Only on mount — scrolling programmatically again on every render
+    // would fight the user's own swipe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleScroll() {
+    const el = slidesRef.current;
+    if (!el) return;
+    setCurrent(Math.round(el.scrollLeft / el.clientWidth));
+  }
+
+  return (
+    <div className="present" role="dialog" aria-label={`${pet.name}'s photos`}>
+      <button className="present__exit" onClick={onExit} aria-label="Exit viewer">✕</button>
+      {confirmingDelete ? (
+        <button
+          className="photo-viewer__delete photo-viewer__delete--confirm"
+          onClick={() => onDelete(photos[current].id)}
+        >
+          Confirm delete
+        </button>
+      ) : (
+        <button
+          className="photo-viewer__delete"
+          onClick={() => setConfirmingDelete(true)}
+          aria-label="Delete photo"
+        >
+          🗑️
+        </button>
+      )}
+
+      <div className="present__slides" ref={slidesRef} onScroll={handleScroll}>
+        {photos.map((photo) => (
+          <div key={photo.id} className="present__slide">
+            <div className="present__doc-content">
+              <img src={photo.url} alt="" className="present__doc-img" loading="lazy" />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="present__footer">
+        <span className="present__pet-name">{pet.name}</span>
+        {photos.length > 1 && (
+          <div className="present__dots" aria-hidden="true">
+            {photos.map((_, i) => (
+              <span key={i} className={`present__dot${i === current ? ' present__dot--active' : ''}`} />
+            ))}
+          </div>
+        )}
+        {photos.length > 1 && (
+          <span className="present__counter">{current + 1} / {photos.length}</span>
         )}
       </div>
     </div>

@@ -26,7 +26,11 @@ const env = Object.fromEntries(
 );
 
 const EMAIL = 'demo@petshots.app';
-const PASSWORD = process.env.DEMO_PASSWORD ?? 'Petshots#Demo2026';
+const PASSWORD = process.env.DEMO_PASSWORD; // never hardcode - this is a real production account
+if (!PASSWORD) {
+  console.error('Set DEMO_PASSWORD (credentials live in Claude memory, never in git).');
+  process.exit(1);
+}
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 

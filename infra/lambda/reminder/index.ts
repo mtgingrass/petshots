@@ -6,240 +6,33 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import webpush from 'web-push';
-import { randomUUID, sign } from 'node:crypto';
-import * as http2 from 'node:http2';
+import { randomUUID } from 'node:crypto';
 // All product-tunable numbers (cadences, windows, TTLs) live in one
 // documented file — edit values there, not here.
-import { REMINDERS, DIGEST, PUSH, EMAIL, LIMITS_FREE, DAILY } from '../shared/config';
+import { REMINDERS, DIGEST, EMAIL, LIMITS_FREE, DAILY, WEIGHTS } from '../shared/config';
 // The actual sentences these emails/pushes say live separately from this
 // file's "how it's built and sent" logic — see copy/reminder.ts's header.
-import { reminderCopy, nudgeCopy, digestCopy, digestInsightCopy, monthlyReportCopy } from '../shared/copy';
+import { reminderCopy, nudgeCopy, weightNudgeCopy, digestCopy, digestInsightCopy, monthlyReportCopy } from '../shared/copy';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the api Lambda's GET /trends — see that file's header for why.
 import { mergedDailyEntries, rangeStats, pickInsight, overallCompletionPct } from '../shared/dailyStats';
+import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
+// Web push (VAPID) + native iOS push (APNs) — shared with the api Lambda's
+// real-time pushes (e.g. "new photo added"). See that file's header.
+import { listPushSubs as listPushSubsShared, sendPushes as sendPushesShared } from '../shared/push';
 
 const s3 = new S3Client({
   requestChecksumCalculation: 'WHEN_REQUIRED',
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const ses = new SESv2Client({ region: 'us-east-1' });
-const sm = new SecretsManagerClient({});
 const BUCKET = process.env.UPLOADS_BUCKET!;
-const VAPID_SECRET_NAME = process.env.VAPID_SECRET_NAME ?? 'petshots/vapid';
 
-// ---- web push ----
-// VAPID keys from Secrets Manager, loaded lazily and cached per container.
-// Push mirrors the reminder email: same trigger, same headline, tap opens
-// the dashboard. A device the push service rejects (404/410 = expired or
-// revoked subscription) is deleted so we never keep knocking.
-interface WebPushSub {
-  endpoint: string;
-  keys: { p256dh: string; auth: string };
-}
-// Native iOS devices store an APNs device token instead of a web endpoint.
-interface ApnsSub {
-  platform: 'apns';
-  token: string;
-}
-type PushSub = WebPushSub | ApnsSub;
-let vapidReady: boolean | null = null;
-async function ensureVapid(): Promise<boolean> {
-  if (vapidReady !== null) return vapidReady;
-  try {
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: VAPID_SECRET_NAME }));
-    const cfg = JSON.parse(res.SecretString!) as {
-      publicKey: string;
-      privateKey: string;
-      subject: string;
-    };
-    webpush.setVapidDetails(cfg.subject, cfg.publicKey, cfg.privateKey);
-    vapidReady = true;
-  } catch (e) {
-    console.error('vapid secret unavailable — push disabled this run', e);
-    vapidReady = false;
-  }
-  return vapidReady;
-}
-
-async function listPushSubs(userPrefix: string): Promise<{ key: string; sub: PushSub }[]> {
-  const list = await s3.send(
-    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}push/` }),
-  );
-  const out: { key: string; sub: PushSub }[] = [];
-  for (const it of list.Contents ?? []) {
-    const raw = await readJson<WebPushSub & ApnsSub>(it.Key!);
-    if (!raw) continue;
-    if (raw.platform === 'apns' && typeof raw.token === 'string') {
-      out.push({ key: it.Key!, sub: { platform: 'apns', token: raw.token } });
-    } else if (raw.endpoint && raw.keys?.p256dh && raw.keys?.auth) {
-      out.push({ key: it.Key!, sub: { endpoint: raw.endpoint, keys: raw.keys } });
-    }
-  }
-  return out;
-}
-
-// ---- native iOS push (APNs, token-based auth) ----
-// Config from Secrets Manager `petshots/apns`:
-//   { teamId, keyId, privateKey (the .p8 PEM), bundleId, environment? }
-// environment: 'sandbox' for dev builds from Xcode, omit/'production' for
-// TestFlight + App Store. PLACEHOLDER until the Apple Developer account
-// exists — a missing or incomplete secret just skips iOS pushes (logged
-// once per run); email and web push are unaffected. Setup steps in IOS.md.
-const APNS_SECRET_NAME = process.env.APNS_SECRET_NAME ?? 'petshots/apns';
-interface ApnsConfig {
-  teamId: string;
-  keyId: string;
-  privateKey: string;
-  bundleId: string;
-  environment?: string;
-}
-let apnsCfg: ApnsConfig | null | undefined;
-async function ensureApns(): Promise<ApnsConfig | null> {
-  if (apnsCfg !== undefined) return apnsCfg;
-  try {
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: APNS_SECRET_NAME }));
-    const cfg = JSON.parse(res.SecretString!) as ApnsConfig;
-    const complete =
-      !!cfg.teamId && !!cfg.keyId && !!cfg.bundleId &&
-      typeof cfg.privateKey === 'string' && cfg.privateKey.includes('PRIVATE KEY');
-    apnsCfg = complete ? cfg : null;
-    if (!apnsCfg) console.log('apns secret incomplete/placeholder — iOS push skipped this run');
-  } catch {
-    apnsCfg = null;
-    console.log('apns secret unavailable — iOS push skipped (expected until Apple Developer setup)');
-  }
-  return apnsCfg;
-}
-
-// Provider JWT (ES256), cached and reissued after 45 min — Apple wants
-// tokens refreshed between 20 and 60 minutes.
-let apnsJwtCache: { jwt: string; iat: number } | null = null;
-function apnsJwt(cfg: ApnsConfig): string {
-  const now = Math.floor(Date.now() / 1000);
-  if (apnsJwtCache && now - apnsJwtCache.iat < 45 * 60) return apnsJwtCache.jwt;
-  const b64u = (s: string) => Buffer.from(s).toString('base64url');
-  const unsigned = `${b64u(JSON.stringify({ alg: 'ES256', kid: cfg.keyId }))}.${b64u(
-    JSON.stringify({ iss: cfg.teamId, iat: now }),
-  )}`;
-  // JWT ES256 wants the raw r||s signature, not ASN.1 DER.
-  const sig = sign('sha256', Buffer.from(unsigned), {
-    key: cfg.privateKey,
-    dsaEncoding: 'ieee-p1363',
-  });
-  apnsJwtCache = { jwt: `${unsigned}.${sig.toString('base64url')}`, iat: now };
-  return apnsJwtCache.jwt;
-}
-
-// One HTTP/2 POST per device token. Volume is a handful of devices per daily
-// run, so a connection per send is fine.
-function apnsSend(
-  cfg: ApnsConfig,
-  deviceToken: string,
-  payload: unknown,
-): Promise<{ status: number; reason?: string }> {
-  return new Promise((resolve, reject) => {
-    const host =
-      cfg.environment === 'sandbox' ? 'api.sandbox.push.apple.com' : 'api.push.apple.com';
-    const client = http2.connect(`https://${host}`);
-    client.on('error', reject);
-    const req = client.request({
-      ':method': 'POST',
-      ':path': `/3/device/${deviceToken}`,
-      authorization: `bearer ${apnsJwt(cfg)}`,
-      'apns-topic': cfg.bundleId,
-      'apns-push-type': 'alert',
-      'apns-priority': '10',
-      'apns-expiration': String(Math.floor(Date.now() / 1000) + PUSH.APNS_EXPIRY_SECONDS),
-    });
-    req.setTimeout(10_000, () => {
-      client.close();
-      reject(new Error('apns timeout'));
-    });
-    let status = 0;
-    let body = '';
-    req.on('response', (headers) => {
-      status = Number(headers[':status'] ?? 0);
-    });
-    req.on('data', (chunk: Buffer) => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      client.close();
-      let reason: string | undefined;
-      try {
-        reason = (JSON.parse(body) as { reason?: string }).reason;
-      } catch {
-        /* empty body on success */
-      }
-      resolve({ status, reason });
-    });
-    req.on('error', (e) => {
-      client.close();
-      reject(e);
-    });
-    req.end(JSON.stringify(payload));
-  });
-}
-
-async function sendPushes(
-  userPrefix: string,
-  title: string,
-  body: string,
-): Promise<number> {
-  const subs = await listPushSubs(userPrefix);
-  let sent = 0;
-  for (const { key, sub } of subs) {
-    // Native iOS device → APNs. Dead tokens (410 Unregistered, or 400
-    // BadDeviceToken from an env mismatch/uninstall) are pruned like
-    // expired web-push endpoints.
-    if ('token' in sub) {
-      const cfg = await ensureApns();
-      if (!cfg) continue;
-      try {
-        const res = await apnsSend(cfg, sub.token, {
-          aps: { alert: { title, body }, sound: 'default' },
-          url: '/dashboard',
-        });
-        if (res.status === 200) {
-          sent++;
-        } else if (
-          res.status === 410 ||
-          (res.status === 400 && res.reason === 'BadDeviceToken')
-        ) {
-          await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
-          console.log(`pruned dead APNs token ${key}`);
-        } else {
-          console.error(`apns push to ${key} failed: ${res.status} ${res.reason ?? ''}`);
-        }
-      } catch (e) {
-        console.error(`apns push to ${key} failed`, e);
-      }
-      continue;
-    }
-    if (!(await ensureVapid())) continue;
-    try {
-      await webpush.sendNotification(
-        sub as webpush.PushSubscription,
-        JSON.stringify({ title, body, url: `${APP_URL}/dashboard` }),
-        { TTL: PUSH.WEB_PUSH_TTL_SECONDS },
-      );
-      sent++;
-    } catch (e) {
-      const code = (e as { statusCode?: number }).statusCode;
-      if (code === 404 || code === 410) {
-        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
-        console.log(`pruned expired push subscription ${key}`);
-      } else {
-        console.error(`push to ${key} failed`, e);
-      }
-    }
-  }
-  return sent;
-}
 const FROM_EMAIL = process.env.FROM_EMAIL ?? EMAIL.FROM_EMAIL;
 const APP_URL = process.env.APP_URL ?? EMAIL.APP_URL;
+const listPushSubs = (userPrefix: string) => listPushSubsShared(BUCKET, userPrefix);
+const sendPushes = (userPrefix: string, title: string, body: string) =>
+  sendPushesShared(BUCKET, userPrefix, title, body, APP_URL);
 
 interface UserSettings {
   email?: string;
@@ -343,6 +136,12 @@ function daysUntil(day: string): number {
   return Math.round((d.getTime() - today.getTime()) / 86_400_000);
 }
 
+// Plain YYYY-MM-DD day difference (later - earlier), used for weight
+// staleness where both dates are already-known strings rather than "today."
+function daysBetweenDates(earlier: string, later: string): number {
+  return Math.round((Date.parse(`${later}T00:00:00Z`) - Date.parse(`${earlier}T00:00:00Z`)) / 86_400_000);
+}
+
 type Phase = 'overdue' | 'today' | 'upcoming';
 
 function phaseFor(days: number): Phase {
@@ -420,38 +219,6 @@ function isBirthdayToday(dob: string, today: Date): boolean {
     return !isLeap;
   }
   return false;
-}
-
-// ---- HTML email template ----
-// Table-based layout with inline styles — email clients strip <style> blocks
-// and don't support flexbox/grid, so everything is inlined. The plain-text
-// body stays the deliverability/accessibility fallback (SES sends both in
-// one Simple body); this is purely a nicer rendering of the same content.
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-function emailHtml(title: string, bodyHtml: string, footerHtml: string): string {
-  return `<!doctype html>
-<html>
-  <body style="margin:0;padding:0;background:#f5f4fb;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f4fb;padding:24px 0;">
-      <tr><td align="center">
-        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:480px;width:100%;">
-          <tr><td style="background:#6c5ce7;padding:20px 28px;">
-            <span style="font-size:20px;font-weight:700;color:#ffffff;">🐾 Petshots</span>
-          </td></tr>
-          <tr><td style="padding:28px;color:#1a1a2e;font-size:15px;line-height:1.55;">
-            <h1 style="margin:0 0 16px;font-size:18px;color:#1a1a2e;">${escapeHtml(title)}</h1>
-            ${bodyHtml}
-          </td></tr>
-          <tr><td style="padding:16px 28px 28px;color:#8a8a9a;font-size:12px;line-height:1.5;border-top:1px solid #eeeef5;">
-            ${footerHtml}
-          </td></tr>
-        </table>
-      </td></tr>
-    </table>
-  </body>
-</html>`;
 }
 
 function docBullet(d: DueDoc): string {
@@ -774,13 +541,16 @@ function addToDay(ymd: string, offset: { days?: number }): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Returns both the plain-text lines and a pre-rendered HTML card from one
+// stats pass — computing thisStats/lastStats twice (once per format) would
+// double the S3 reads mergedDailyEntries does for no reason.
 async function composeMonthlyReportForPet(
   petName: string,
   species: string | undefined,
   userPrefix: string,
   petId: string,
   todayKey: string,
-): Promise<string[] | null> {
+): Promise<{ text: string[]; html: string } | null> {
   const petPrefix = `${userPrefix}pets/${petId}/`;
   const [daily, weightsStored] = await Promise.all([
     readJson<DailyFileView>(`${petPrefix}daily.json`),
@@ -803,10 +573,15 @@ async function composeMonthlyReportForPet(
   const itemLabel = (id: string) => digestPresetName(id, species) ?? id;
 
   const lines = [petName, `  ${monthlyReportCopy.careConsistency(overallCompletionPct(thisStats, itemIds))}`];
-  if (thisStats.moodAvg !== null) lines.push(`  ${monthlyReportCopy.mood(thisStats.moodAvg, lastStats.moodAvg)}`);
+  const rows = [petRowHtml(escapeHtml(monthlyReportCopy.careConsistency(overallCompletionPct(thisStats, itemIds))))];
+  if (thisStats.moodAvg !== null) {
+    lines.push(`  ${monthlyReportCopy.mood(thisStats.moodAvg, lastStats.moodAvg)}`);
+    rows.push(petRowHtml(escapeHtml(monthlyReportCopy.mood(thisStats.moodAvg, lastStats.moodAvg))));
+  }
   for (const id of itemIds) {
     const pct = Math.round(((thisStats.checkCountsByItemId.get(id) ?? 0) / thisStats.totalDays) * 100);
     lines.push(`  ${itemLabel(id)}: ${pct}% of days`);
+    rows.push(petRowHtml(`${escapeHtml(itemLabel(id))}: ${pct}% of days`));
   }
   if (thisStats.weightLatest) {
     const delta =
@@ -814,10 +589,15 @@ async function composeMonthlyReportForPet(
         ? Math.round((thisStats.weightLatest.weight - thisStats.weightFirst.weight) * 100) / 100
         : null;
     lines.push(`  ${monthlyReportCopy.weight(thisStats.weightLatest.weight, thisStats.weightLatest.unit, delta)}`);
+    rows.push(petRowHtml(escapeHtml(monthlyReportCopy.weight(thisStats.weightLatest.weight, thisStats.weightLatest.unit, delta))));
   }
   const headline = pickInsight(petName, thisStats, itemLabel);
-  if (headline) lines.push(`  ${headline}`);
-  return lines;
+  let insight = '';
+  if (headline) {
+    lines.push(`  ${headline}`);
+    insight = insightRowHtml(escapeHtml(headline));
+  }
+  return { text: lines, html: petCardHtml(petName, rows.join('') + insight) };
 }
 
 async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
@@ -844,13 +624,15 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
         .map((it) => it.Key!.slice(`${userPrefix}pets/`.length).split('/')[0]);
 
       const sections: string[] = [];
+      const sectionsHtml: string[] = [];
       const petNames: string[] = [];
       for (const petId of petIds) {
         const pet = await readJson<{ name?: string; species?: string }>(`${userPrefix}pets/${petId}/pet.json`);
         if (!pet?.name) continue;
-        const lines = await composeMonthlyReportForPet(pet.name, pet.species, userPrefix, petId, todayKey);
-        if (lines) {
-          sections.push(lines.join('\n'));
+        const report = await composeMonthlyReportForPet(pet.name, pet.species, userPrefix, petId, todayKey);
+        if (report) {
+          sections.push(report.text.join('\n'));
+          sectionsHtml.push(report.html);
           petNames.push(pet.name);
         }
       }
@@ -872,6 +654,12 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
         ``,
         monthlyReportCopy.unsubscribeLine(unsubUrl),
       ].join('\n');
+      const footerHtml = `<a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+      const html = emailHtml(
+        monthlyReportCopy.intro,
+        sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'See the full breakdown'),
+        footerHtml,
+      );
 
       if (dryRun) {
         wouldSend.push({ email: settings.email, subject, body });
@@ -885,7 +673,10 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
           Content: {
             Simple: {
               Subject: { Data: subject, Charset: 'UTF-8' },
-              Body: { Text: { Data: body, Charset: 'UTF-8' } },
+              Body: {
+                Text: { Data: body, Charset: 'UTF-8' },
+                Html: { Data: html, Charset: 'UTF-8' },
+              },
             },
           },
         }),
@@ -993,7 +784,9 @@ function digestPetSection(
     }
   }
 
-  // Weight: newest in-window entry, plus the change across the window.
+  // Weight: newest in-window entry, plus the change across the window. If
+  // nothing fell in-window but there's history, the latest entry might just
+  // be stale (see WEIGHTS.STALE_NUDGE_DAYS) — nudge instead of staying silent.
   const inWindow = weights.filter((w) => window.has(w.date));
   if (inWindow.length > 0) {
     const latest = inWindow[inWindow.length - 1];
@@ -1005,6 +798,12 @@ function digestPetSection(
       deltaText = ` (${d > 0 ? '▲' : '▼'} ${Math.abs(d)} ${latest.unit})`;
     }
     lines.push(`Weight: ${latest.weight} ${latest.unit}${deltaText}`);
+  } else if (weights.length > 0) {
+    const latestOverall = weights.reduce((a, b) => (a.date > b.date ? a : b));
+    const staleDays = daysBetweenDates(latestOverall.date, dates[dates.length - 1]);
+    if (staleDays >= WEIGHTS.STALE_NUDGE_DAYS) {
+      lines.push(digestInsightCopy.weightStale(petName, staleDays));
+    }
   }
 
   if (lines.length === 0) return null;
@@ -1014,6 +813,116 @@ function digestPetSection(
     );
   }
   return `${petName}\n${lines.map((l) => `  ${l}`).join('\n')}`;
+}
+
+// HTML twin of digestPetSection — same data, rendered as a pet card with the
+// "we noticed" line called out in its own highlighted row instead of just
+// another list item. Kept as a genuinely separate render pass (like
+// composeEmailHtml/composeEmail above) rather than reusing digestPetSection's
+// plain-text lines, since the insight line needs different markup than the
+// rest.
+function digestPetSectionHtml(
+  petName: string,
+  species: string | undefined,
+  daily: DailyFileView | null,
+  weights: WeightEntryView[],
+  dates: string[],
+): string | null {
+  const rows: string[] = [];
+  let insight: string | null = null;
+  const window = new Set(dates);
+
+  const moods = dates
+    .map((d) => daily?.moods?.[d]?.value)
+    .filter((v): v is number => typeof v === 'number');
+  const moodAvgRaw = moods.length > 0 ? moods.reduce((a, b) => a + b, 0) / moods.length : null;
+  if (moods.length > 0) {
+    const avg = Math.round(moodAvgRaw!);
+    rows.push(
+      petRowHtml(
+        `Mood: ${moods.map((v) => MOOD_EMOJI[v] ?? '·').join(' ')} (mostly ${MOOD_LABEL[avg] ?? 'okay'})`,
+      ),
+    );
+  }
+
+  const itemNames = new Map<string, string>((daily?.items ?? []).map((i) => [i.id, i.name]));
+  const checkCounts = new Map<string, number>();
+  const checkCountsByItemId = new Map<string, number>();
+  const byPerson = new Map<string, number>();
+  const activeDates = new Set<string>();
+  let medsGiven = 0;
+  for (const d of dates) {
+    const day = daily?.log?.[d];
+    if (daily?.moods?.[d]) activeDates.add(d);
+    if (!day) continue;
+    activeDates.add(d);
+    for (const [itemId, entry] of Object.entries(day)) {
+      const n = entry.count ?? 1;
+      if (itemId.startsWith('med:')) medsGiven += 1;
+      else {
+        const name = itemNames.get(itemId) ?? digestPresetName(itemId, species) ?? 'Other';
+        checkCounts.set(name, (checkCounts.get(name) ?? 0) + n);
+        checkCountsByItemId.set(itemId, (checkCountsByItemId.get(itemId) ?? 0) + n);
+      }
+      for (const ev of entry.events ?? [{ by: entry.by }]) {
+        const who = (ev.by ?? '').split('@')[0];
+        if (who) byPerson.set(who, (byPerson.get(who) ?? 0) + 1);
+      }
+    }
+  }
+  if (checkCounts.size > 0) {
+    rows.push(
+      petRowHtml(
+        escapeHtml([...checkCounts.entries()].map(([name, n]) => `${name} ×${n}`).join(' · ')),
+      ),
+    );
+  }
+  if (medsGiven > 0) rows.push(petRowHtml(`Meds given: ${medsGiven}`));
+
+  const trackedEnoughDays = activeDates.size >= DIGEST.MIN_ACTIVE_DAYS_FOR_INSIGHT;
+  if (moodAvgRaw !== null && moodAvgRaw < DIGEST.MOOD_DIP_THRESHOLD) {
+    insight = digestInsightCopy.moodDip(petName);
+  } else if (trackedEnoughDays) {
+    const lowItem = [...checkCountsByItemId.entries()]
+      .filter(([, n]) => n <= dates.length - DIGEST.LOW_COMPLETION_MISSED_DAYS)
+      .sort((a, b) => a[1] - b[1])[0];
+    if (lowItem) {
+      const [itemId, n] = lowItem;
+      if (itemId === 'preset-breakfast') insight = digestInsightCopy.lowBreakfast(petName, n, dates.length);
+      else if (itemId === 'preset-dinner') insight = digestInsightCopy.lowDinner(petName, n, dates.length);
+      else if (itemId === 'preset-walk') insight = digestInsightCopy.lowWalk(petName, n, dates.length);
+      else insight = digestInsightCopy.lowGeneric(petName, itemNames.get(itemId) ?? 'that', n, dates.length);
+    }
+  }
+
+  const inWindow = weights.filter((w) => window.has(w.date));
+  if (inWindow.length > 0) {
+    const latest = inWindow[inWindow.length - 1];
+    const before = [...weights].reverse().find((w) => w.date < dates[0]);
+    const base = inWindow.length > 1 ? inWindow[0] : before;
+    let deltaText = '';
+    if (base && base.unit === latest.unit && base.weight !== latest.weight) {
+      const d = Math.round((latest.weight - base.weight) * 100) / 100;
+      deltaText = ` (${d > 0 ? '▲' : '▼'} ${Math.abs(d)} ${latest.unit})`;
+    }
+    rows.push(petRowHtml(`Weight: ${latest.weight} ${latest.unit}${deltaText}`));
+  } else if (weights.length > 0) {
+    const latestOverall = weights.reduce((a, b) => (a.date > b.date ? a : b));
+    const staleDays = daysBetweenDates(latestOverall.date, dates[dates.length - 1]);
+    if (staleDays >= WEIGHTS.STALE_NUDGE_DAYS) {
+      rows.push(petRowHtml(escapeHtml(digestInsightCopy.weightStale(petName, staleDays))));
+    }
+  }
+
+  if (rows.length === 0 && !insight) return null;
+  if (byPerson.size > 1) {
+    rows.push(
+      petRowHtml(
+        escapeHtml(`Checked off by: ${[...byPerson.entries()].map(([who, n]) => `${who} ${n}`).join(' · ')}`),
+      ),
+    );
+  }
+  return petCardHtml(petName, rows.join('') + (insight ? insightRowHtml(escapeHtml(insight)) : ''));
 }
 
 // EventBridge invokes with its scheduled-event payload (no dryRun field).
@@ -1113,6 +1022,7 @@ export const handler = async (event?: {
       const dueDocs: DueDoc[] = [];
       const dueMeds: DueMed[] = [];
       const birthdays: Birthday[] = [];
+      const weightNudges: { petName: string; days: number }[] = [];
       const today = new Date();
 
       for (const { base, petId } of petSources) {
@@ -1177,6 +1087,25 @@ export const handler = async (event?: {
             dueMeds.push({ petName: pet.name, name: med.name, nextDue: med.nextDue, days, phase: phaseFor(days) });
           }
         }
+
+        // Weight staleness push — rides the same consent toggle as the
+        // birthday email (no separate opt-in). Flat modulo cadence (see
+        // WEIGHTS.STALE_NUDGE_DAYS) instead of a one-time nag so a
+        // long-neglected pet keeps getting nudged, same idea as the vaccine/
+        // med overdue taper.
+        if (vaccineRemindersOn) {
+          const weightsStored = await readJson<{ entries: WeightEntryView[] }>(
+            `${base}pets/${petId}/weights.json`,
+          );
+          const entries = weightsStored?.entries ?? [];
+          if (entries.length > 0) {
+            const latest = entries.reduce((a, b) => (a.date > b.date ? a : b));
+            const staleDays = -daysUntil(latest.date);
+            if (staleDays >= WEIGHTS.STALE_NUDGE_DAYS && staleDays % WEIGHTS.STALE_NUDGE_DAYS === 0) {
+              weightNudges.push({ petName: pet.name, days: staleDays });
+            }
+          }
+        }
       }
 
       // Weekly digest (Sundays) — a separate email from the reminder, sent
@@ -1185,6 +1114,7 @@ export const handler = async (event?: {
       if (digestDay && vaccineRemindersOn && settings.weeklyDigest !== false) {
         const dates = digestWindowDates(today);
         const sections: string[] = [];
+        const sectionsHtml: string[] = [];
         const petNames: string[] = [];
         for (const { base, petId } of petSources) {
           const pet = await readJson<{ name?: string; species?: string }>(
@@ -1198,6 +1128,9 @@ export const handler = async (event?: {
           const section = digestPetSection(pet.name, pet.species, daily, weightsStored?.entries ?? [], dates);
           if (section) {
             sections.push(section);
+            sectionsHtml.push(
+              digestPetSectionHtml(pet.name, pet.species, daily, weightsStored?.entries ?? [], dates) ?? '',
+            );
             petNames.push(pet.name);
           }
         }
@@ -1218,6 +1151,12 @@ export const handler = async (event?: {
             digestCopy.toggleOff,
             digestCopy.unsubscribeLine(unsubUrl),
           ].join('\n');
+          const footerHtml = `${digestCopy.toggleOff}<br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+          const html = emailHtml(
+            digestCopy.intro,
+            sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'Open Petshots'),
+            footerHtml,
+          );
           if (dryRun) {
             wouldSend.push({ email: settings.email, subject, body });
             console.log(`[dry run] would send digest to ${settings.email}: ${subject}`);
@@ -1229,13 +1168,32 @@ export const handler = async (event?: {
                 Content: {
                   Simple: {
                     Subject: { Data: subject, Charset: 'UTF-8' },
-                    Body: { Text: { Data: body, Charset: 'UTF-8' } },
+                    Body: {
+                      Text: { Data: body, Charset: 'UTF-8' },
+                      Html: { Data: html, Charset: 'UTF-8' },
+                    },
                   },
                 },
               }),
             );
             console.log(`Sent weekly digest to ${settings.email}`);
           }
+        }
+      }
+
+      // Weight staleness push — independent of the due-item email below (and
+      // the `continue` right after this), since a pet can be weight-stale
+      // with nothing else due.
+      if (weightNudges.length > 0) {
+        const title = weightNudgeCopy.title;
+        const nudgeBody = weightNudgeCopy.body(weightNudges.map((w) => w.petName));
+        if (dryRun) {
+          const devices = (await listPushSubs(userPrefix)).length;
+          if (devices > 0) wouldPush.push({ email: settings.email, subject: title, devices });
+          console.log(`[dry run] would send weight nudge to ${settings.email}: ${nudgeBody}`);
+        } else {
+          const pushed = await sendPushes(userPrefix, title, nudgeBody);
+          console.log(`Sent weight nudge to ${settings.email} (+${pushed} push): ${nudgeBody}`);
         }
       }
 

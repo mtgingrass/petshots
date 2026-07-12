@@ -21,7 +21,11 @@ export interface Notice {
   petName: string;
   message: string;
   priority: number;       // lower = shown first
-  resetAfterDays: number; // how long a dismissal lasts; 0 = session-only
+  // How long a dismissal lasts. Infinity = permanent (until the notice's
+  // own id changes — e.g. a doc's expiry or a med's nextDue moving means
+  // it's a genuinely new notice, not the one that got dismissed). 0 =
+  // session-only (unused today).
+  resetAfterDays: number;
 }
 
 // ---- thresholds ----
@@ -121,7 +125,12 @@ export function computeNotices(
           petName: pet.name,
           message: `💊 ${pet.name}'s ${med.name} was due ${when}.`,
           priority: 0,
-          resetAfterDays: 1,
+          // Permanent dismiss (Mark, 2026-07-13): the pet-pin's status ring
+          // is the always-visible signal for "overdue"; this banner doesn't
+          // need to also nag. Giving the dose advances med.nextDue, which
+          // changes this notice's id — so a real "still due" state always
+          // gets a fresh, undismissed notice, not the old dismissed one.
+          resetAfterDays: Infinity,
         });
       } else if (days === 0) {
         notices.push({
@@ -131,7 +140,7 @@ export function computeNotices(
           petName: pet.name,
           message: `💊 ${pet.name}'s ${med.name} is due today.`,
           priority: 1,
-          resetAfterDays: 1,
+          resetAfterDays: Infinity,
         });
       }
     }
@@ -151,7 +160,12 @@ export function computeNotices(
           petName: pet.name,
           message: `${pet.name}'s ${doc.label} expired ${when}.`,
           priority: 0,
-          resetAfterDays: 1, // re-surfaces daily — they need to act
+          // Permanent dismiss (Mark, 2026-07-13) — the pet-pin's red status
+          // ring already covers "still overdue" persistently; this banner
+          // isn't the only place that shows. A renewed record changes
+          // doc.expiry, which changes this notice's id, so dismissing THIS
+          // occurrence never hides a genuinely new overdue date.
+          resetAfterDays: Infinity,
         });
 
       } else if (days <= CRITICAL_DAYS && doc.remindersEnabled !== false) {
@@ -163,7 +177,7 @@ export function computeNotices(
           petName: pet.name,
           message: `${pet.name}'s ${doc.label} expires ${when}.`,
           priority: 1,
-          resetAfterDays: 1, // re-surfaces daily while critical
+          resetAfterDays: Infinity,
         });
 
       } else if (days <= WARNING_DAYS && doc.remindersEnabled !== false) {
@@ -174,7 +188,7 @@ export function computeNotices(
           petName: pet.name,
           message: `${pet.name}'s ${doc.label} is due ${humanDays(days)}.`,
           priority: 2,
-          resetAfterDays: 7, // dismiss for a week, then resurface
+          resetAfterDays: Infinity,
         });
 
       } else if (days <= HEADSUP_DAYS && doc.remindersEnabled !== false) {
@@ -185,7 +199,7 @@ export function computeNotices(
           petName: pet.name,
           message: `Heads up — ${pet.name}'s ${doc.label} is due ${humanDays(days)}.`,
           priority: 3,
-          resetAfterDays: 14,
+          resetAfterDays: Infinity,
         });
       }
     }
@@ -212,7 +226,9 @@ export function computeNotices(
           petName: pet.name,
           message: `🎂 ${pet.name}'s birthday is ${humanDays(days)}.`,
           priority: 5,
-          resetAfterDays: 7, // resurfaces weekly while in the window
+          // Non-medical, so it stays on the "come back after a few days if
+          // still needed" tier rather than permanent dismiss (Mark, 2026-07-13).
+          resetAfterDays: 3,
         });
       }
     } else if (docs.length > 0 && dobNudgeCount === 0) {

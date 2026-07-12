@@ -9,7 +9,11 @@
  * HOW TO CHANGE A VALUE
  *   1. Edit the constant below (read its comment first — units are in the name).
  *   2. cd frontend && npm run build           -> typecheck + bundle
- *   3. aws s3 sync dist/ s3://petshots-frontend --delete
+ *   3. Upload WITH cache headers (added 2026-07-12 — a plain `s3 sync` strips
+ *      them, and headerless index.html gets heuristically cached by browsers
+ *      for hours, masking deploys):
+ *      aws s3 sync dist/assets s3://petshots-frontend/assets --cache-control 'public,max-age=31536000,immutable'
+ *      aws s3 sync dist s3://petshots-frontend --exclude 'assets/*' --cache-control 'no-cache' --delete
  *   4. aws cloudfront create-invalidation --distribution-id E132NGTOIUI26J --paths '/*'
  *   5. (native app) npx cap sync ios + rebuild in Xcode, or the app drifts
  *      behind the web bundle.

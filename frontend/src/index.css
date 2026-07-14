@@ -1337,7 +1337,42 @@ a {
   opacity: 0.6;
 }
 
-/* ---------- Passport tab (bottom bar): each pet's passport stacked ---------- */
+/* Memorial pet on the overview: present but at rest — dimmed, no status
+   ring color, the "In loving memory" line where the vaccine nag would be. */
+.pet-pin--memorial {
+  opacity: 0.65;
+}
+
+.pet-pin--memorial .pet-pin__ring {
+  filter: grayscale(0.35);
+}
+
+/* Meal-tracking disuse prompt on the Daily tab. */
+.daily__meal-nudge {
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.65rem 0.9rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.daily__meal-nudge p {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.daily__meal-nudge-actions {
+  display: flex;
+  gap: 1rem;
+}
+
+/* Memorial section on Edit Profile. */
+.memorial-state__line {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+/* ---------- Passport screen (header booklet button): each pet's passport stacked ---------- */
 
 .passport-all {
   display: flex;
@@ -1545,23 +1580,24 @@ a {
   text-align: center;
 }
 
-.walk-screen__exit {
+/* Explicitly labeled — a bare icon here would repeat the old ✕'s mistake
+   (didn't say what it did). Steps away without ending the walk. */
+.walk-screen__minimize {
   position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
-  right: 1rem;
-  z-index: 10;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
+  left: 1rem;
+  background: rgba(255, 255, 255, 0.12);
   border: none;
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
-  font-size: 1.1rem;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  backdrop-filter: blur(4px);
+}
+
+.walk-screen__minimize:active {
+  opacity: 0.7;
 }
 
 .walk-screen__ready {
@@ -1598,6 +1634,61 @@ a {
   margin-top: 1rem;
 }
 
+/* Third stat (avg pace) — present but visually below elapsed/distance. */
+.walk-screen__stat--minor {
+  font-size: 1.6rem;
+}
+
+.walk-screen__paused-badge {
+  padding: 0.25rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 200, 0, 0.18);
+  color: #ffd60a;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 0.75rem;
+}
+
+.walk-screen__paused-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+/* Hold-to-End: the fill sweeps left→right over HOLD_TO_END_MS while pressed
+   (transition length must match the JS timer in WalkScreen); releasing early
+   snaps it back. A stray tap can't end the walk. */
+.walk-screen__end-hold {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.walk-screen__end-hold-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--error, #d33);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.15s ease-out;
+}
+
+.walk-screen__end-hold--holding .walk-screen__end-hold-fill {
+  transform: scaleX(1);
+  transition: transform 1.5s linear;
+}
+
+.walk-screen__end-hold-label {
+  position: relative;
+}
+
 .walk-screen__summary {
   display: flex;
   flex-direction: column;
@@ -1611,6 +1702,14 @@ a {
 .walk-screen__discard {
   color: rgba(255, 255, 255, 0.7);
   font-size: 0.9rem;
+}
+
+/* Ready phase's two secondary links (Cancel · Walk history) side by side
+   under the primary Start Walk button. */
+.walk-screen__ready-links {
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
 }
 
 /* Family walk leaderboard (Achievements screen, households only) */
@@ -1728,11 +1827,6 @@ a {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-}
-
-.trends-all__row-caption {
-  color: var(--subtle);
-  font-size: 0.85em;
 }
 
 .walk-screen__summary-stats {
@@ -1929,209 +2023,146 @@ a {
   font-size: 0.9rem;
 }
 
-/* Trends tab — plain stats, no charts yet (v2). */
-.trends-all {
+/* ---------- Summary tab: the day's story + week photos ---------- */
+
+.summary-all {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.9rem;
 }
 
-.trends-all__loading {
-  color: var(--subtle);
-  padding: 0.5rem 0.1rem;
-}
-
-.trends-all__send-buttons {
-  display: flex;
-  justify-content: center;
-  gap: 1rem;
-  margin-bottom: 0.25rem;
-}
-
-.trends-all__pet-name {
-  margin: 0;
-  font-size: 1.15rem;
-}
-
-.trends-all__section-label {
-  font-size: 0.8rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  color: var(--subtle);
-  margin-top: 0.25rem;
-}
-
-.trends-all__row {
-  margin: 0;
-  font-size: 0.95rem;
-}
-
-.trends-all__insight {
-  width: 100%;
-}
-
-.trends-all__upgrade {
-  margin: 0;
-  font-size: 0.9rem;
-  color: var(--subtle);
-}
-
-.trends-chart-block {
-  width: 100%;
+/* First-visit-of-the-day state while the model writes — centered, calm. */
+.summary-all__writing {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-}
-
-.trends-chart-block__caption {
-  font-size: 0.85rem;
-  color: var(--subtle);
-}
-
-.sparkline {
-  width: 100%;
-  height: auto;
-  max-width: 100%;
-}
-
-.sparkline__empty {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--subtle);
-  font-style: italic;
-}
-
-.trends-dotrows {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.trends-dotrow {
-  display: flex;
   align-items: center;
+  gap: 0.35rem;
+  padding: 2.25rem 1.25rem;
+  text-align: center;
+}
+
+.summary-all__writing-icon {
+  font-size: 1.9rem;
+  animation: summary-writing-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes summary-writing-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.summary-all__writing p {
+  margin: 0;
+}
+
+/* The week's photos — a horizontal filmstrip above the story. */
+.summary-all__photos {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.summary-all__photos::-webkit-scrollbar {
+  display: none;
+}
+
+.summary-all__photos img {
+  height: 150px;
+  border-radius: 12px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  max-width: 220px;
+}
+
+/* Story prose — comfortable reading size, roomy line height. */
+.summary-all__story {
+  padding: 1.1rem 1.2rem;
+}
+
+.summary-all__story p {
+  margin: 0 0 0.85rem;
+  font-size: 1.02rem;
+  line-height: 1.65;
+}
+
+.summary-all__story p:last-child {
+  margin-bottom: 0;
+}
+
+.summary-all__empty {
+  padding: 1.5rem 1.25rem;
+  text-align: center;
+}
+
+.summary-all__empty p {
+  margin: 0 0 0.75rem;
+}
+
+.summary-all__empty p:last-child {
+  margin-bottom: 0;
+}
+
+/* Story archive: saved weekly/monthly stories, newest first. */
+.summary-archive {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.summary-archive__title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 0 0 0.25rem;
+}
+
+.summary-archive__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.8rem 1rem;
+  text-align: left;
+  border: none;
+  cursor: pointer;
+}
+
+.summary-archive__item-label {
+  font-weight: 700;
+}
+
+.summary-archive__item-preview {
+  font-size: 0.88rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.summary-archive__range {
+  text-align: center;
+  margin: 0;
+}
+
+/* Per-pet fact chips under the story — plain numbers, no status colors. */
+.summary-all__chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.summary-all__chip {
+  display: flex;
+  align-items: baseline;
   justify-content: space-between;
   gap: 0.75rem;
+  padding: 0.7rem 1rem;
 }
 
-.trends-dotrow__label {
-  font-size: 0.85rem;
-  color: var(--subtle);
-  flex-shrink: 0;
-}
-
-.trends-dotrow__bar {
-  flex: 1;
-  min-width: 120px;
-}
-
-.trends-status {
+.summary-all__chip-name {
   font-weight: 700;
-}
-
-/* Hero row: pet name + the week/month "care consistency" ring gauge. */
-.trends-hero {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.trends-hero--compact {
-  margin-top: -0.25rem;
-}
-
-.trends-hero__text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.trends-hero__caption {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--subtle);
-}
-
-/* Ring gauge — CSS conic-gradient, not SVG arc math. */
-.gauge-dial {
-  position: relative;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.gauge-dial__hole {
-  position: absolute;
-  inset: 8px;
-  border-radius: 50%;
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-
-.gauge-dial__value {
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--text);
-  line-height: 1.1;
-}
-
-.gauge-dial__label {
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-}
-
-/* Completion bar — a fixed red->amber->green track, masked from the right
-   so the color at the fill edge always matches where that % sits on the
-   0-100 scale (not a bar-relative gradient that looks the same at any pct). */
-.percent-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.percent-bar__track {
-  position: relative;
-  flex: 1;
-  height: 8px;
-  border-radius: 4px;
-  overflow: hidden;
-  background: linear-gradient(90deg, var(--overdue), var(--warn) 50%, var(--ok));
-}
-
-.percent-bar__mask {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  background: var(--border);
-  border-radius: 0 4px 4px 0;
-}
-
-.percent-bar__meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  flex-shrink: 0;
-}
-
-.percent-bar__value {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.percent-bar__caption {
-  font-size: 0.7rem;
-  color: var(--subtle);
-  white-space: nowrap;
 }
 
 /* Inline destructive-action confirm inside the Family screen. */
@@ -3329,6 +3360,12 @@ a {
   line-height: 1.5;
 }
 
+.settings-app-version {
+  text-align: center;
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0;
+}
+
 .settings-save-status {
   display: flex;
   align-items: center;
@@ -4322,6 +4359,45 @@ a {
   opacity: 0.7;
 }
 
+/* Floating pill above the tab bar (2026-07-15) — proof a minimized walk is
+   still tracking, tap to bring the full screen back. Sits above .tabbar's
+   fixed strip on mobile (its own z-index 20); no fixed tab bar to clear on
+   desktop, so it just floats near the bottom there instead (see the
+   min-width override below, alongside .tabbar's own static-on-desktop rule). */
+.walk-mini-bar {
+  position: fixed;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: calc(var(--tabbar-h) + max(env(safe-area-inset-bottom), 8px) + 0.6rem);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem 1.1rem;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.walk-mini-bar:active {
+  opacity: 0.85;
+}
+
+.walk-mini-bar__chevron {
+  font-size: 1.1rem;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
 @media (max-width: 767px) {
   .tabbar {
     display: flex;
@@ -4407,6 +4483,10 @@ html[data-native="true"] .page--tabbed ~ .site-footer {
     border-top: none;
     border-bottom: var(--hairline) solid var(--separator);
     padding: 0;
+  }
+  /* No fixed tab bar to clear here — .tabbar is inline/static above. */
+  .walk-mini-bar {
+    bottom: 1rem;
   }
 }
 html[data-native="true"] .screen-nav__back--desktop {
@@ -4524,30 +4604,6 @@ html[data-native="true"] .screen-view--root .screen-view__body {
   font-size: 0.9rem;
   color: var(--subtle);
   transform: translateY(2px);
-}
-
-/* Trends tab's week/month stepper — reuses .date-nav/.date-nav__step, but
-   the label stacks two lines (period word + actual date range) instead of
-   DateNav's single-line title + dropdown chevron. */
-.trends-range-nav {
-  width: 100%;
-  justify-content: center;
-  margin-bottom: 0.5rem;
-}
-
-.trends-range-nav__label {
-  flex-direction: column;
-  align-items: center;
-  gap: 0.1rem;
-  min-width: 9rem;
-  font-weight: 700;
-  cursor: default;
-}
-
-.trends-range-nav__dates {
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--subtle);
 }
 
 .date-nav__dropdown {

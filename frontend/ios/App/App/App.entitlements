@@ -9,5 +9,10 @@
 	     see IOS.md. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- Apple Health: walks are written as Walking workouts (HealthPlugin.swift).
+	     Automatic signing adds the HealthKit capability to the App ID when it
+	     sees this key. -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
 </dict>
 </plist>

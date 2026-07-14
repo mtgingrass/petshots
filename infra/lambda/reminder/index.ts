@@ -9,13 +9,26 @@ import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import { randomUUID } from 'node:crypto';
 // All product-tunable numbers (cadences, windows, TTLs) live in one
 // documented file — edit values there, not here.
-import { REMINDERS, DIGEST, EMAIL, LIMITS_FREE, DAILY, WEIGHTS } from '../shared/config';
+import { REMINDERS, DIGEST, EMAIL, LIMITS_FREE, DAILY, WEIGHTS, SUMMARY } from '../shared/config';
 // The actual sentences these emails/pushes say live separately from this
 // file's "how it's built and sent" logic — see copy/reminder.ts's header.
 import { reminderCopy, nudgeCopy, weightNudgeCopy, digestCopy, digestInsightCopy, monthlyReportCopy } from '../shared/copy';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the api Lambda's GET /trends — see that file's header for why.
 import { mergedDailyEntries, rangeStats, pickInsight, overallCompletionPct } from '../shared/dailyStats';
+// The Summary tab's persistent weekly/monthly stories — generated here on
+// crons (this Lambda has the 5-minute timeout and already walks users/),
+// same pipeline as the api Lambda's daily story. See summaryStory.ts.
+import {
+  computeStoryWindow,
+  pickWindowPhotos,
+  fetchImageBlocks,
+  generateWindowStory,
+  generateMonthStory,
+  buildChips,
+  buildStatsForModel,
+  addDays as storyAddDays,
+} from '../shared/summaryStory';
 import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
 // Web push (VAPID) + native iOS push (APNs) — shared with the api Lambda's
 // real-time pushes (e.g. "new photo added"). See that file's header.
@@ -490,10 +503,10 @@ async function runDailyNudge(which: 'breakfast' | 'evening', dryRun: boolean): P
       const missed: string[] = [];
       for (const petId of petIds) {
         const [pet, daily] = await Promise.all([
-          readJson<{ name?: string; species?: string }>(`${userPrefix}pets/${petId}/pet.json`),
+          readJson<{ name?: string; species?: string; memorial?: boolean }>(`${userPrefix}pets/${petId}/pet.json`),
           readJson<DailyFileView>(`${userPrefix}pets/${petId}/daily.json`),
         ]);
-        if (!pet?.name) continue;
+        if (!pet?.name || pet.memorial) continue; // memorial pets get no nudges
         const todaysLog = daily?.log?.[todayKey] ?? {};
         const presetIds =
           which === 'breakfast'
@@ -627,8 +640,8 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
       const sectionsHtml: string[] = [];
       const petNames: string[] = [];
       for (const petId of petIds) {
-        const pet = await readJson<{ name?: string; species?: string }>(`${userPrefix}pets/${petId}/pet.json`);
-        if (!pet?.name) continue;
+        const pet = await readJson<{ name?: string; species?: string; memorial?: boolean }>(`${userPrefix}pets/${petId}/pet.json`);
+        if (!pet?.name || pet.memorial) continue; // no monthly report section for memorial pets
         const report = await composeMonthlyReportForPet(pet.name, pet.species, userPrefix, petId, todayKey);
         if (report) {
           sections.push(report.text.join('\n'));
@@ -687,6 +700,166 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
     }
   }
   return dryRun ? { dryRun: true, wouldSend } : undefined;
+}
+
+// ---- persistent stories ({weeklyStories}/{monthlyStories} crons) ----
+// The Summary tab's permanent record: one story per completed Mon-Sun week
+// (Monday cron), consolidated into one story per month (1st-of-month cron).
+// All plans; pools with nothing to tell are skipped silently. Pipeline
+// lives in shared/summaryStory.ts (same code path as GET /summary's daily
+// story — tone guardrails and the no-feeding rule apply everywhere).
+
+async function putJsonPlain(key: string, body: unknown): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: JSON.stringify(body), ContentType: 'application/json' }),
+  );
+}
+
+/** Monday of the most recently COMPLETED Mon-Sun week (yesterday's week if
+ *  today is Monday). weekOf overrides for manual backfills. */
+function lastCompletedWeekMonday(weekOf?: string): string {
+  if (weekOf) return weekOf;
+  const today = new Date().toISOString().slice(0, 10);
+  const dow = (new Date(`${today}T00:00:00Z`).getUTCDay() + 6) % 7; // 0 = Monday
+  return storyAddDays(today, -dow - 7);
+}
+
+async function runWeeklyStories(dryRun: boolean, weekOf?: string): Promise<unknown> {
+  const monday = lastCompletedWeekMonday(weekOf);
+  const dates = Array.from({ length: 7 }, (_, i) => storyAddDays(monday, i));
+  const rangeStart = dates[0];
+  const rangeEnd = dates[6];
+  const topList = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: 'users/', Delimiter: '/' }),
+  );
+  const userPrefixes = (topList.CommonPrefixes ?? []).map((p) => p.Prefix!);
+  console.log(`Weekly stories (${rangeStart}..${rangeEnd})${dryRun ? ' (dry run)' : ''}: ${userPrefixes.length} user prefix(es)`);
+  const results: Array<{ pool: string; status: string }> = [];
+
+  for (const userPrefix of userPrefixes) {
+    const poolSub = userPrefix.slice('users/'.length, -1);
+    try {
+      const weekKey = `users/${poolSub}/summary/weeks/${monday}.json`;
+      if (await readJson(weekKey)) {
+        results.push({ pool: poolSub, status: 'exists' });
+        continue;
+      }
+      // Members have no pets/ under their own prefix — computeStoryWindow
+      // returns zero pets and the activity gate skips them (the owner's
+      // pool writes the household's one story).
+      const { pets, activeDays } = await computeStoryWindow(BUCKET, poolSub, dates);
+      const photoRefs = await pickWindowPhotos(BUCKET, poolSub, pets.map((p) => p.petId), rangeStart, rangeEnd);
+      if (pets.length === 0 || (activeDays < SUMMARY.MIN_ACTIVE_DAYS && photoRefs.length === 0)) {
+        results.push({ pool: poolSub, status: 'quiet-skip' });
+        continue;
+      }
+      if (dryRun) {
+        results.push({ pool: poolSub, status: `would-generate (${pets.length} pets, ${photoRefs.length} photos)` });
+        continue;
+      }
+      const imageBlocks = await fetchImageBlocks(BUCKET, photoRefs);
+      const story = await generateWindowStory({
+        petNames: pets.map((p) => p.name),
+        days: 7,
+        statsForModel: buildStatsForModel(pets),
+        imageBlocks,
+        windowNote: `This covers the completed week of ${rangeStart} to ${rangeEnd}.`,
+      });
+      await putJsonPlain(weekKey, {
+        rangeStart,
+        rangeEnd,
+        story,
+        photoRefs: photoRefs.map(({ petId, id, filename }) => ({ petId, id, filename })),
+        pets: buildChips(pets),
+        generatedAt: new Date().toISOString(),
+      });
+      results.push({ pool: poolSub, status: 'generated' });
+    } catch (e) {
+      // One pool's failure never blocks the rest; the missing week is
+      // retried by the next Monday run (or a manual weekOf backfill).
+      console.error(`weekly story failed for ${poolSub}`, e);
+      results.push({ pool: poolSub, status: 'error' });
+    }
+  }
+  console.log('Weekly stories done:', JSON.stringify(results));
+  return { week: monday, results };
+}
+
+async function runMonthlyStories(dryRun: boolean, monthArg?: string): Promise<unknown> {
+  // Default: the month that just ended (cron fires on the 1st).
+  const month =
+    monthArg ??
+    (() => {
+      const d = new Date();
+      d.setUTCDate(0); // last day of previous month
+      return d.toISOString().slice(0, 7);
+    })();
+  const topList = await s3.send(
+    new ListObjectsV2Command({ Bucket: BUCKET, Prefix: 'users/', Delimiter: '/' }),
+  );
+  const userPrefixes = (topList.CommonPrefixes ?? []).map((p) => p.Prefix!);
+  console.log(`Monthly stories (${month})${dryRun ? ' (dry run)' : ''}: ${userPrefixes.length} user prefix(es)`);
+  const results: Array<{ pool: string; status: string }> = [];
+
+  for (const userPrefix of userPrefixes) {
+    const poolSub = userPrefix.slice('users/'.length, -1);
+    try {
+      const monthKey = `users/${poolSub}/summary/months/${month}.json`;
+      if (await readJson(monthKey)) {
+        results.push({ pool: poolSub, status: 'exists' });
+        continue;
+      }
+      // A week belongs to the month its Monday falls in — simple rule,
+      // straddling weeks land in one month only.
+      const weeksList = await s3.send(
+        new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `users/${poolSub}/summary/weeks/${month}-` }),
+      );
+      const weekKeys = (weeksList.Contents ?? []).map((it) => it.Key!).sort();
+      if (weekKeys.length === 0) {
+        results.push({ pool: poolSub, status: 'no-weeks' });
+        continue;
+      }
+      interface StoredWeek {
+        rangeStart: string;
+        rangeEnd: string;
+        story: string;
+        photoRefs: { petId: string; id: string; filename: string }[];
+        pets: { petId: string; name: string }[];
+      }
+      const weeks = (await Promise.all(weekKeys.map((k) => readJson<StoredWeek>(k)))).filter(
+        (w): w is StoredWeek => w !== null,
+      );
+      if (dryRun) {
+        results.push({ pool: poolSub, status: `would-consolidate (${weeks.length} weeks)` });
+        continue;
+      }
+      const petNames = [...new Set(weeks.flatMap((w) => w.pets.map((p) => p.name)))];
+      const monthLabel = new Date(`${month}-01T00:00:00Z`).toLocaleString('en-US', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+      const story = await generateMonthStory({ petNames, monthLabel, weeklyStories: weeks });
+      await putJsonPlain(monthKey, {
+        month,
+        monthLabel,
+        rangeStart: weeks[0].rangeStart,
+        rangeEnd: weeks[weeks.length - 1].rangeEnd,
+        story,
+        // The month keeps a filmstrip too — the weeks' photos, capped.
+        photoRefs: weeks.flatMap((w) => w.photoRefs).slice(0, 6),
+        pets: weeks[weeks.length - 1].pets,
+        weeksUsed: weekKeys.map((k) => k.split('/').pop()!.replace('.json', '')),
+        generatedAt: new Date().toISOString(),
+      });
+      results.push({ pool: poolSub, status: 'generated' });
+    } catch (e) {
+      console.error(`monthly story failed for ${poolSub}`, e);
+      results.push({ pool: poolSub, status: 'error' });
+    }
+  }
+  console.log('Monthly stories done:', JSON.stringify(results));
+  return { month, results };
 }
 
 // The digest's date window (DIGEST.LOOKBACK_DAYS long, ending today),
@@ -942,10 +1115,18 @@ export const handler = async (event?: {
   ignoreNewUploads?: boolean;
   nudge?: 'breakfast' | 'evening';
   monthlyReport?: boolean;
+  weeklyStories?: boolean;
+  monthlyStories?: boolean;
+  /** Manual backfill overrides: weekOf = that week's Monday (YYYY-MM-DD),
+   *  month = YYYY-MM. */
+  weekOf?: string;
+  month?: string;
 }): Promise<unknown> => {
   const dryRun = event?.dryRun === true;
   if (event?.nudge) return runDailyNudge(event.nudge, dryRun);
   if (event?.monthlyReport) return runMonthlyReport(dryRun);
+  if (event?.weeklyStories) return runWeeklyStories(dryRun, event.weekOf);
+  if (event?.monthlyStories) return runMonthlyStories(dryRun, event.month);
   const ignoreNewUploads = event?.ignoreNewUploads === true;
   const digestDay = event?.forceDigest === true || new Date().getUTCDay() === DIGEST.DAY_UTC;
   const wouldSend: Array<{ email: string; subject: string; body: string }> = [];
@@ -1026,10 +1207,13 @@ export const handler = async (event?: {
       const today = new Date();
 
       for (const { base, petId } of petSources) {
-        const pet = await readJson<{ name: string; dob?: string }>(
+        const pet = await readJson<{ name: string; dob?: string; memorial?: boolean }>(
           `${base}pets/${petId}/pet.json`,
         );
         if (!pet?.name) continue;
+        // Memorial pets: no birthday emails (the worst possible send), no
+        // vaccine-expiry or med reminders. Records stay browsable in-app.
+        if (pet.memorial) continue;
 
         // Birthday email rides the same consent signal as vaccine reminders —
         // no reminder opt-in, no unsolicited mail.
@@ -1117,10 +1301,10 @@ export const handler = async (event?: {
         const sectionsHtml: string[] = [];
         const petNames: string[] = [];
         for (const { base, petId } of petSources) {
-          const pet = await readJson<{ name?: string; species?: string }>(
+          const pet = await readJson<{ name?: string; species?: string; memorial?: boolean }>(
             `${base}pets/${petId}/pet.json`,
           );
-          if (!pet?.name) continue;
+          if (!pet?.name || pet.memorial) continue; // no digest section for memorial pets
           const [daily, weightsStored] = await Promise.all([
             readJson<DailyFileView>(`${base}pets/${petId}/daily.json`),
             readJson<{ entries: WeightEntryView[] }>(`${base}pets/${petId}/weights.json`),

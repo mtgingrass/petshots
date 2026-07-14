@@ -322,27 +322,88 @@ export const ACHIEVEMENTS = {
   WALK_DAYS_IN_WEEK: 7,
   /** "Three-Week Streak": consecutive calendar weeks with >= 1 walk. */
   WALK_WEEK_STREAK: 3,
-  /** All-time mileage tiers: First Mile / 10-Mile Club / Marathon / Century Club. */
+  /**
+   * All-time mileage tiers, easy → hardest: First Mile / 10-Mile Club /
+   * Marathon / Century Club / Trailblazer / Iron Paws / World Walker.
+   * The long tail exists for leaderboard-style bragging rights.
+   */
   MILES_FIRST: 1,
   MILES_CLUB: 10,
   MILES_MARATHON: 26.2,
   MILES_CENTURY: 100,
+  MILES_250: 250,
+  MILES_500: 500,
+  MILES_1000: 1000,
   /** "Camera Ready": distinct days with a photo in one calendar week. */
   PHOTO_DAYS_IN_WEEK: 3,
   /** "Paparazzi Week": a photo every day of a calendar week. */
   PHOTO_DAYS_PERFECT_WEEK: 7,
-  /** "Shutterbug": photos saved all-time (currently stored; deletes count down). */
-  PHOTOS_TOTAL: 100,
-  /** Care-streak tiers: consecutive days with EVERY active Daily item checked. */
-  CARE_STREAK_SHORT: 3,
-  CARE_STREAK_WEEK: 7,
-  CARE_STREAK_HABIT: 30,
   /**
-   * How far back the care-streak scan reads (live daily.json + archive).
-   * Must stay > CARE_STREAK_HABIT with buffer; the card caps its displayed
-   * streak at this many days ("N+" beyond it).
+   * "Through the Seasons": photos in this many distinct calendar months.
+   * (Replaced "Shutterbug"/100-stored-photos in 2026-07-13's rework — a
+   * stored-count badge paid users to hoard S3 storage; the creative badges
+   * only need one photo per qualifying day/month.)
    */
-  CARE_STREAK_LOOKBACK_DAYS: 60,
+  PHOTO_SEASONS_MONTHS: 4,
+  // Care-streak card + its badge ladder (incl. the cumulative 30/100/365-day
+  // tiers added 2026-07-13) was removed entirely 2026-07-14 — wasn't
+  // earning its keep. Any already-earned care badges stay as harmless
+  // orphaned keys in badges.json.
+} as const;
+
+/**
+ * DAILY SUMMARY (the Summary tab's AI-written story)
+ * One story per account pool per day, written by Bedrock from the last
+ * LOOKBACK_DAYS of stats plus a few recent photos, cached in
+ * users/{poolSub}/summary/{YYYY-MM-DD}.json. The prompt itself lives in
+ * shared/copy/summary.ts.
+ */
+export const SUMMARY = {
+  /** Story window in days; keep == DIGEST.LOOKBACK_DAYS so the stats read
+   *  the same week the digest email talks about. */
+  LOOKBACK_DAYS: 7,
+  /** Most-recent photos fed to the model (also what the tab displays). */
+  MAX_PHOTOS: 3,
+  /**
+   * Per-photo raw-byte ceiling for the model call. Anthropic caps an image
+   * block at ~5 MB of base64; base64 inflates 4/3, so ~3.75 MB raw is the
+   * hard limit — 2.5 MB leaves margin. Bigger photos still display in the
+   * tab; they just aren't shown to the model.
+   */
+  MAX_PHOTO_BYTES_FOR_AI: 2_500_000,
+  /** Raw-byte ceiling across ALL photos in one call — keeps the request
+   *  small enough to finish inside AI.CLIENT_TIMEOUT_MS. */
+  MAX_TOTAL_PHOTO_BYTES: 5_000_000,
+  /** Story is asked for 120-180 words; this is headroom, not a target. */
+  MAX_TOKENS: 600,
+  /**
+   * Minimum distinct active days (any check/mood across all pets) in the
+   * window before a Bedrock call is worth making. Below this AND zero
+   * photos, the route returns NOT_ENOUGH_DATA without calling the model.
+   */
+  MIN_ACTIVE_DAYS: 2,
+} as const;
+
+/**
+ * APPLE IN-APP PURCHASE BILLING (via RevenueCat)
+ * The iOS app's paid tier — Stripe (infra/scripts/setup-stripe.mjs) still
+ * owns web billing untouched. RevenueCat's REST API key + webhook signing
+ * secret live in Secrets Manager (`petshots/revenuecat`), mirroring the
+ * `petshots/stripe` secret. app_user_id is always the Cognito sub, so both
+ * the webhook and the client-triggered sync route write straight to
+ * users/{sub}/plan.json with no reverse customer-id mapping needed.
+ *
+ * Dashboard/App Store Connect placeholders (set up once, values live in
+ * RevenueCat + App Store Connect, not here):
+ *   - Entitlement id: "Petshots Pro" (below — set in the RevenueCat dashboard,
+ *     matched here; the exact string, spaces and capitalization included)
+ *   - Offering id: "petshots" (marked "current" in the dashboard — the app
+ *     reads whichever offering is current, never by this name, so the
+ *     identifier itself is only documentation)
+ *   - Product ids: "petshots_paid_monthly", "petshots_paid_yearly"
+ */
+export const REVENUECAT = {
+  ENTITLEMENT_ID: 'Petshots Pro',
 } as const;
 
 /** MEDICATIONS */

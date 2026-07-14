@@ -4,3 +4,4 @@ export * from './reminder';
 export * from './nudge';
 export * from './digest';
 export * from './photo';
+export * from './summary';

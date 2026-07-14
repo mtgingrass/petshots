@@ -12,6 +12,10 @@ import { clearDoorCache } from '../doorCache';
 
 interface AuthContextValue {
   email: string | null;
+  // Cognito sub (stable per-user id). Only the RevenueCat native purchase
+  // flow needs this client-side — every other request lets the API derive
+  // sub from the verified JWT itself.
+  sub: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
   logout: () => void;
@@ -21,12 +25,14 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState<string | null>(null);
+  const [sub, setSub] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   async function refresh() {
     const session = await getSession();
-    const claimEmail = session?.getIdToken().payload.email as string | undefined;
-    setEmail(claimEmail ?? null);
+    const payload = session?.getIdToken().payload;
+    setEmail((payload?.email as string | undefined) ?? null);
+    setSub((payload?.sub as string | undefined) ?? null);
     setLoading(false);
   }
 
@@ -40,10 +46,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the login that created it.
     void clearDoorCache();
     setEmail(null);
+    setSub(null);
   }
 
   return (
-    <AuthContext.Provider value={{ email, loading, refresh, logout }}>
+    <AuthContext.Provider value={{ email, sub, loading, refresh, logout }}>
       {children}
     </AuthContext.Provider>
   );

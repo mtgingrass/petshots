@@ -23,6 +23,13 @@ splash screen, offline door mode without any service-worker caveats.
   the same `POST /push/subscribe` route (`{platform:'ios', token}`); the
   reminder Lambda sends through APNs directly (HTTP/2 + ES256 token auth, no
   new dependencies) alongside web push and email.
+- Apple Health: saved walks are mirrored as Walking workouts (duration +
+  distance; Apple computes the human's calories/rings). App-local plugin —
+  `ios/App/App/HealthPlugin.swift`, registered in `BridgeViewController.swift`
+  (Main.storyboard points at that subclass, not `CAPBridgeViewController`;
+  Capacitor only auto-discovers packaged plugins). Write-only HealthKit
+  entitlement + both `NSHealth*UsageDescription` strings; permission denied =
+  silent skip. Called fire-and-forget from the walk-save flow via `native.ts`.
 - The service worker is skipped in the app (assets are local already); the
   door cache (offline records) works as-is via localStorage + Cache API.
 
@@ -140,7 +147,72 @@ device. A real send happens at the next 9:00 UTC cron.
 5. Review guideline note: the app has account deletion in Settings (required
    by Apple — already shipped s18) and sign-up works in-app. Both good.
 
-### 6. Universal links (later, optional)
+### 7. Apple In-App Purchase billing via RevenueCat
+
+The paid tier's native rail — Stripe (web) untouched, RevenueCat wraps
+StoreKit for the iOS app. `frontend/src/native.ts` has the
+configure/getOfferings/purchasePackage/restorePurchases wrappers (no-op
+without a real key); backend is `infra/lambda/api/index.ts`'s
+`syncRevenueCatEntitlement` + `POST /billing/revenuecat-webhook` +
+`POST /billing/revenuecat/sync`, config in
+`infra/lambda/shared/config.ts`'s `REVENUECAT` block. Cost: free at this
+scale (RevenueCat's free tier goes up to $2.5k/mo tracked revenue).
+
+> **✅ DONE 2026-07-14** — RevenueCat account + "Petshots" project created.
+> Entitlement identifier is **`Petshots Pro`** (not `paid` — matched in
+> `shared/config.ts`'s `REVENUECAT.ENTITLEMENT_ID`, deployed). App Store
+> Connect **In-App Purchase key** (`SubscriptionKey_*.p8` — a distinct key
+> type from the general "App Store Connect API" key used for APNs/CI;
+> generated under Users and Access → Integrations → **In-App Purchase**,
+> role Admin) connected in RevenueCat. RevenueCat Secret API key + a
+> webhook (HMAC-signed, pointed at
+> `https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com/billing/revenuecat-webhook`)
+> both created; both values live in Secrets Manager `petshots/revenuecat`
+> (`secretApiKey`, `webhookSigningSecret`). The real iOS app "Petshots (App
+> Store)" (bundle `app.petshots.ios`) exists in RevenueCat (distinct from
+> the auto-created "Test Store" sandbox app) — its **public** SDK key is in
+> `frontend/.env` as `VITE_REVENUECAT_PUBLIC_API_KEY`, built and deployed to
+> both web and the iOS project (`cap sync`).
+
+> **✅ DONE 2026-07-14** — both subscriptions created under Features →
+> **Subscriptions** (group "Petshots Paid"): `petshots_paid_monthly` (1
+> month) and `petshots_paid_yearly` (1 year), both **Ready to Submit**.
+> Pricing, localization (Display Name/Description), and Review Screenshot
+> all set. Two gotchas hit along the way, worth remembering: (1) the Review
+> Screenshot uploader rejected every valid device-size **PNG** we tried
+> (1179×2556, 1284×2778, 1290×2796 — all correct per Apple's own
+> screenshot-specs page) with "the dimensions of one or more screenshots are
+> wrong" — converting the same image to **JPEG** fixed it immediately
+> (`sips -s format jpeg -s formatOptions 90 -s dpiWidth 72 -s dpiHeight 72
+> in.png --out out.jpg`), so this uploader appears to reject PNG outright,
+> unrelated to actual pixel dimensions. (2) Both subscriptions stayed stuck
+> on "Missing Metadata" even with everything above filled in — the real
+> blocker was the **Subscription Group's own App Store Localization**
+> (Subscriptions page → above the Level 1/2 table → Add App Store
+> Localization → Subscription Group Display Name, set to "Petshots"), a
+> separate, easy-to-miss field from each individual plan's own localization.
+
+> **✅ DONE 2026-07-14** — Product Catalog wired up: both products
+> (`petshots_paid_monthly`, `petshots_paid_yearly`, App: "Petshots (App
+> Store)" — not the auto-created "Test Store" demo app/products, which are
+> a different, unrelated leftover from onboarding) attached to the
+> `Petshots Pro` entitlement. Offering **`petshots`** created (not
+> `default` — that identifier was already taken by RevenueCat's onboarding
+> demo offering) with Monthly/Annual packages, marked **current**. The
+> app never reads an offering by name, only `offerings.current`, so the
+> actual identifier is documentation only — matched in `shared/config.ts`.
+
+Remaining:
+
+1. **Test**: sandbox Apple ID purchase, on-device or in Xcode → confirm
+   `plan.json` flips (via the sync call immediately, via the webhook shortly
+   after) → confirm Restore Purchases works on a fresh install. Needs a
+   Sandbox tester (App Store Connect → Users and Access → Sandbox).
+2. A fresh TestFlight archive is needed regardless to pick up the RevenueCat
+   SDK + the new Settings → Account purchase UI — nothing above ships to
+   real devices until Mark archives one.
+
+### 8. Universal links (later, optional)
 
 So `https://petshots.app/p/{token}` and `/join/{token}` open the app when
 installed: host `/.well-known/apple-app-site-association` (JSON, served by

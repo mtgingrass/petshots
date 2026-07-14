@@ -29,6 +29,7 @@ import {
   revokePassport,
   createCheckout,
   createBillingPortal,
+  syncRevenueCatEntitlement,
   getSettings,
   saveSettings,
   deleteAccount,
@@ -45,9 +46,9 @@ import {
   listWeights,
   logWeight,
   deleteWeight,
-  getTrendsWeek,
-  getTrendsMonth,
-  sendTrendsReport,
+  getSummary,
+  getSummaryArchive,
+  getSummaryEntry,
   DEFAULT_LIMITS,
   DEFAULT_SETTINGS,
   type Limits,
@@ -64,9 +65,9 @@ import {
   type CommitRecord,
   type ProfilePatch,
   type DuplicateInfo,
-  type TrendsResponse,
-  type TrendsWeekPet,
-  type TrendsMonthPet,
+  type SummaryResponse,
+  type SummaryArchiveItem,
+  type SummaryArchiveEntry,
   type Photo,
   type PetAchievements,
   type WalkLeaderboard,
@@ -76,8 +77,20 @@ import { applyTheme, getSavedTheme, type Theme } from '../utils/theme';
 import { readDoorCache, updateDoorCache } from '../doorCache';
 import { getPushState, enablePush, disablePush, iosNeedsInstall, type PushState } from '../push';
 import { OnboardingTour, TOUR_DONE_KEY } from '../components/OnboardingTour';
-import { Sparkline, GaugeDial, ChecklistPercentRow, moodStatus, statusColor, useSwipeStep, TrendsRangeNav } from '../components/TrendsCharts';
-import { isNative, hapticTap, hapticSuccess, hapticWarning } from '../native';
+import { useSwipeStep } from '../components/TrendsCharts';
+import {
+  isNative,
+  hapticTap,
+  hapticSuccess,
+  hapticWarning,
+  saveWalkToAppleHealth,
+  getAppVersion,
+  configureRevenueCat,
+  getPaidOfferingPackages,
+  purchaseRevenueCatPackage,
+  restoreRevenueCatPurchases,
+  type PurchasesPackage,
+} from '../native';
 import { Geolocation } from '@capacitor/geolocation';
 import {
   computeNotices,
@@ -300,8 +313,11 @@ type DashView =
   // lives in its Edit Profile sheet; there is no separate edit-pet screen.
   | { type: 'profile'; petId: string }
   | { type: 'passports' }
-  // Combined every-pet trends view — the bottom tab bar's "Trends" tab.
-  | { type: 'trends' }
+  // The Summary tab — today's AI-written story of the pool's last 7 days,
+  // with the week's photos (GET /summary, cached server-side once per day).
+  | { type: 'summary' }
+  // A saved weekly/monthly story from the archive, pushed from Summary.
+  | { type: 'summary-entry'; kind: 'weeks' | 'months'; entryKey: string }
   | { type: 'add-pet' }
   | { type: 'change-password' }
   // Settings is split into three focused screens, all reached from the
@@ -346,8 +362,16 @@ type EditView =
 // ---- main component ----
 
 export function Dashboard() {
-  const { email, logout } = useAuth();
+  const { email, sub, logout } = useAuth();
   const navigate = useNavigate();
+
+  // Apple In-App Purchase billing (native only) is configured once per
+  // signed-in user — RevenueCat's app_user_id is always the Cognito sub, so
+  // the backend webhook/sync route can write plan.json straight to
+  // users/{sub}/plan.json. No-ops without a real key (see native.ts).
+  useEffect(() => {
+    if (isNative && sub) void configureRevenueCat(sub);
+  }, [sub]);
 
   const [theme, setTheme] = useState<Theme>(getSavedTheme);
 
@@ -392,6 +416,13 @@ export function Dashboard() {
   // bottom of this component for why a single always-mounted hook guarded
   // by dashView.type is used instead of one per screen.
   const cameraInputRef = useRef<HTMLInputElement>(null);
+  // A second, separate hidden input with NO capture attribute (2026-07-14) —
+  // the camera input above deliberately forces the native camera directly
+  // (zero-tap) and stays untouched; this one lets the OS show its normal
+  // photo chooser (library/browse, camera too) so an EXISTING photo can be
+  // attached instead of only a freshly taken one. Same downstream flow
+  // (capturedPhoto -> PhotoConfirmScreen) either way — one File is one File.
+  const libraryInputRef = useRef<HTMLInputElement>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<File | null>(null);
   const [savingPhoto, setSavingPhoto] = useState(false);
   const [showPhotoHint, setShowPhotoHint] = useState(
@@ -415,8 +446,21 @@ export function Dashboard() {
   function handleCameraChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ''; // lets the same shot be retaken/reselected later
-    if (file) setCapturedPhoto(file);
+    if (file) { setCapturedPhoto(file); setPhotoLimitError(null); }
   }
+  function openLibrary() {
+    libraryInputRef.current?.click();
+    dismissPhotoHint();
+  }
+  function handleLibraryChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // lets the same photo be reselected later
+    if (file) { setCapturedPhoto(file); setPhotoLimitError(null); }
+  }
+  // Set only for the daily-photo-quota error, so the confirm screen stays up
+  // with an upgrade CTA instead of silently discarding the photo the user
+  // just took (the generic error path below still does that).
+  const [photoLimitError, setPhotoLimitError] = useState<string | null>(null);
   async function handleSavePhoto(petId: string) {
     if (!capturedPhoto) return;
     const file = capturedPhoto;
@@ -426,28 +470,39 @@ export function Dashboard() {
       const savedTo = pets?.find((p) => p.id === petId);
       showNotice(`Saved to ${savedTo?.name ?? "pet"}'s album.`);
       hapticSuccess();
+      setCapturedPhoto(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save the photo');
+      const msg = err instanceof Error ? err.message : 'Could not save the photo';
+      if (msg.includes("today's photo limit") && limits.plan !== 'paid') {
+        setPhotoLimitError(msg);
+      } else {
+        setError(msg);
+        setCapturedPhoto(null);
+      }
     } finally {
       setSavingPhoto(false);
-      setCapturedPhoto(null);
     }
   }
-  // Walk tracking overlay — a boolean is enough (unlike the photo flow,
-  // there's no intermediate "captured file" to hold; WalkScreen owns its
-  // own start/elapsed/distance state internally and only reports back on
-  // save via onSaved).
-  const [walkActive, setWalkActive] = useState(false);
+  // Walk tracking lives in useWalkTracker (called unconditionally below, so
+  // it survives regardless of screen visibility — see that hook's header
+  // comment for why). walkScreenOpen controls ONLY whether the full-screen
+  // WalkScreen UI is showing; a walk can be in progress (walk.phase !==
+  // 'idle') while this is false — that's the minimized state, and
+  // WalkMiniBar (rendered near the tab bar below) is what tells the user
+  // it's still tracking (2026-07-15, Mark: couldn't take a photo mid-walk).
+  const [walkScreenOpen, setWalkScreenOpen] = useState(false);
+  const livingPets = pets ? pets.filter((p) => !p.memorial) : [];
+  async function handleWalkSaved(msg: string) {
+    setWalkScreenOpen(false);
+    showNotice(msg);
+    hapticSuccess();
+  }
+  const walk = useWalkTracker(livingPets, handleWalkSaved, setError);
   // Last GET /achievements result, kept so BadgeScreen (a drill-down of the
   // achievements screen) doesn't re-run the most S3-expensive endpoint just
   // to show a card it was tapped from. Refreshed every time the achievements
   // screen mounts.
   const [achievementsCache, setAchievementsCache] = useState<PetAchievements[] | null>(null);
-  async function handleWalkSaved(msg: string) {
-    setWalkActive(false);
-    showNotice(msg);
-    hapticSuccess();
-  }
   // First-run tour (once per device, phones + native): four cards ending in
   // the push-notification ask — the system dialog only fires once on iOS, so
   // the tour makes the case before spending it. navigator.webdriver skips it
@@ -475,8 +530,8 @@ export function Dashboard() {
       ? 'settings'
       : dashView.type === 'daily'
         ? 'daily'
-        : dashView.type === 'trends'
-          ? 'trends'
+        : dashView.type === 'summary' || dashView.type === 'summary-entry'
+          ? 'summary'
           : dashView.type === 'passports'
             ? 'passports'
             : 'pets';
@@ -493,8 +548,8 @@ export function Dashboard() {
     settingsReturnRef.current =
       activeTab === 'daily'
         ? { type: 'daily' }
-        : activeTab === 'trends'
-          ? { type: 'trends' }
+        : activeTab === 'summary'
+          ? { type: 'summary' }
           : activeTab === 'passports'
             ? { type: 'passports' }
             : { type: 'overview' };
@@ -502,6 +557,20 @@ export function Dashboard() {
   }
 
   function handleTabSelect(tab: MainTab) {
+    // Walk is an action, not a view: the tracking overlay opens over
+    // whatever screen is up, and the active-tab highlight stays put. If a
+    // walk already exists (ready/active/paused/summary — e.g. minimized),
+    // this just reopens it — no restart, no repeat permission prompt.
+    if (tab === 'walk') {
+      if (walk.phase === 'idle') {
+        if (livingPets.length === 0) return;
+        setWalkScreenOpen(true);
+        void walk.beginWalk().then((ok) => { if (!ok) setWalkScreenOpen(false); });
+      } else {
+        setWalkScreenOpen(true);
+      }
+      return;
+    }
     if (tab === activeTab) {
       // iOS convention: re-tapping the active tab pops its stack to the root.
       if (tab === 'pets' && dashView.type !== 'overview') backToOverview();
@@ -509,7 +578,7 @@ export function Dashboard() {
     }
     if (tab === 'pets') setDashView(lastPetsViewRef.current);
     else if (tab === 'daily') setDashView({ type: 'daily' });
-    else if (tab === 'trends') setDashView({ type: 'trends' });
+    else if (tab === 'summary') setDashView({ type: 'summary' });
     else if (tab === 'passports') setDashView({ type: 'passports' });
     else setDashView({ type: 'settings', section: 'account' });
   }
@@ -534,6 +603,7 @@ export function Dashboard() {
         ? 3
         : dashView.type === 'change-password' ||
             dashView.type === 'profile' ||
+            dashView.type === 'summary-entry' ||
             (dashView.type === 'detail' && editView.type !== 'list')
           ? 2
           : 1;
@@ -775,7 +845,7 @@ export function Dashboard() {
               screens pushed within the pets stack show a back button on desktop. */}
           {dashView.type === 'overview' ||
           dashView.type === 'daily' ||
-          dashView.type === 'trends' ||
+          dashView.type === 'summary' ||
           dashView.type === 'settings' ||
           dashView.type === 'change-password' ? (
             <Link className="wordmark dashboard-header__wordmark-desktop" to="/">🐾 Petshots</Link>
@@ -824,6 +894,7 @@ export function Dashboard() {
               <AccountMenu
                 email={email ?? ''}
                 onOpenSection={openSettings}
+                onOpenPassports={() => setDashView({ type: 'passports' })}
                 onLogout={handleLogout}
               />
             </div>
@@ -847,6 +918,17 @@ export function Dashboard() {
           accept="image/*"
           capture="environment"
           onChange={handleCameraChange}
+          style={{ display: 'none' }}
+        />
+
+        {/* Hidden — the 📎 "Attach a photo" icon button triggers this one.
+            NO capture attribute, so the OS shows its normal photo chooser
+            (library/browse) instead of forcing the camera. */}
+        <input
+          ref={libraryInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleLibraryChange}
           style={{ display: 'none' }}
         />
 
@@ -898,6 +980,9 @@ export function Dashboard() {
             onChangePassword={() => setDashView({ type: 'change-password' })}
             onLogout={handleLogout}
             onError={setError}
+            onNotice={showNotice}
+            onLimitsChange={setLimits}
+            onUpgrade={() => setDashView({ type: 'settings', section: 'account' })}
             onAccountDeleted={() => { logout(); navigate('/'); }}
           />
         ) : dashView.type === 'change-password' ? (
@@ -908,7 +993,7 @@ export function Dashboard() {
           />
         ) : dashView.type === 'daily' ? (
           <DailyAllScreen
-            pets={pets}
+            pets={pets.filter((p) => !p.memorial)}
             onError={setError}
             onOpenPet={(petId) => setDashView({ type: 'detail', petId, tab: 'daily' })}
             onMedsChanged={(petId, meds) =>
@@ -916,14 +1001,17 @@ export function Dashboard() {
             }
             onAddPet={() => setDashView({ type: 'add-pet' })}
           />
-        ) : dashView.type === 'trends' ? (
-          <TrendsAllScreen
+        ) : dashView.type === 'summary' ? (
+          <SummaryScreen
             pets={pets}
-            plan={limits.plan}
-            onError={setError}
-            onNotice={showNotice}
             onAddPet={() => setDashView({ type: 'add-pet' })}
-            onUpgrade={() => setDashView({ type: 'settings', section: 'account' })}
+            onOpenEntry={(kind, entryKey) => setDashView({ type: 'summary-entry', kind, entryKey })}
+          />
+        ) : dashView.type === 'summary-entry' ? (
+          <SummaryArchiveEntryScreen
+            kind={dashView.kind}
+            entryKey={dashView.entryKey}
+            onBack={() => setDashView({ type: 'summary' })}
           />
         ) : dashView.type === 'passports' ? (
           <PassportsAllScreen
@@ -952,7 +1040,6 @@ export function Dashboard() {
             onError={setError}
             onLoaded={setAchievementsCache}
             onOpenBadges={(petId, cardId) => setDashView({ type: 'badges', petId, cardId })}
-            onOpenWalkHistory={() => setDashView({ type: 'walk-history' })}
           />
         ) : dashView.type === 'badges' ? (
           <BadgeScreen
@@ -1025,6 +1112,11 @@ export function Dashboard() {
               }}
               onCancel={() => setEditView({ type: 'list' })}
               onError={setError}
+              onUpgrade={
+                limits.plan === 'paid'
+                  ? undefined
+                  : () => setDashView({ type: 'settings', section: 'account' })
+              }
             />
           ) : (
             <PetDetailScreen
@@ -1089,8 +1181,7 @@ export function Dashboard() {
             <div className="pets-header-row">
               <h1 className="large-title">Pets</h1>
               {/* Swipe is touch-only (no desktop affordance) — these mirror
-                  it for mouse/desktop, same pairing as TrendsRangeNav's
-                  buttons alongside its own swipe gesture. */}
+                  it for mouse/desktop. */}
               <div className="pets-header-row__actions">
                 <button
                   type="button"
@@ -1104,21 +1195,22 @@ export function Dashboard() {
                 <button
                   type="button"
                   className="pets-header-row__icon-btn"
+                  onClick={openLibrary}
+                  aria-label="Attach a photo"
+                  title="Attach a photo"
+                >
+                  📎
+                </button>
+                <button
+                  type="button"
+                  className="pets-header-row__icon-btn"
                   onClick={() => setDashView({ type: 'albums' })}
                   aria-label="View albums"
                   title="View albums"
                 >
                   🖼️
                 </button>
-                <button
-                  type="button"
-                  className="pets-header-row__icon-btn"
-                  onClick={() => setWalkActive(true)}
-                  aria-label="Start a walk"
-                  title="Start a walk"
-                >
-                  🚶
-                </button>
+                {/* Walk moved to the bottom tab bar (2026-07-13). */}
                 <button
                   type="button"
                   className="pets-header-row__icon-btn"
@@ -1197,33 +1289,24 @@ export function Dashboard() {
                 {pets.length - limits.maxPets === 1
                   ? 'one of your pets is'
                   : `${pets.length - limits.maxPets} of your pets are`}{' '}
-                read-only — everything stays viewable.
-                {/* App Store 3.1.1: no external-purchase steering on iOS */}
-                {!isNative && (
-                  <>
-                    {' '}
-                    <button
-                      className="btn btn--link"
-                      onClick={() => setDashView({ type: 'settings', section: 'account' })}
-                    >
-                      Upgrade to unlock →
-                    </button>
-                  </>
-                )}
+                read-only — everything stays viewable.{' '}
+                <button
+                  className="btn btn--link"
+                  onClick={() => setDashView({ type: 'settings', section: 'account' })}
+                >
+                  Upgrade to unlock →
+                </button>
               </p>
             ) : pets.length === limits.maxPets ? (
               <p className="pet-pins__limit">
                 You're at the {limits.maxPets}-pet limit.{' '}
                 {limits.plan === 'free' ? (
-                  // App Store 3.1.1: no external-purchase steering on iOS
-                  isNative ? null : (
-                    <button
-                      className="btn btn--link"
-                      onClick={() => setDashView({ type: 'settings', section: 'account' })}
-                    >
-                      Upgrade for more →
-                    </button>
-                  )
+                  <button
+                    className="btn btn--link"
+                    onClick={() => setDashView({ type: 'settings', section: 'account' })}
+                  >
+                    Upgrade for more →
+                  </button>
                 ) : (
                   'Remove a pet to add another.'
                 )}
@@ -1255,358 +1338,234 @@ export function Dashboard() {
           file={capturedPhoto}
           pets={pets}
           saving={savingPhoto}
+          limitError={photoLimitError}
           onSave={handleSavePhoto}
-          onDiscard={() => setCapturedPhoto(null)}
+          onUpgrade={() => { setCapturedPhoto(null); setDashView({ type: 'settings', section: 'account' }); }}
+          onDiscard={() => { setCapturedPhoto(null); setPhotoLimitError(null); }}
         />
       )}
-      {walkActive && pets && pets.length > 0 && (
+      {walkScreenOpen && (
         <WalkScreen
-          pets={pets}
-          onSaved={handleWalkSaved}
-          onCancel={() => setWalkActive(false)}
-          onError={setError}
+          pets={livingPets}
+          walk={walk}
+          onClose={() => setWalkScreenOpen(false)}
+          onOpenHistory={() => { setWalkScreenOpen(false); setDashView({ type: 'walk-history' }); }}
         />
+      )}
+      {!walkScreenOpen && walk.phase !== 'idle' && (
+        <WalkMiniBar walk={walk} onExpand={() => setWalkScreenOpen(true)} />
       )}
       {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
     </>
   );
 }
 
-// The bottom bar's Trends tab: a simple (no charts yet — v2) weekly summary
-// per pet, plus a monthly rollup with a one-line "what's moving the needle"
-// headline as a paid perk. Fetches its own data (GET /trends) rather than
-// riding the pets/limits load, since it's the one screen that needs it.
-// "On track / Slipping / Off track" — the same 0-100 threshold as
-// statusColor's red/amber/green, phrased as a gauge label.
-function gaugeStatusLabel(pct: number): string {
-  return pct >= 80 ? 'On track' : pct >= 50 ? 'Slipping' : 'Off track';
-}
-
-function TrendsAllScreen({
+// The bottom bar's Summary tab: today's AI-written story of the household's
+// last 7 days, with the week's photos and light per-pet numbers. The server
+// generates the story at most once per day per pool and caches it — the
+// first visit of the day is the slow one (several seconds of model time),
+// so the loading state says what's happening rather than showing a bare
+// spinner. Deliberately no charts, no gauges, no red/amber status labels:
+// this screen replaced Trends precisely because "Off track" read as a
+// scolding. Numbers appear as plain facts; the story carries the meaning.
+function SummaryScreen({
   pets,
-  plan,
-  onError,
-  onNotice,
   onAddPet,
-  onUpgrade,
+  onOpenEntry,
 }: {
   pets: Pet[];
-  plan: 'free' | 'paid';
-  onError: (msg: string | null) => void;
-  onNotice: (msg: string) => void;
   onAddPet: () => void;
-  onUpgrade: () => void;
+  onOpenEntry: (kind: 'weeks' | 'months', entryKey: string) => void;
 }) {
-  const [activeView, setActiveView] = useState<'week' | 'month'>('week');
+  const [data, setData] = useState<SummaryResponse | null>(null);
+  const [failed, setFailed] = useState(false);
+  // The persistent archive (weekly stories every Monday, month rollups on
+  // the 1st — server crons). Loads alongside today's story; an empty
+  // archive just hides the section (weeks accrue from 2026-07-13 on).
+  const [archive, setArchive] = useState<{ weeks: SummaryArchiveItem[]; months: SummaryArchiveItem[] } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSummary()
+      .then((res) => { if (!cancelled) setData(res); })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    getSummaryArchive()
+      .then((res) => { if (!cancelled) setArchive(res); })
+      .catch(() => {}); // archive is best-effort; today's story is the screen
+    return () => { cancelled = true; };
+  }, []);
 
   if (pets.length === 0) {
     return (
-      <div className="empty-overview">
-        <span className="empty-state__icon" aria-hidden="true">🐾</span>
-        <p>Trends start with a pet. Add yours to get going.</p>
-        <button className="btn btn--primary" onClick={onAddPet}>
-          Add your first pet
-        </button>
+      <div className="page summary-all">
+        <h1 className="large-title">Summary</h1>
+        <div className="card summary-all__empty">
+          <p>Add your first pet and the story of your week starts here.</p>
+          <button className="btn btn--primary" onClick={onAddPet}>Add a pet</button>
+        </div>
       </div>
     );
   }
 
+  const moodEmoji = (avg: number | null) =>
+    avg === null ? null : avg >= 4.5 ? '😄' : avg >= 3.5 ? '🙂' : avg >= 2.5 ? '😐' : avg >= 1.5 ? '🙁' : '😢';
+
   return (
-    <div className="trends-all">
-      <h1 className="large-title">Trends</h1>
-      <div className="tab-bar">
-        <button
-          className={`tab-bar__tab${activeView === 'week' ? ' tab-bar__tab--active' : ''}`}
-          onClick={() => { hapticTap(); setActiveView('week'); }}
-        >
-          Weekly
-        </button>
-        <button
-          className={`tab-bar__tab${activeView === 'month' ? ' tab-bar__tab--active' : ''}`}
-          onClick={() => { hapticTap(); setActiveView('month'); }}
-        >
-          Monthly
-        </button>
-      </div>
-      {activeView === 'week' ? (
-        <WeeklyTrendsView plan={plan} onError={onError} onNotice={onNotice} />
+    <div className="page summary-all">
+      <h1 className="large-title">Summary</h1>
+      {failed ? (
+        <div className="card summary-all__empty">
+          <p>Couldn't load today's summary — check your connection and try again.</p>
+        </div>
+      ) : data === null ? (
+        <div className="card summary-all__writing" role="status">
+          <span className="summary-all__writing-icon" aria-hidden="true">✍️</span>
+          <p>Writing today's story…</p>
+          <p className="subtle">The first look of the day takes a few seconds.</p>
+        </div>
       ) : (
-        <MonthlyTrendsView plan={plan} onError={onError} onNotice={onNotice} onUpgrade={onUpgrade} />
+        <>
+          {data.photos.length > 0 && (
+            <div className="summary-all__photos">
+              {data.photos.map((p) => (
+                <img key={p.id} src={p.url} alt="" loading="lazy" />
+              ))}
+            </div>
+          )}
+          {data.story ? (
+            <div className="card summary-all__story">
+              {data.story.split(/\n\n+/).map((para, i) => (
+                <p key={i}>{para}</p>
+              ))}
+            </div>
+          ) : (
+            <div className="card summary-all__empty">
+              <p>
+                {data.reason === 'AI_FAILED'
+                  ? "Couldn't write today's story — try again in a little while."
+                  : 'Not much logged yet this week — check off a few Daily items or snap a photo, and the story starts here.'}
+              </p>
+            </div>
+          )}
+          <div className="summary-all__chips">
+            {data.pets.map((p) => (
+              <div key={p.petId} className="summary-all__chip card">
+                <span className="summary-all__chip-name">{p.name}</span>
+                <span className="subtle">
+                  {[
+                    p.walks && p.walks.count > 0
+                      ? `${p.walks.count} walk${p.walks.count === 1 ? '' : 's'} · ${p.walks.miles} mi`
+                      : null,
+                    // Feeding lives here as a quiet stat — deliberately kept
+                    // OUT of the story narrative (see GET /summary).
+                    p.meals && p.meals.done > 0 ? `🍽 ${p.meals.done} meals logged` : null,
+                    p.carePct > 0 ? `${p.carePct}% of care done` : null,
+                    moodEmoji(p.moodAvg),
+                  ]
+                    .filter(Boolean)
+                    .join(' · ') || 'A quiet week'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {archive && (archive.months.length > 0 || archive.weeks.length > 0) && (
+        <section className="summary-archive">
+          <h2 className="summary-archive__title">Story archive</h2>
+          {archive.months.map((m) => (
+            <button
+              key={`m-${m.key}`}
+              type="button"
+              className="summary-archive__item card"
+              onClick={() => { hapticTap(); onOpenEntry('months', m.key); }}
+            >
+              <span className="summary-archive__item-label">
+                📖 {m.monthLabel ?? m.key}
+              </span>
+              <span className="subtle summary-archive__item-preview">{m.preview}…</span>
+            </button>
+          ))}
+          {archive.weeks.map((w) => (
+            <button
+              key={`w-${w.key}`}
+              type="button"
+              className="summary-archive__item card"
+              onClick={() => { hapticTap(); onOpenEntry('weeks', w.key); }}
+            >
+              <span className="summary-archive__item-label">
+                Week of {formatDate(w.rangeStart)}
+              </span>
+              <span className="subtle summary-archive__item-preview">{w.preview}…</span>
+            </button>
+          ))}
+        </section>
       )}
     </div>
   );
 }
 
-// Swipe-back-in-time boundary notice — same voice as the Daily tab's
-// (PetDailyHistory in this file): plan-aware, one line, no error styling.
-function historyLimitNotice(plan: 'free' | 'paid', unit: 'week' | 'month'): string {
-  return plan === 'paid'
-    ? 'That’s the end of the saved history.'
-    : `${unit === 'week' ? 'Weekly' : 'Monthly'} trends go back 2 weeks on your plan.`;
-}
-
-function WeeklyTrendsView({
-  plan,
-  onError,
-  onNotice,
+// A saved story from the archive — same layout as today's story, with a
+// back header (push/pop pattern like albums → album).
+function SummaryArchiveEntryScreen({
+  kind,
+  entryKey,
+  onBack,
 }: {
-  plan: 'free' | 'paid';
-  onError: (msg: string | null) => void;
-  onNotice: (msg: string) => void;
+  kind: 'weeks' | 'months';
+  entryKey: string;
+  onBack: () => void;
 }) {
-  const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<TrendsResponse<TrendsWeekPet> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
+  const [entry, setEntry] = useState<SummaryArchiveEntry | null>(null);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    getTrendsWeek(offset)
-      .then((res) => { if (!cancelled) setData(res); })
-      .catch((e: Error) => { if (!cancelled) onError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+    getSummaryEntry(kind, entryKey)
+      .then((res) => { if (!cancelled) setEntry(res); })
+      .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset]);
+  }, [kind, entryKey]);
 
-  function step(direction: 'back' | 'forward') {
-    if (direction === 'forward') {
-      if (offset <= 0) return;
-      hapticTap();
-      setOffset((o) => o - 1);
-      return;
-    }
-    if (data && offset >= data.maxOffset) {
-      onNotice(historyLimitNotice(plan, 'week'));
-      return;
-    }
-    hapticTap();
-    setOffset((o) => o + 1);
-  }
-  useSwipeStep(step);
-
-  async function handleSend() {
-    setSending(true);
-    try {
-      const res = await sendTrendsReport('week');
-      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setSending(false);
-    }
-  }
-
-  if (loading || !data) return <p className="trends-all__loading">Loading trends…</p>;
+  const title = entry
+    ? entry.monthLabel ?? `Week of ${formatDate(entry.rangeStart)}`
+    : ' ';
 
   return (
-    <>
-      <TrendsRangeNav unit="week" offset={data.offset} maxOffset={data.maxOffset} rangeStart={data.rangeStart} rangeEnd={data.rangeEnd} onStep={step} />
-      {offset === 0 && (
-        <div className="trends-all__send-buttons">
-          <button className="btn btn--link btn--sm" disabled={sending} onClick={() => void handleSend()}>
-            {sending ? 'Sending…' : 'Email this week →'}
-          </button>
+    <div className="page summary-all">
+      <nav className="screen-nav">
+        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+          ‹ Summary
+        </button>
+        <span className="screen-nav__title">{title}</span>
+      </nav>
+      {failed ? (
+        <div className="card summary-all__empty">
+          <p>Couldn't load this story — try again in a moment.</p>
         </div>
-      )}
-      {data.pets.map((t) => {
-        const mood = t.moodAvg !== null ? moodStatus(t.moodAvg) : null;
-        return (
-          <section key={t.petId} className="card trends-all__pet">
-            <div className="trends-hero">
-              <div className="trends-hero__text">
-                <h2 className="trends-all__pet-name">{t.name}</h2>
-                <p className="trends-hero__caption">Care consistency</p>
-              </div>
-              <GaugeDial
-                pct={t.careConsistency}
-                value={`${t.careConsistency}%`}
-                label={gaugeStatusLabel(t.careConsistency)}
-                color={statusColor(t.careConsistency)}
-              />
-            </div>
-            <div className="trends-chart-block">
-              <div className="trends-chart-block__caption">
-                Mood
-                {mood && <span className="trends-status" style={{ color: mood.color }}> · {mood.label}</span>}
-              </div>
-              <Sparkline points={t.moodSeries} color="var(--primary)" />
-            </div>
-            {t.weight && (
-              <div className="trends-chart-block">
-                <div className="trends-chart-block__caption">
-                  Weight — {t.weight.value} {t.weight.unit}
-                  {t.weight.deltaWeek != null &&
-                    ` (${t.weight.deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(t.weight.deltaWeek)} ${t.weight.unit})`}
-                </div>
-                <Sparkline points={t.weightSeries} color="var(--ok)" />
-              </div>
-            )}
-            <div className="trends-dotrows">
-              {t.checklist.map((c) => (
-                <ChecklistPercentRow
-                  key={c.id}
-                  item={c}
-                  pct={c.total ? Math.round((c.count / c.total) * 100) : 0}
-                  caption={`${c.count}/${c.total} days`}
-                />
+      ) : entry === null ? (
+        <p className="subtle">Loading…</p>
+      ) : (
+        <>
+          {entry.photos.length > 0 && (
+            <div className="summary-all__photos">
+              {entry.photos.map((p) => (
+                <img key={p.id} src={p.url} alt="" loading="lazy" />
               ))}
             </div>
-            {t.medsGiven > 0 && <p className="trends-all__row">Meds given: {t.medsGiven}</p>}
-            {t.walks && t.walks.count > 0 && (
-              <p className="trends-all__row">
-                Walks: {t.walks.count} · {t.walks.miles} mi
-                {t.walks.kcal ? ` · ≈${t.walks.kcal} kcal` : ''}
-              </p>
-            )}
-            {t.insight && (
-              <div className="notice-card notice-card--headsup trends-all__insight">
-                <p className="notice-card__body">{t.insight}</p>
-              </div>
-            )}
-          </section>
-        );
-      })}
-    </>
-  );
-}
-
-function MonthlyTrendsView({
-  plan,
-  onError,
-  onNotice,
-  onUpgrade,
-}: {
-  plan: 'free' | 'paid';
-  onError: (msg: string | null) => void;
-  onNotice: (msg: string) => void;
-  onUpgrade: () => void;
-}) {
-  const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<TrendsResponse<TrendsMonthPet> | null>(null);
-  const [loading, setLoading] = useState(plan === 'paid');
-  const [sending, setSending] = useState(false);
-
-  useEffect(() => {
-    if (plan !== 'paid') return;
-    let cancelled = false;
-    setLoading(true);
-    getTrendsMonth(offset)
-      .then((res) => { if (!cancelled) setData(res); })
-      .catch((e: Error) => { if (!cancelled) onError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset, plan]);
-
-  function step(direction: 'back' | 'forward') {
-    if (plan !== 'paid') return;
-    if (direction === 'forward') {
-      if (offset <= 0) return;
-      hapticTap();
-      setOffset((o) => o - 1);
-      return;
-    }
-    if (data && offset >= data.maxOffset) {
-      onNotice(historyLimitNotice(plan, 'month'));
-      return;
-    }
-    hapticTap();
-    setOffset((o) => o + 1);
-  }
-  useSwipeStep(step);
-
-  async function handleSend() {
-    setSending(true);
-    try {
-      const res = await sendTrendsReport('month');
-      onNotice(res.sent ? 'Sent! Check your email.' : "Nothing to report yet — check back once you've logged some care.");
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setSending(false);
-    }
-  }
-
-  if (plan !== 'paid') {
-    return (
-      <p className="trends-all__upgrade">
-        {/* App Store 3.1.1: no external-purchase steering on iOS */}
-        Monthly trends are a paid feature.{' '}
-        {!isNative && (
-          <button className="btn btn--link" onClick={onUpgrade}>
-            Upgrade to unlock →
-          </button>
-        )}
-      </p>
-    );
-  }
-
-  if (loading || !data) return <p className="trends-all__loading">Loading trends…</p>;
-
-  return (
-    <>
-      <TrendsRangeNav unit="month" offset={data.offset} maxOffset={data.maxOffset} rangeStart={data.rangeStart} rangeEnd={data.rangeEnd} onStep={step} />
-      {offset === 0 && (
-        <div className="trends-all__send-buttons">
-          <button className="btn btn--link btn--sm" disabled={sending} onClick={() => void handleSend()}>
-            {sending ? 'Sending…' : 'Email this month →'}
-          </button>
-        </div>
+          )}
+          <div className="card summary-all__story">
+            {entry.story.split(/\n\n+/).map((para, i) => (
+              <p key={i}>{para}</p>
+            ))}
+          </div>
+          <p className="subtle summary-archive__range">
+            {formatDate(entry.rangeStart)} – {formatDate(entry.rangeEnd)}
+          </p>
+        </>
       )}
-      {data.pets.map((m) => {
-        const mood = m.moodAvg !== null ? moodStatus(m.moodAvg) : null;
-        return (
-          <section key={m.petId} className="card trends-all__pet">
-            <div className="trends-hero">
-              <div className="trends-hero__text">
-                <h2 className="trends-all__pet-name">{m.name}</h2>
-                <p className="trends-hero__caption">Care consistency</p>
-              </div>
-              <GaugeDial
-                pct={m.careConsistency}
-                value={`${m.careConsistency}%`}
-                label={gaugeStatusLabel(m.careConsistency)}
-                color={statusColor(m.careConsistency)}
-              />
-            </div>
-            {m.headline && (
-              <div className="notice-card notice-card--headsup trends-all__insight">
-                <p className="notice-card__body">{m.headline}</p>
-              </div>
-            )}
-            <div className="trends-chart-block">
-              <div className="trends-chart-block__caption">
-                Mood
-                {mood && <span className="trends-status" style={{ color: mood.color }}> · {mood.label}</span>}
-                {m.moodAvgLastMonth != null && ` (prior period: ${m.moodAvgLastMonth.toFixed(1)})`}
-              </div>
-              <Sparkline points={m.moodSeries} color="var(--primary)" />
-            </div>
-            {m.weightSeries.some((p) => p.value !== null) && (
-              <div className="trends-chart-block">
-                <div className="trends-chart-block__caption">Weight{m.weightUnit && ` (${m.weightUnit})`}</div>
-                <Sparkline points={m.weightSeries} color="var(--ok)" />
-              </div>
-            )}
-            <div className="trends-dotrows">
-              {m.checklist.map((c) => (
-                <ChecklistPercentRow key={c.id} item={c} pct={c.pctThis} caption={`prior: ${c.pctLast}%`} />
-              ))}
-            </div>
-            {m.medsGiven > 0 && <p className="trends-all__row">Meds given: {m.medsGiven}</p>}
-            {m.walks && (m.walks.count > 0 || m.walks.countLast > 0) && (
-              <p className="trends-all__row">
-                Walks: {m.walks.count} · {m.walks.miles} mi
-                {m.walks.kcal ? ` · ≈${m.walks.kcal} kcal` : ''}
-                <span className="trends-all__row-caption"> (last month: {m.walks.countLast} · {m.walks.milesLast} mi)</span>
-              </p>
-            )}
-          </section>
-        );
-      })}
-    </>
+    </div>
   );
 }
 
@@ -1664,10 +1623,12 @@ function PassportsAllScreen({
 function AccountMenu({
   email,
   onOpenSection,
+  onOpenPassports,
   onLogout,
 }: {
   email: string;
   onOpenSection: (section: SettingsSection) => void;
+  onOpenPassports: () => void;
   onLogout: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1705,6 +1666,16 @@ function AccountMenu({
       {open && (
         <div className="profile-menu__dropdown" role="menu">
           <div className="profile-menu__header">{email}</div>
+          <div className="profile-menu__divider" />
+          {/* Passport lives here, not the header or the tab bar (bounced
+              between both — header icon 2026-07-13, wasn't liked either;
+              the tab bar slot went to Walk that same day). */}
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenPassports(); }}
+          >
+            Passport
+          </button>
           <div className="profile-menu__divider" />
           <button
             role="menuitem"
@@ -1987,8 +1958,16 @@ function PetPin({
   onSelect: () => void;
   onPresent: (() => void) | null; // long-press → fullscreen records (the door moment)
 }) {
-  const status = docs ? petOverallStatus(docs, meds) : 'none';
-  const subLine = docsLoading && !docs ? 'Loading…' : petPinStatus(docs ?? [], meds);
+  // Memorial pets stay on the overview (their records are still one tap
+  // away) but read as a remembrance, not a to-do: dimmed, dove, no
+  // vaccine-status ring or nag line.
+  const isMemorial = pet.memorial === true;
+  const status = isMemorial ? 'none' : docs ? petOverallStatus(docs, meds) : 'none';
+  const subLine = isMemorial
+    ? '🕊️ In loving memory'
+    : docsLoading && !docs
+      ? 'Loading…'
+      : petPinStatus(docs ?? [], meds);
 
   // Long-press = Present. Tap still opens the pet; moving the finger
   // (scrolling) cancels; the click after a fired press is swallowed.
@@ -2005,7 +1984,7 @@ function PetPin({
 
   return (
     <button
-      className="pet-pin"
+      className={`pet-pin${isMemorial ? ' pet-pin--memorial' : ''}`}
       onPointerDown={(e) => {
         if (!onPresent) return;
         pressFired.current = false;
@@ -2333,6 +2312,7 @@ function PetDetailScreen({
             historyDays={limits.dailyHistoryDays ?? DAILY_HISTORY_FALLBACK_DAYS}
             onError={onError}
             onNotice={onNotice}
+            onUpgrade={onUpgrade}
             onMedsChanged={onMedsChanged}
           />
         ) : (
@@ -2483,6 +2463,7 @@ function DateNav({
         className="date-nav__step"
         aria-label="Previous day"
         disabled={date <= minDate}
+        title={date <= minDate && historyDays <= 14 ? 'Daily history goes back 2 weeks on your plan' : undefined}
         onClick={() => { hapticTap(); onChange(addDays(date, -1)); }}
       >
         ‹
@@ -2558,6 +2539,7 @@ function PetDailyHistory({
   historyDays,
   onError,
   onNotice,
+  onUpgrade,
   onMedsChanged,
 }: {
   petId: string;
@@ -2566,6 +2548,7 @@ function PetDailyHistory({
   historyDays: number;
   onError: (msg: string | null) => void;
   onNotice: (msg: string) => void;
+  onUpgrade: () => void;
   onMedsChanged: (meds: Med[]) => void;
 }) {
   // One-time discoverability tip — touch devices only (desktop can't swipe),
@@ -2575,8 +2558,13 @@ function PetDailyHistory({
       window.matchMedia('(pointer: coarse)').matches &&
       !localStorage.getItem('petshots.dailySwipeHint'),
   );
+  // Shown in place of the swipe hint once a free-plan user swipes/steps past
+  // the 2-week window — the boundary itself is the natural upgrade moment.
+  const [hitHistoryLimit, setHitHistoryLimit] = useState(false);
   const today = localToday();
   const minDate = addDays(today, -(historyDays - 1));
+
+  useEffect(() => setHitHistoryLimit(false), [date]);
 
   function dismissHint() {
     localStorage.setItem('petshots.dailySwipeHint', '1');
@@ -2587,11 +2575,8 @@ function PetDailyHistory({
     const next = addDays(date, delta);
     if (next > today) return; // already on today — nothing newer to show
     if (next < minDate) {
-      onNotice(
-        historyDays > 14
-          ? 'That’s the end of the saved history.'
-          : 'Daily history goes back 2 weeks on your plan.',
-      );
+      if (historyDays > 14) onNotice('That’s the end of the saved history.');
+      else setHitHistoryLimit(true);
       return;
     }
     if (showHint) dismissHint(); // they found the gesture — tip served its purpose
@@ -2642,10 +2627,19 @@ function PetDailyHistory({
           </button>
         </p>
       )}
-      {date !== today && (
+      {hitHistoryLimit ? (
         <p className="daily-past-note" role="status">
-          Viewing a past day — swipe left or tap the date to get back to today.
+          Daily history goes back 2 weeks on your plan.{' '}
+          <button className="btn btn--link" onClick={onUpgrade}>
+            Upgrade for a year of history →
+          </button>
         </p>
+      ) : (
+        date !== today && (
+          <p className="daily-past-note" role="status">
+            Viewing a past day — swipe left or tap the date to get back to today.
+          </p>
+        )
       )}
       <DailySection petId={petId} date={date} onError={onError} onMedsChanged={onMedsChanged} />
     </div>
@@ -2787,6 +2781,9 @@ function DailySection({
   const [editing, setEditing] = useState(false);
   const [newItem, setNewItem] = useState('');
   const [busy, setBusy] = useState(false);
+  const [mealNudgeDismissed, setMealNudgeDismissed] = useState(
+    () => localStorage.getItem(`petshots.mealNudgeDismissed.${petId}`) === '1',
+  );
   const day = date ?? localToday();
   // Past days are history, not a backfill surface — checks/mood are view-only.
   const readOnly = day !== localToday();
@@ -2862,6 +2859,21 @@ function DailySection({
 
   const customItems = state.items.filter((i) => !i.med);
   const doneCount = state.items.filter((i) => state.checks[i.id]).length;
+  // Meal-tracking disuse prompt (server-computed hint; see DailyState).
+  // Dismissal is per-pet, per-device — a "Keep" shouldn't chase the user
+  // across the family's phones.
+  const isFeedingItem = (i: DailyItem) =>
+    i.id === 'preset-breakfast' || i.id === 'preset-dinner' || /\b(breakfast|lunch|dinner|meal|feed(ing)?)\b/i.test(i.name);
+  const mealNudgeKey = `petshots.mealNudgeDismissed.${petId}`;
+  const showMealNudge =
+    !readOnly && state.feedingIdle === true && !mealNudgeDismissed && customItems.some(isFeedingItem);
+
+  async function dropFeedingItems() {
+    hapticTap();
+    localStorage.setItem(mealNudgeKey, '1');
+    setMealNudgeDismissed(true);
+    await saveItems(customItems.filter((i) => !isFeedingItem(i)));
+  }
 
   return (
     <section className="card daily">
@@ -2904,6 +2916,27 @@ function DailySection({
           </button>
         )}
       </div>
+
+      {showMealNudge && (
+        <div className="daily__meal-nudge" role="status">
+          <p>Not tracking meals? They can come off this list — everything else stays.</p>
+          <div className="daily__meal-nudge-actions">
+            <button type="button" className="btn btn--link" disabled={busy} onClick={() => void dropFeedingItems()}>
+              Remove meal items
+            </button>
+            <button
+              type="button"
+              className="btn btn--link"
+              onClick={() => {
+                localStorage.setItem(mealNudgeKey, '1');
+                setMealNudgeDismissed(true);
+              }}
+            >
+              Keep them
+            </button>
+          </div>
+        </div>
+      )}
 
       {state.items.length === 0 && (
         <p className="subtle">
@@ -3008,11 +3041,15 @@ function PhotoLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
 
 // ---- documents ----
 
+// Compared against by ReviewExtractionScreen to decide whether to show a
+// quiet upgrade link alongside this note — kept as one constant so the two
+// spots can't drift.
+const AI_QUOTA_NOTE = "You've used today's document scans — fill in the details below and they'll save just the same.";
+
 // Friendly framing for the machine-readable analyze errors — every one of
 // these lands the user on the manual form with their upload intact.
 function aiFailureNote(message: string): string {
-  if (message === 'AI_QUOTA_EXCEEDED')
-    return "You've used today's document scans — fill in the details below and they'll save just the same.";
+  if (message === 'AI_QUOTA_EXCEEDED') return AI_QUOTA_NOTE;
   if (message === 'TOO_LARGE_FOR_AI')
     return 'This file is too large to read automatically — fill in the details below.';
   if (message === 'UNSUPPORTED_TYPE_FOR_AI')
@@ -3565,6 +3602,7 @@ function ReviewExtractionScreen({
   onDone,
   onCancel,
   onError,
+  onUpgrade,
 }: {
   pet: Pet;
   docs: Doc[];
@@ -3577,6 +3615,10 @@ function ReviewExtractionScreen({
   onDone: (message: string, profileApplied: boolean) => Promise<void>;
   onCancel: () => void;
   onError: (msg: string | null) => void;
+  // Only passed for free-plan callers — paid plans have no higher tier for
+  // this quota to point at. Renders a quiet link next to the AI_QUOTA_NOTE
+  // note only (not the other soft AI-failure notes).
+  onUpgrade?: () => void;
 }) {
   const remaining = Math.max(0, maxDocs - docs.length);
   const vaccines = extraction?.vaccines ?? [];
@@ -3728,6 +3770,14 @@ function ReviewExtractionScreen({
         {intro && (
           <p className={`ai-note${intro.tone === 'ok' ? ' ai-note--ok' : ''}`} role="status">
             {intro.text}
+            {aiNote === AI_QUOTA_NOTE && onUpgrade && (
+              <>
+                {' '}
+                <button className="btn btn--link" onClick={onUpgrade}>
+                  Upgrade for more scans →
+                </button>
+              </>
+            )}
           </p>
         )}
 
@@ -4931,12 +4981,57 @@ function ProfileEditScreen({
   const [vetPhone, setVetPhone] = useState(pet.vetPhone ?? '');
   const [emergencyContact, setEmergencyContact] = useState(pet.emergencyContact ?? '');
   const [busy, setBusy] = useState(false);
+  // Memorial state — PUT /pets is a full replace, so these ride along on
+  // every save (see handleSave) or the flag would silently clear.
+  const [memorial, setMemorial] = useState(pet.memorial === true);
+  const [passedOn, setPassedOn] = useState(pet.passedOn ?? '');
+  const [confirmingMemorial, setConfirmingMemorial] = useState(false);
   // Deleting is deliberate: type the pet's name to arm the button. The old
   // one-tap-then-undo-toast flow was too easy to trip without noticing.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteText, setDeleteText] = useState('');
   const deleteArmed =
     deleteText.trim().toLowerCase() === pet.name.trim().toLowerCase();
+
+  function currentFields(over?: { memorial?: boolean; passedOn?: string }) {
+    return {
+      name: name.trim() || pet.name,
+      species,
+      breed: breed || undefined,
+      dob: dob || undefined,
+      weight: weight || undefined,
+      fixed: fixed === 'true' ? true : fixed === 'false' ? false : undefined,
+      microchip: microchip || undefined,
+      allergies: allergies || undefined,
+      behavior: behavior || undefined,
+      notes: notes || undefined,
+      vetName: vetName || undefined,
+      vetPhone: vetPhone || undefined,
+      emergencyContact: emergencyContact || undefined,
+      memorial: (over?.memorial ?? memorial) || undefined,
+      passedOn: (over?.passedOn ?? passedOn) || undefined,
+    };
+  }
+
+  // Setting/clearing the memorial flag saves immediately (its own quiet
+  // moment, not bundled with "Save profile") — reminders, stories, and
+  // badges stop right away, not whenever the form next gets submitted.
+  async function handleMemorial(next: boolean, date?: string) {
+    setBusy(true);
+    onError(null);
+    try {
+      await updatePet(pet.id, currentFields({ memorial: next, passedOn: next ? (date ?? '') : '' }));
+      setMemorial(next);
+      setPassedOn(next ? (date ?? '') : '');
+      setConfirmingMemorial(false);
+      onNotice(next ? `${pet.name} is remembered here whenever you need it.` : 'Memorial removed');
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not update');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleSave(e: FormEvent) {
     e.preventDefault();
@@ -4954,21 +5049,7 @@ function ProfileEditScreen({
     setBusy(true);
     onError(null);
     try {
-      await updatePet(pet.id, {
-        name: name.trim() || pet.name,
-        species,
-        breed: breed || undefined,
-        dob: dob || undefined,
-        weight: weight || undefined,
-        fixed: fixed === 'true' ? true : fixed === 'false' ? false : undefined,
-        microchip: microchip || undefined,
-        allergies: allergies || undefined,
-        behavior: behavior || undefined,
-        notes: notes || undefined,
-        vetName: vetName || undefined,
-        vetPhone: vetPhone || undefined,
-        emergencyContact: emergencyContact || undefined,
-      });
+      await updatePet(pet.id, currentFields());
       if (photo) await uploadAvatar(pet.id, photo);
       onNotice('Profile saved');
       await onDone();
@@ -5065,6 +5146,75 @@ function ProfileEditScreen({
             Cancel
           </button>
         </div>
+
+        {/* Memorial — deliberately NOT in the danger zone: nothing is
+            deleted. Records, photos, and the passport stay; reminders,
+            stories, badges, Daily, and walks quietly stop. */}
+        <fieldset className="profile-form__group">
+          <legend>Memorial</legend>
+          {memorial ? (
+            <div className="memorial-state">
+              <p className="memorial-state__line">
+                🕊️ In loving memory{passedOn ? ` · ${formatDate(passedOn)}` : ''}
+              </p>
+              <p className="subtle">
+                {pet.name}'s records and photos are kept right here. Reminders
+                and stories no longer include {pet.name}.
+              </p>
+              <button
+                type="button"
+                className="btn btn--link"
+                disabled={busy}
+                onClick={() => void handleMemorial(false)}
+              >
+                Undo — marked by mistake
+              </button>
+            </div>
+          ) : !confirmingMemorial ? (
+            <button
+              type="button"
+              className="btn btn--link memorial-open"
+              disabled={busy}
+              onClick={() => setConfirmingMemorial(true)}
+            >
+              {pet.name} has passed away…
+            </button>
+          ) : (
+            <div className="memorial-confirm">
+              <p className="subtle">
+                We're so sorry. Everything about {pet.name} stays saved — records,
+                photos, milestones. Reminders and weekly stories will quietly stop
+                mentioning {pet.name}. You can undo this anytime.
+              </p>
+              <label>
+                Date (optional)
+                <input
+                  type="date"
+                  value={passedOn}
+                  onChange={(e) => setPassedOn(e.target.value)}
+                />
+              </label>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy}
+                  onClick={() => { setConfirmingMemorial(false); setPassedOn(pet.passedOn ?? ''); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={busy}
+                  onClick={() => void handleMemorial(true, passedOn)}
+                >
+                  {busy ? 'Saving…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          )}
+        </fieldset>
 
         {onDeletePet && !pet.household && (
           <fieldset className="profile-form__group profile-form__group--danger">
@@ -5280,13 +5430,17 @@ function PhotoConfirmScreen({
   file,
   pets,
   saving,
+  limitError,
   onSave,
+  onUpgrade,
   onDiscard,
 }: {
   file: File;
   pets: Pet[];
   saving: boolean;
+  limitError: string | null;
   onSave: (petId: string) => void;
+  onUpgrade: () => void;
   onDiscard: () => void;
 }) {
   const [previewUrl] = useState(() => URL.createObjectURL(file));
@@ -5315,7 +5469,14 @@ function PhotoConfirmScreen({
         </button>
       )}
       <img src={previewUrl} alt="" className="photo-confirm__preview" />
-      {onlyPet ? (
+      {limitError ? (
+        <div className="photo-confirm__picker">
+          <p className="photo-confirm__picker-title">{limitError}</p>
+          <button type="button" className="btn btn--primary" onClick={onUpgrade}>
+            Upgrade →
+          </button>
+        </div>
+      ) : onlyPet ? (
         <p className="photo-confirm__status">Saving…</p>
       ) : (
         <div className="photo-confirm__picker">
@@ -5365,85 +5526,194 @@ function formatElapsed(ms: number): string {
 }
 
 // Foreground-only tracking (no "Always" location permission, no background
-// App Store review complexity — confirmed with Mark, 2026-07-13). Three
-// internal phases: 'ready' (requesting permission + first GPS fix — "Get
-// ready for a walk…"), 'active' (live elapsed/distance), 'summary' (ended,
-// multi-select which pet(s) were on it, save). GPS fixes closer than 3m
-// apart are ignored as jitter rather than counted as movement.
-function WalkScreen({
-  pets,
-  onSaved,
-  onCancel,
-  onError,
-}: {
-  pets: Pet[];
-  onSaved: (msg: string) => void;
-  onCancel: () => void;
-  onError: (msg: string | null) => void;
-}) {
-  const [phase, setPhase] = useState<'ready' | 'active' | 'summary'>('ready');
+// App Store review complexity — confirmed with Mark, 2026-07-13). GPS fixes
+// closer than 3m apart are ignored as jitter rather than counted as movement.
+//
+// Tracking state lives HERE, in a hook called unconditionally from Dashboard
+// (2026-07-15) — not inside WalkScreen as local state, which is what made
+// the walk screen impossible to leave without killing the walk (unmounting
+// WalkScreen used to run the GPS-watch cleanup). Since Dashboard never
+// unmounts during normal in-app navigation, lifting the state here means a
+// walk keeps tracking in the background regardless of what's on screen —
+// WalkScreen (below) becomes a thin, safely-mountable/unmountable view over
+// whatever this hook is doing. 'idle' is the true at-rest state: no
+// permission requested, no GPS watch, until beginWalk() is called.
+function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (msg: string | null) => void) {
+  // idle = no walk exists · acquiring = permission/GPS warm-up · ready =
+  // armed, nothing recorded yet (Start hasn't been pressed) · active ⇄
+  // paused (fitness-app convention: you pause first, then hold End to
+  // really stop) · summary = ended, pick pet(s), Save or Discard.
+  const [phase, setPhase] = useState<'idle' | 'acquiring' | 'ready' | 'active' | 'paused' | 'summary'>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [distanceMeters, setDistanceMeters] = useState(0);
+  const [paceLabel, setPaceLabel] = useState('—');
   const [selectedPetIds, setSelectedPetIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [holdingEnd, setHoldingEnd] = useState(false);
   const startedAtRef = useRef<number | null>(null);
   const endedAtRef = useRef<number | null>(null);
   const lastCoordRef = useRef<{ lat: number; lon: number } | null>(null);
   const watchIdRef = useRef<string | null>(null);
+  // Moving time only: accumulated across active segments, frozen while
+  // paused. segmentStartRef marks the current active segment's start.
+  const activeMsRef = useRef(0);
+  const segmentStartRef = useRef<number | null>(null);
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const holdTimerRef = useRef<number | null>(null);
+  // Rolling-window pace samples: {t, dist} pairs, cumulative distance at
+  // time t, pruned to the last PACE_WINDOW_MS. Recomputed every tick (not
+  // just on new GPS fixes) so pace decays toward '—' if movement stops —
+  // see the pace-recompute block in the elapsed-timer effect below.
+  const paceSamplesRef = useRef<{ t: number; dist: number }[]>([]);
+  const PACE_WINDOW_MS = 30_000;
+  const PACE_MIN_SPAN_MS = 10_000;
+  const PACE_MIN_MILES = 0.015; // ~79 ft — filters GPS-noise "movement"
 
+  function resetPace() {
+    paceSamplesRef.current = [];
+    setPaceLabel('—');
+  }
+
+  // True unmount safety only (e.g. logout tears down Dashboard entirely) —
+  // discardWalk() below is the normal, explicit way tracking stops.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        let perm = await Geolocation.checkPermissions();
-        if (perm.location !== 'granted') perm = await Geolocation.requestPermissions();
-        if (perm.location !== 'granted') {
-          if (!cancelled) {
-            onError("Location access is needed to track a walk — check Settings and try again.");
-            onCancel();
-          }
-          return;
-        }
-        startedAtRef.current = Date.now();
-        const id = await Geolocation.watchPosition({ enableHighAccuracy: true }, (pos) => {
-          if (!pos) return;
-          const { latitude, longitude } = pos.coords;
-          if (lastCoordRef.current) {
-            const d = haversineMeters(lastCoordRef.current.lat, lastCoordRef.current.lon, latitude, longitude);
-            if (d > 3) setDistanceMeters((prev) => prev + d);
-          }
-          lastCoordRef.current = { lat: latitude, lon: longitude };
-        });
-        if (cancelled) {
-          void Geolocation.clearWatch({ id });
-          return;
-        }
-        watchIdRef.current = id;
-        setPhase('active');
-      } catch (e) {
-        if (!cancelled) {
-          onError(e instanceof Error ? e.message : 'Could not start location tracking');
-          onCancel();
-        }
-      }
-    })();
     return () => {
-      cancelled = true;
       if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+      if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (phase !== 'active') return;
     const timer = setInterval(() => {
-      if (startedAtRef.current) setElapsedMs(Date.now() - startedAtRef.current);
+      if (segmentStartRef.current !== null) {
+        setElapsedMs(activeMsRef.current + (Date.now() - segmentStartRef.current));
+      }
+      // Pace: average speed over the last PACE_WINDOW_MS, not since Start.
+      // The old since-Start cumulative average never recovered from early
+      // GPS noise (Mark, 2026-07-15) — a short rolling window instead
+      // reflects CURRENT walking speed, same idea as Strava/Apple Fitness'
+      // "current pace", and naturally settles toward '—' if you stop moving
+      // since no new samples arrive to refresh the window.
+      const now = Date.now();
+      const cutoff = now - PACE_WINDOW_MS;
+      const samples = paceSamplesRef.current;
+      while (samples.length > 1 && samples[0].t < cutoff) samples.shift();
+      if (samples.length >= 2) {
+        const spanMs = now - samples[0].t;
+        const spanMiles = (samples[samples.length - 1].dist - samples[0].dist) / 1609.344;
+        if (spanMs >= PACE_MIN_SPAN_MS && spanMiles >= PACE_MIN_MILES) {
+          const minPerMi = spanMs / 60000 / spanMiles;
+          if (minPerMi <= 99) {
+            const m = Math.floor(minPerMi);
+            const s = Math.round((minPerMi - m) * 60);
+            setPaceLabel(`${m}:${String(s).padStart(2, '0')}`);
+          } else setPaceLabel('—');
+        } else setPaceLabel('—');
+      } else setPaceLabel('—');
     }, 1000);
     return () => clearInterval(timer);
   }, [phase]);
 
+  // Called when the user taps the Walk tab with no walk in progress.
+  // Resolves false (after calling onError) on permission/GPS failure — the
+  // caller decides what to do with the walk-screen UI in that case; this
+  // hook only owns tracking state, never screen visibility.
+  async function beginWalk(): Promise<boolean> {
+    if (phaseRef.current !== 'idle') return true; // a session already exists
+    setPhase('acquiring');
+    try {
+      let perm = await Geolocation.checkPermissions();
+      if (perm.location !== 'granted') perm = await Geolocation.requestPermissions();
+      if (perm.location !== 'granted') {
+        onError("Location access is needed to track a walk — check Settings and try again.");
+        setPhase('idle');
+        return false;
+      }
+      // Start the GPS watch now so the fix is warm by the time Start is
+      // pressed — but only count movement while actually active (the ready
+      // screen records nothing; pauses don't accumulate distance either).
+      const id = await Geolocation.watchPosition({ enableHighAccuracy: true }, (pos) => {
+        if (!pos) return;
+        const { latitude, longitude } = pos.coords;
+        if (phaseRef.current !== 'active') {
+          lastCoordRef.current = null;
+          return;
+        }
+        if (lastCoordRef.current) {
+          const d = haversineMeters(lastCoordRef.current.lat, lastCoordRef.current.lon, latitude, longitude);
+          if (d > 3) {
+            setDistanceMeters((prev) => {
+              const next = prev + d;
+              paceSamplesRef.current.push({ t: Date.now(), dist: next });
+              return next;
+            });
+          }
+        }
+        lastCoordRef.current = { lat: latitude, lon: longitude };
+      });
+      watchIdRef.current = id;
+      setPhase('ready');
+      return true;
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not start location tracking');
+      setPhase('idle');
+      return false;
+    }
+  }
+
+  function handleStart() {
+    hapticTap();
+    startedAtRef.current = Date.now();
+    segmentStartRef.current = Date.now();
+    lastCoordRef.current = null;
+    resetPace();
+    setPhase('active');
+  }
+
+  function handlePause() {
+    hapticTap();
+    if (segmentStartRef.current !== null) {
+      activeMsRef.current += Date.now() - segmentStartRef.current;
+      segmentStartRef.current = null;
+    }
+    setElapsedMs(activeMsRef.current);
+    setPhase('paused');
+  }
+
+  function handleResume() {
+    hapticTap();
+    segmentStartRef.current = Date.now();
+    lastCoordRef.current = null; // don't count the distance jumped while paused
+    resetPace(); // don't let the paused gap register as near-zero speed
+    setPhase('active');
+  }
+
+  // End Walk is hold-to-confirm (1.5s) from the paused state — a stray tap
+  // can't end the walk, matching the pause-then-hold-stop convention.
+  const HOLD_TO_END_MS = 1500;
+  function startEndHold() {
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+    setHoldingEnd(true);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null;
+      setHoldingEnd(false);
+      handleEndWalk();
+    }, HOLD_TO_END_MS);
+  }
+  function cancelEndHold() {
+    setHoldingEnd(false);
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  }
+
   function handleEndWalk() {
+    hapticSuccess();
     if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    watchIdRef.current = null;
     endedAtRef.current = Date.now();
     setPhase('summary');
     if (pets.length === 1) setSelectedPetIds(new Set([pets[0].id]));
@@ -5458,6 +5728,23 @@ function WalkScreen({
     });
   }
 
+  // Resets everything so a future beginWalk() starts clean — same as the
+  // old "fresh component mount" behavior, now explicit since the hook
+  // persists across walks instead of remounting each time.
+  function resetToIdle() {
+    watchIdRef.current = null;
+    startedAtRef.current = null;
+    endedAtRef.current = null;
+    lastCoordRef.current = null;
+    activeMsRef.current = 0;
+    segmentStartRef.current = null;
+    resetPace();
+    setElapsedMs(0);
+    setDistanceMeters(0);
+    setSelectedPetIds(new Set());
+    setPhase('idle');
+  }
+
   async function handleSave() {
     if (selectedPetIds.size === 0 || !startedAtRef.current || !endedAtRef.current) return;
     setSaving(true);
@@ -5468,53 +5755,140 @@ function WalkScreen({
         new Date(endedAtRef.current).toISOString(),
         distanceMeters,
       );
+      // One workout per walk regardless of how many pets came along. First
+      // ever call shows the iOS Health permission sheet, after the toast.
+      saveWalkToAppleHealth(startedAtRef.current, endedAtRef.current, distanceMeters);
       // "Rex burned ≈77 kcal" when the server could estimate it (dogs with a
       // logged weight); plain save message otherwise.
       const burns = Object.entries(res.kcalByPet ?? {})
         .map(([petId, kcal]) => `${pets.find((p) => p.id === petId)?.name ?? 'Pet'} ≈${kcal} kcal`)
         .join(' · ');
-      onSaved(burns ? `Walk saved. ${burns} burned.` : 'Walk saved.');
+      const msg = burns ? `Walk saved. ${burns} burned.` : 'Walk saved.';
+      resetToIdle();
+      setSaving(false);
+      onSaved(msg);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not save the walk');
       setSaving(false);
     }
   }
 
-  function handleCancel() {
+  // The only other way tracking stops (besides a successful Save) — Cancel
+  // (ready, nothing recorded yet) and Discard walk (summary, recorded but
+  // not saved) both call this.
+  function discardWalk() {
     if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
-    onCancel();
+    resetToIdle();
+  }
+
+  return {
+    phase, elapsedMs, distanceMeters, paceLabel, selectedPetIds, saving, holdingEnd,
+    beginWalk, handleStart, handlePause, handleResume,
+    startEndHold, cancelEndHold, handleSave, discardWalk, togglePet,
+  };
+}
+
+type WalkTracker = ReturnType<typeof useWalkTracker>;
+
+// Presentational now (2026-07-15) — every field/handler comes from the
+// `walk` hook result (see useWalkTracker above), so mounting/unmounting
+// this component (driven by Dashboard's walkScreenOpen) has zero effect on
+// tracking. onClose just hides the screen; onOpenHistory hides it AND
+// navigates — both leave the walk running. Only the Cancel/Discard buttons
+// actually stop tracking (via walk.discardWalk()).
+function WalkScreen({
+  pets,
+  walk,
+  onClose,
+  onOpenHistory,
+}: {
+  pets: Pet[];
+  walk: WalkTracker;
+  onClose: () => void;
+  onOpenHistory: () => void;
+}) {
+  const {
+    phase, elapsedMs, distanceMeters, paceLabel, selectedPetIds, saving, holdingEnd,
+    handleStart, handlePause, handleResume, startEndHold, cancelEndHold,
+    handleSave, discardWalk, togglePet,
+  } = walk;
+
+  function handleCancel() {
+    discardWalk();
+    onClose();
   }
 
   const miles = (distanceMeters / 1609.344).toFixed(2);
 
+  // No ✕ anywhere: it never said whether it cancelled, logged, or minimized
+  // (Mark, 2026-07-13). Ready has an explicit Cancel (nothing recorded yet);
+  // once tracking, Pause → hold End → Save/Discard is how a walk truly
+  // ends. Minimize (2026-07-15) is the third, explicitly-labeled option —
+  // same "say exactly what it does" lesson that killed the old ✕ — for
+  // stepping away without ending anything (e.g. snapping a photo mid-walk).
   return (
     <div className="walk-screen" role="dialog" aria-label="Walk tracking">
-      {/* Escape hatch on EVERY phase — an accidental 🚶 tap must never force
-          saving a junk walk. The summary phase also gets an explicit Discard
-          below (Mark hit exactly this trap, 2026-07-12). */}
-      <button
-        className="walk-screen__exit"
-        onClick={handleCancel}
-        disabled={saving}
-        aria-label="Cancel walk"
-      >
-        ✕
+      <button type="button" className="walk-screen__minimize" onClick={onClose}>
+        ⌄ Minimize
       </button>
-      {phase === 'ready' && (
+      {phase === 'acquiring' && (
         <div className="walk-screen__ready">
-          <span className="walk-screen__icon" aria-hidden="true">🚶</span>
-          <p>Get ready for a walk…</p>
+          <span className="walk-screen__icon" aria-hidden="true">🛰️</span>
+          <p>Finding your location…</p>
         </div>
       )}
-      {phase === 'active' && (
+      {(phase === 'ready' || phase === 'active' || phase === 'paused') && (
         <div className="walk-screen__active">
+          {phase === 'paused' && <div className="walk-screen__paused-badge">Paused</div>}
           <div className="walk-screen__stat">{formatElapsed(elapsedMs)}</div>
           <div className="walk-screen__stat-label">Elapsed</div>
           <div className="walk-screen__stat">{miles} mi</div>
           <div className="walk-screen__stat-label">Distance</div>
-          <button type="button" className="btn btn--primary btn--lg" onClick={handleEndWalk}>
-            End Walk
-          </button>
+          <div className="walk-screen__stat walk-screen__stat--minor">{paceLabel}</div>
+          <div className="walk-screen__stat-label">Pace /mi</div>
+          {phase === 'ready' && (
+            <>
+              <button type="button" className="btn btn--primary btn--lg" onClick={handleStart}>
+                Start Walk
+              </button>
+              <div className="walk-screen__ready-links">
+                <button
+                  type="button"
+                  className="btn btn--link walk-screen__discard"
+                  onClick={handleCancel}
+                >
+                  Cancel
+                </button>
+                <button type="button" className="btn btn--link" onClick={onOpenHistory}>
+                  Walk history →
+                </button>
+              </div>
+            </>
+          )}
+          {phase === 'active' && (
+            <button type="button" className="btn btn--primary btn--lg" onClick={handlePause}>
+              Pause
+            </button>
+          )}
+          {phase === 'paused' && (
+            <div className="walk-screen__paused-controls">
+              <button type="button" className="btn btn--primary btn--lg" onClick={handleResume}>
+                Resume
+              </button>
+              <button
+                type="button"
+                className={`btn btn--lg walk-screen__end-hold${holdingEnd ? ' walk-screen__end-hold--holding' : ''}`}
+                onPointerDown={startEndHold}
+                onPointerUp={cancelEndHold}
+                onPointerLeave={cancelEndHold}
+                onPointerCancel={cancelEndHold}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <span className="walk-screen__end-hold-fill" aria-hidden="true" />
+                <span className="walk-screen__end-hold-label">Hold to End</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
       {phase === 'summary' && (
@@ -5562,21 +5936,47 @@ function WalkScreen({
   );
 }
 
+// Floating indicator (2026-07-15) shown whenever a walk exists but the full
+// screen isn't up — the whole point of minimizing: proof the walk is still
+// tracking while you're off taking a photo or checking Daily. Tap to reopen.
+function WalkMiniBar({ walk, onExpand }: { walk: WalkTracker; onExpand: () => void }) {
+  const { phase, elapsedMs, distanceMeters } = walk;
+  const miles = (distanceMeters / 1609.344).toFixed(2);
+  const label =
+    phase === 'summary'
+      ? '✅ Walk ended — tap to save'
+      : phase === 'paused'
+        ? `⏸ Paused · ${formatElapsed(elapsedMs)} · ${miles} mi`
+        : phase === 'active'
+          ? `🚶 ${formatElapsed(elapsedMs)} · ${miles} mi`
+          : '🚶 Walk ready — tap to resume';
+  return (
+    <button
+      type="button"
+      className="walk-mini-bar"
+      onClick={() => { hapticTap(); onExpand(); }}
+      aria-label="Walk in progress — tap to return to the walk screen"
+    >
+      <span className="walk-mini-bar__label">{label}</span>
+      <span className="walk-mini-bar__chevron" aria-hidden="true">⌃</span>
+    </button>
+  );
+}
+
 // ---- achievements (swipe-left from overview) ----
 // Live rolling stat cards computed server-side (GET /achievements), each a
 // button pushing to that card's badge ladder (BadgeScreen below). Cats get
-// no walk cards; every species gets the care-streak card. An earned-count
-// dot on the card hints there's something behind the tap.
+// no walk cards. An earned-count dot on the card hints there's something
+// behind the tap. "Walk history" lives on the Walk screen itself now
+// (2026-07-14) — it belongs where you actually go to walk your dog.
 function AchievementsAllScreen({
   onError,
   onLoaded,
   onOpenBadges,
-  onOpenWalkHistory,
 }: {
   onError: (msg: string | null) => void;
   onLoaded: (pets: PetAchievements[]) => void;
   onOpenBadges: (petId: string, cardId: string) => void;
-  onOpenWalkHistory: () => void;
 }) {
   const [pets, setPets] = useState<PetAchievements[] | null>(null);
   const [leaderboard, setLeaderboard] = useState<WalkLeaderboard | null>(null);
@@ -5603,12 +6003,7 @@ function AchievementsAllScreen({
 
   return (
     <div className="albums-all">
-      <div className="albums-all__pet-header">
-        <h1 className="large-title">Achievements</h1>
-        <button type="button" className="btn btn--link" onClick={onOpenWalkHistory}>
-          Walk history →
-        </button>
-      </div>
+      <h1 className="large-title">Achievements</h1>
       {leaderboard && leaderboard.members.length >= 2 && (
         <FamilyLeaderboard board={leaderboard} />
       )}
@@ -5767,17 +6162,18 @@ function BadgeScreen({
 
 // ---- family walk leaderboard (Achievements screen, households only) ----
 // "Who's winning the week": ranked by miles (walk count breaks ties), a bar
-// per member scaled to the leader, medals for the podium. Only rendered when
-// the household actually has 2+ people — a solo leaderboard is just a stat.
+// per member scaled to the leader. Only rendered when the household actually
+// has 2+ people — a solo leaderboard is just a stat. Plain rank numbers, no
+// medals/trophy — Mark decluttered the icons 2026-07-13; the bars carry the
+// competitive read.
 function FamilyLeaderboard({ board }: { board: WalkLeaderboard }) {
   const maxMiles = Math.max(...board.members.map((m) => m.miles), 0.1);
-  const medals = ['🥇', '🥈', '🥉'];
   const displayName = (email: string) =>
     email === board.me ? 'You' : email.split('@')[0];
   return (
     <section className="leaderboard">
       <div className="leaderboard__header">
-        <span className="leaderboard__title">🏆 Family walk-off</span>
+        <span className="leaderboard__title">Family walk-off</span>
         <span className="leaderboard__label">{board.label}</span>
       </div>
       {board.members.map((m, i) => (
@@ -5786,7 +6182,7 @@ function FamilyLeaderboard({ board }: { board: WalkLeaderboard }) {
           className={`leaderboard__row${i === 0 && m.miles > 0 ? ' leaderboard__row--leader' : ''}`}
         >
           <span className="leaderboard__medal" aria-hidden="true">
-            {m.miles > 0 || m.walks > 0 ? (medals[i] ?? `${i + 1}.`) : '–'}
+            {m.miles > 0 || m.walks > 0 ? `${i + 1}.` : '–'}
           </span>
           <div className="leaderboard__bar-wrap">
             <span className="leaderboard__name">{displayName(m.email)}</span>
@@ -6302,6 +6698,9 @@ function SettingsScreen({
   onChangePassword,
   onLogout,
   onError,
+  onNotice,
+  onLimitsChange,
+  onUpgrade,
   onAccountDeleted,
 }: {
   section: SettingsSection;
@@ -6313,6 +6712,9 @@ function SettingsScreen({
   onChangePassword: () => void;
   onLogout: () => void;
   onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
+  onLimitsChange: (limits: Limits) => void;
+  onUpgrade: () => void;
   onAccountDeleted: () => void;
 }) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
@@ -6324,6 +6726,23 @@ function SettingsScreen({
   const [deletePw, setDeletePw] = useState('');
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // TestFlight/App Store build identification (2026-07-15) — null on web,
+  // shown at the bottom of the Account section so a tester can confirm
+  // which build they're running.
+  const [appVersion, setAppVersion] = useState<{ version: string; build: string } | null>(null);
+  useEffect(() => {
+    void getAppVersion().then(setAppVersion);
+  }, []);
+  // RevenueCat's monthly/annual packages (native only) — fetched once per
+  // Account screen visit, not app-wide, since offerings rarely change and
+  // this screen is the only place they're shown.
+  const [offering, setOffering] = useState<{
+    monthly: PurchasesPackage | null;
+    annual: PurchasesPackage | null;
+  } | null>(null);
+  useEffect(() => {
+    if (isNative) void getPaidOfferingPackages().then(setOffering);
+  }, []);
 
   async function handleDeleteAccount(e: FormEvent) {
     e.preventDefault();
@@ -6372,6 +6791,46 @@ function SettingsScreen({
           ? "Your plan isn't managed through Stripe — contact support to change it."
           : msg || 'Could not open billing',
       );
+      setBusy(false);
+    }
+  }
+
+  // Native purchase flow (RevenueCat / Apple IAP) — no redirect, so the sync
+  // call updates plan.json (and this screen's limits) immediately rather
+  // than waiting on the webhook, same end state as the Stripe success
+  // redirect above but synchronous instead of "wait 2.5s and hope."
+  async function handleNativePurchase(pkg: PurchasesPackage) {
+    setBusy(true);
+    onError(null);
+    try {
+      await purchaseRevenueCatPackage(pkg);
+      onLimitsChange(await syncRevenueCatEntitlement());
+      onNotice('Payment received — welcome to Petshots Paid! 🎉');
+    } catch (err) {
+      // A cancelled purchase sheet also rejects — that's not an error, it's
+      // the App Store equivalent of Stripe's cancel_url redirect.
+      if ((err as { userCancelled?: boolean } | undefined)?.userCancelled) return;
+      onError(err instanceof Error ? err.message : 'Could not complete purchase');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRestorePurchases() {
+    setBusy(true);
+    onError(null);
+    try {
+      await restoreRevenueCatPurchases();
+      const refreshed = await syncRevenueCatEntitlement();
+      onLimitsChange(refreshed);
+      onNotice(
+        refreshed.plan === 'paid'
+          ? 'Purchases restored — welcome back to Petshots Paid!'
+          : 'No active purchases found to restore.',
+      );
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not restore purchases');
+    } finally {
       setBusy(false);
     }
   }
@@ -6477,14 +6936,60 @@ function SettingsScreen({
               </div>
               <div className="plan-actions">
                 {isNative ? (
-                  // App Store 3.1.1: never steer free users to an external
-                  // purchase from the iOS app. Paid users may be told where
-                  // their existing subscription is managed (account mgmt).
                   limits.plan === 'paid' ? (
-                    <p className="subtle plan-fine-print">
-                      Your subscription is managed on the web at petshots.app.
-                    </p>
-                  ) : null
+                    limits.billingSource === 'revenuecat' ? (
+                      // App Store 3.1.1 concerns purchase steering, not
+                      // managing an existing subscription — a deep link to
+                      // Apple's own subscription-management screen is fine.
+                      <a
+                        className="btn"
+                        href="itms-apps://apps.apple.com/account/subscriptions"
+                      >
+                        Manage subscription
+                      </a>
+                    ) : (
+                      // A web (Stripe) subscriber who later installed the
+                      // app — nothing to purchase or manage here.
+                      <p className="subtle plan-fine-print">
+                        Your subscription is managed on the web at petshots.app.
+                      </p>
+                    )
+                  ) : (
+                    <>
+                      {offering?.monthly && (
+                        <button
+                          type="button"
+                          className="btn btn--primary"
+                          disabled={busy}
+                          onClick={() => void handleNativePurchase(offering.monthly!)}
+                        >
+                          Upgrade · {offering.monthly.product.priceString}/mo
+                        </button>
+                      )}
+                      {offering?.annual && (
+                        <button
+                          type="button"
+                          className="btn btn--primary"
+                          disabled={busy}
+                          onClick={() => void handleNativePurchase(offering.annual!)}
+                        >
+                          {offering.annual.product.priceString}/yr
+                        </button>
+                      )}
+                      <p className="subtle plan-fine-print">
+                        Paid plan: {PAID_PLAN_LIMITS.maxPets} pets, up to {PAID_PLAN_LIMITS.maxDocs} records per pet,{' '}
+                        {PAID_PLAN_LIMITS.maxMeds} medications per pet.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn--link"
+                        disabled={busy}
+                        onClick={() => void handleRestorePurchases()}
+                      >
+                        Restore purchases
+                      </button>
+                    </>
+                  )
                 ) : limits.plan === 'free' ? (
                   <>
                     <button
@@ -6546,7 +7051,7 @@ function SettingsScreen({
             </>
             )}
 
-            {section === 'family' && <FamilySection onError={onError} />}
+            {section === 'family' && <FamilySection onError={onError} onUpgrade={onUpgrade} />}
 
             {section === 'notifications' && (
             <fieldset className="settings-group">
@@ -6727,6 +7232,12 @@ function SettingsScreen({
             </fieldset>
             )}
 
+            {section === 'account' && appVersion && (
+              <p className="subtle settings-app-version">
+                Petshots {appVersion.version} ({appVersion.build})
+              </p>
+            )}
+
             <div className="actions">
               <button className="btn btn--primary" type="button" onClick={onDone} disabled={busy}>
                 Done
@@ -6830,7 +7341,13 @@ function PushRow({ onError }: { onError: (msg: string | null) => void }) {
 // Owner: invite links (7-day expiry), member list with remove. Member: who
 // you're sharing with + leave. Server enforces everything; this is just the
 // controls.
-function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
+function FamilySection({
+  onError,
+  onUpgrade,
+}: {
+  onError: (msg: string | null) => void;
+  onUpgrade: () => void;
+}) {
   const [household, setHousehold] = useState<Household | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null); // invite token
@@ -7071,10 +7588,16 @@ function FamilySection({ onError }: { onError: (msg: string | null) => void }) {
         </form>
       ) : (
         <p className="subtle">
-          {household.maxMembers === 1
-            ? 'Your plan includes 1 family member.'
-            : `All ${household.maxMembers} member seats on your plan are in use.`}
-          {household.maxMembers === 1 && seatsUsed >= 1 ? ' Upgrade for up to 5.' : ''}
+          {household.maxMembers === 1 ? (
+            <>
+              Your plan includes 1 family member.{' '}
+              <button className="btn btn--link" onClick={onUpgrade}>
+                Upgrade for up to 5 →
+              </button>
+            </>
+          ) : (
+            `All ${household.maxMembers} member seats on your plan are in use.`
+          )}
         </p>
       )}
     </fieldset>

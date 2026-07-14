@@ -130,9 +130,9 @@ export function Landing() {
             <p className="subtle">Feedings, meds, walks — shared with the family so nobody feeds the dog twice.</p>
           </li>
           <li>
-            <span className="feature-grid__icon" aria-hidden="true">📈</span>
-            <strong>Trends</strong>
-            <p className="subtle">Mood, weight, care, and walk charts — spot "he's been off all week" early.</p>
+            <span className="feature-grid__icon" aria-hidden="true">📖</span>
+            <strong>Daily story</strong>
+            <p className="subtle">A short, warm recap of your pets' week — written for you from your photos and check-ins.</p>
           </li>
           <li>
             <span className="feature-grid__icon" aria-hidden="true">📸</span>

@@ -21,6 +21,7 @@
     "@capacitor/push-notifications": "^8.1.1",
     "@capacitor/splash-screen": "^8.0.1",
     "@capacitor/status-bar": "^8.0.2",
+    "@revenuecat/purchases-capacitor": "^13.2.2",
     "amazon-cognito-identity-js": "^6.3.18",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",

@@ -9,9 +9,9 @@
 // EVERY pet on it; GET /achievements reflects the walk (count + miles,
 // rounded from the raw meters sent); DELETE /walks/{id} removes it and the
 // achievement numbers drop back to zero. Badges: cats get no walk cards
-// (care-streak + photos only); walk/mile badges earn from the first walk;
-// a perfect Daily day earns care-streak badges; earned badges PERSIST after
-// the walk that earned them is deleted (trophy semantics, badges.json).
+// (photos only); walk/mile badges earn from the first walk; earned badges
+// PERSIST after the walk that earned them is deleted (trophy semantics,
+// badges.json). (Care-streak card removed entirely 2026-07-14.)
 //
 // THROWAWAY USER ONLY.
 import { readFileSync } from 'node:fs';
@@ -90,16 +90,20 @@ async function main() {
   const rexCards0 = ach0.body.pets.find((p) => p.petId === rex.id)?.cards ?? [];
   const catCards0 = ach0.body.pets.find((p) => p.petId === cat.id)?.cards ?? [];
   check(
-    rexCards0.map((c) => c.id).join(',') === 'walks-week,distance-week,photo-days-week,care-streak',
-    `dog gets 4 cards incl walks (got ${rexCards0.map((c) => c.id).join(',')})`,
+    rexCards0.map((c) => c.id).join(',') === 'photo-days-week,walks-week,distance-week',
+    `dog gets 3 cards, photos leads (got ${rexCards0.map((c) => c.id).join(',')})`,
   );
   check(
-    catCards0.map((c) => c.id).join(',') === 'care-streak,photo-days-week',
+    catCards0.map((c) => c.id).join(',') === 'photo-days-week',
     `cat gets NO walk cards (got ${catCards0.map((c) => c.id).join(',')})`,
   );
+  // Ladder sizes per card (2026-07-13: mileage extended to 7 tiers, photo
+  // swapped Shutterbug for 3 creative badges = 6. Care-streak card removed
+  // entirely 2026-07-14.)
+  const LADDER_SIZES = { 'walks-week': 4, 'distance-week': 7, 'photo-days-week': 6 };
   check(
-    rexCards0.every((c) => Array.isArray(c.badges) && c.badges.length === 4),
-    'every card carries a 4-badge ladder',
+    rexCards0.every((c) => Array.isArray(c.badges) && c.badges.length === LADDER_SIZES[c.id]),
+    `every card carries its full ladder (got ${rexCards0.map((c) => `${c.id}:${c.badges?.length}`).join(' ')})`,
   );
   check(
     rexCards0.flatMap((c) => c.badges).every((b) => b.earnedAt === null),
@@ -208,15 +212,10 @@ async function main() {
   check(achForBoard.body.leaderboard === null, 'solo account: leaderboard is null');
 
   console.log('\n[5] GET /achievements reflects the walk + first badges earn');
-  // Complete Rex's Daily list for today (walk was auto-checked by [3/4];
-  // breakfast + dinner make the day perfect -> care-streak badge territory).
-  await api(token, 'POST', `/pets/${rex.id}/daily/check`, { date: today, itemId: 'preset-breakfast' });
-  await api(token, 'POST', `/pets/${rex.id}/daily/check`, { date: today, itemId: 'preset-dinner' });
   const ach = await api(token, 'GET', '/achievements');
   const rexCards = ach.body.pets.find((p) => p.petId === rex.id)?.cards ?? [];
   const walksCard = rexCards.find((c) => c.id === 'walks-week');
   const distCard = rexCards.find((c) => c.id === 'distance-week');
-  const careCard = rexCards.find((c) => c.id === 'care-streak');
   check(walksCard?.value === '1', `walks-week = 1 (got ${walksCard?.value})`);
   check(distCard?.value === '2.5', `distance-week = 2.5 miles (got ${distCard?.value})`);
   const badge = (card, id) => card?.badges.find((b) => b.id === id);
@@ -224,13 +223,6 @@ async function main() {
   check(badge(walksCard, 'walk-week-count')?.earnedAt === null, 'Hat Trick (3/week) still locked after 1 walk');
   check(!!badge(distCard, 'miles-first')?.earnedAt, 'First Mile earned (2.5 mi > 1)');
   check(badge(distCard, 'miles-club')?.earnedAt === null, '10-Mile Club still locked');
-  check(careCard?.value === '1', `care-streak = 1 after a perfect day (got ${careCard?.value})`);
-  check(!!badge(careCard, 'care-day')?.earnedAt, 'Perfect Day badge earned');
-  check(badge(careCard, 'care-streak-short')?.earnedAt === null, 'Three in a Row still locked');
-  const fidoCare = ach.body.pets
-    .find((p) => p.petId === fido.id)
-    ?.cards.find((c) => c.id === 'care-streak');
-  check(fidoCare?.value === '0', `Fido (meals unchecked) has no care streak (got ${fidoCare?.value})`);
 
   console.log('\n[6] DELETE /walks/{id}: numbers drop to zero but trophies persist');
   const del = await api(token, 'DELETE', `/walks/${walk.body.walk.id}`);

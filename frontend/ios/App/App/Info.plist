@@ -32,6 +32,12 @@
 	<string>Petshots uses your photo library so you can upload vaccination records and pet photos.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Petshots uses your location to track distance while you're on a walk with your pet.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Petshots uses your location only while you're actively tracking a walk with your pet, to measure distance and route. Location is never collected in the background outside of a walk.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Petshots saves your finished pet walks to Apple Health as walking workouts, so your own activity gets credit too.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Petshots writes your pet walks to Apple Health as walking workouts. It does not read any of your health data.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

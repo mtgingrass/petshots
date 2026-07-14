@@ -36,6 +36,12 @@ export interface Pet {
   microchip?: string;
   fixed?: boolean;
   notes?: string;
+  /** Memorial state: pet has passed away. Records/photos stay viewable;
+   *  stories, reminders, digests, achievements, Daily, and walk pickers all
+   *  skip the pet. NOTE: PUT /pets is a full replace — every updatePet call
+   *  must pass these through or the flag silently clears. */
+  memorial?: boolean;
+  passedOn?: string; // YYYY-MM-DD, optional
 }
 
 export interface UserSettings {
@@ -236,6 +242,9 @@ export interface DailyState {
   items: DailyItem[];
   checks: Record<string, DailyCheckInfo>;
   mood: DailyMoodInfo | null;
+  /** Server hint: feeding items are active but unused across the whole live
+   *  window while other tracking IS used — the tab offers to drop them. */
+  feedingIdle?: boolean;
 }
 
 // The list is a LOCAL day (dinner at 8pm ET must not roll into tomorrow's UTC list).
@@ -283,6 +292,11 @@ export function saveDailyItems(
 // before the first listPets response (or an older API without limits).
 export interface Limits {
   plan: 'free' | 'paid';
+  // Which billing rail a paid plan came from — Stripe (web) or RevenueCat
+  // (iOS App Store). Only present for paid accounts. Distinguishes the two
+  // native billing-card messages: "managed on the web" vs an App Store
+  // subscription-management deep link.
+  billingSource?: 'stripe' | 'revenuecat';
   maxPets: number;
   maxDocs: number;
   maxMeds: number;
@@ -355,86 +369,68 @@ export function listPets(): Promise<{ pets: Pet[]; limits?: Limits; family?: Fam
   return request('GET', '/pets');
 }
 
-// ---- trends (bottom-bar "Trends" tab) ----
-// One view (week or month) at a time now, swipeable back in time. Week is
-// available on every plan (free capped at offset 1 — two weeks total);
-// month is a paid perk at any offset (GET 403s for free instead of just
-// omitting data — the tab itself is locked, not just its content).
-export interface TrendsChecklistItem {
-  id: string;
-  label: string;
-  count: number;
-  total: number;
-}
-// One entry per date in the window, oldest first — value is null on days
-// with nothing logged (a gap, not a zero). Sparklines render these directly.
-export interface TrendsSeriesPoint {
-  date: string;
-  value: number | null;
-}
-export interface TrendsChecklistDots {
-  id: string;
-  label: string;
-  days: boolean[]; // one per date in the window, oldest first
-}
-interface TrendsSeriesFields {
-  moodSeries: TrendsSeriesPoint[];
-  weightSeries: TrendsSeriesPoint[];
-  weightUnit: string | null;
-  checklistSeries: TrendsChecklistDots[];
-}
-export interface TrendsWeekPet extends TrendsSeriesFields {
+// ---- summary (bottom-bar "Summary" tab) ----
+// Today's AI-written story of the household's last 7 days, plus the week's
+// photos and light per-pet numbers. The server generates the story at most
+// once per day per account pool and caches it, so repeat calls are fast;
+// the FIRST call of the day runs the model (several seconds — show a
+// writing state). story:null comes with a reason: NOT_ENOUGH_DATA (quiet
+// week, nothing to tell yet) or AI_FAILED (model hiccup — retry later).
+export interface SummaryPetChip {
   petId: string;
   name: string;
-  careConsistency: number;
+  carePct: number;
   moodAvg: number | null;
-  checklist: TrendsChecklistItem[];
-  medsGiven: number;
-  weight: { value: number; unit: string; deltaWeek: number | null } | null;
   walks: { count: number; miles: number; kcal: number | null } | null; // null for cats
-  insight: string | null;
+  /** Feeding tallies — surfaced as a chip stat only, never in the story. */
+  meals: { done: number; total: number } | null;
 }
-export interface TrendsMonthChecklistItem {
-  id: string;
-  label: string;
-  pctThis: number;
-  pctLast: number;
-}
-export interface TrendsMonthPet extends TrendsSeriesFields {
+export interface SummaryPhoto {
   petId: string;
-  name: string;
-  headline: string | null;
-  careConsistency: number;
-  moodAvg: number | null;
-  moodAvgLastMonth: number | null;
-  medsGiven: number;
-  medsGivenLastMonth: number;
-  weight: { value: number; unit: string; deltaMonth: number | null } | null;
-  walks: { count: number; miles: number; kcal: number | null; countLast: number; milesLast: number } | null; // null for cats
-  checklist: TrendsMonthChecklistItem[];
+  id: string;
+  filename: string;
+  url: string;
 }
-export interface TrendsResponse<T> {
-  plan: 'free' | 'paid';
-  view: 'week' | 'month';
-  offset: number;
-  maxOffset: number;
+export interface SummaryResponse {
+  story: string | null;
+  reason?: 'NOT_ENOUGH_DATA' | 'AI_FAILED';
+  generatedAt?: string;
   rangeStart: string;
   rangeEnd: string;
-  pets: T[];
+  pets: SummaryPetChip[];
+  photos: SummaryPhoto[];
 }
-export function getTrendsWeek(offset = 0): Promise<TrendsResponse<TrendsWeekPet>> {
-  return request('GET', `/trends?view=week&offset=${offset}`);
-}
-export function getTrendsMonth(offset = 0): Promise<TrendsResponse<TrendsMonthPet>> {
-  return request('GET', `/trends?view=month&offset=${offset}`);
+export function getSummary(): Promise<SummaryResponse> {
+  return request('GET', '/summary');
 }
 
-// "Email me this report" — always the current (offset 0) period. Week is
-// available on every plan; month 403s on a free account (the button that
-// calls this is hidden for free users to begin with, but the server
-// enforces it regardless).
-export function sendTrendsReport(period: 'week' | 'month'): Promise<{ ok: true; sent: boolean; reason?: string }> {
-  return request('POST', '/trends/send', { period });
+// The persistent story archive: one story per completed week (written by a
+// Monday cron), consolidated per month (1st-of-month cron). Grows into the
+// "pet book". List returns previews; the entry call returns the full story
+// with fresh presigned photos.
+export interface SummaryArchiveItem {
+  key: string; // weeks: the Monday YYYY-MM-DD · months: YYYY-MM
+  rangeStart: string;
+  rangeEnd: string;
+  monthLabel?: string; // months only, e.g. "July 2026"
+  preview: string;
+}
+export interface SummaryArchiveEntry {
+  key: string;
+  kind: 'weeks' | 'months';
+  rangeStart: string;
+  rangeEnd: string;
+  monthLabel?: string;
+  story: string;
+  generatedAt: string;
+  pets: SummaryPetChip[];
+  photos: SummaryPhoto[];
+}
+export function getSummaryArchive(): Promise<{ weeks: SummaryArchiveItem[]; months: SummaryArchiveItem[] }> {
+  return request('GET', '/summary/archive');
+}
+export function getSummaryEntry(kind: 'weeks' | 'months', key: string): Promise<SummaryArchiveEntry> {
+  return request('GET', `/summary/archive/${kind}/${key}`);
 }
 
 // ---- walks (account-level — one walk can cover multiple pets) ----
@@ -680,6 +676,15 @@ export function createCheckout(interval: 'month' | 'year'): Promise<{ url: strin
 
 export function createBillingPortal(): Promise<{ url: string }> {
   return request('POST', '/billing/portal');
+}
+
+// Called by the native app right after purchasePackage()/restorePurchases()
+// resolves — the server re-fetches RevenueCat's canonical subscriber state
+// and returns the refreshed limits, so the UI updates immediately instead of
+// waiting on the webhook (which also flips plan.json, out-of-band, shortly
+// after).
+export function syncRevenueCatEntitlement(): Promise<Limits> {
+  return request('POST', '/billing/revenuecat/sync');
 }
 
 export async function fetchPassport(token: string): Promise<PassportData> {

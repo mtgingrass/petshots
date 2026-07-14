@@ -19,7 +19,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
 import Stripe from 'stripe';
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   APIGatewayProxyResultV2,
@@ -41,6 +41,8 @@ import {
   EMAIL,
   ACHIEVEMENTS,
   WALKS,
+  SUMMARY,
+  REVENUECAT,
 } from '../shared/config';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the reminder Lambda's report emails — see that file's header.
@@ -55,6 +57,18 @@ import {
 // "Email me this report" (POST /trends/send) reuses the exact same copy the
 // proactive monthly report email uses — see shared/copy/digest.ts.
 import { monthlyReportCopy, weeklyReportCopy, photoCopy } from '../shared/copy';
+// The Summary story pipeline (photo picking, Bedrock call, chips/stats
+// shaping) is shared with the reminder Lambda's weekly/monthly story crons —
+// one code path means the tone guardrails and the feeding-stays-out-of-the-
+// story rule can't drift between the daily and persistent stories.
+import {
+  pickWindowPhotos,
+  fetchImageBlocks,
+  generateWindowStory,
+  buildChips,
+  buildStatsForModel,
+  type StoryPetStats,
+} from '../shared/summaryStory';
 import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
 // Real-time push (e.g. "new photo added" to household members) — shared with
 // the reminder Lambda's daily/weekly nudges. See that file's header.
@@ -239,8 +253,9 @@ interface PetBadgeStats {
   longestWalkWeekStreak: number;
   totalPhotos: number;
   maxPhotoDaysInWeek: number;
-  hasPerfectCareDay: boolean;
-  longestCareStreak: number;
+  hasWeekendPhotoPair: boolean; // photos on both Sat AND Sun of one weekend
+  hasBirthdayPhoto: boolean; // a photo dated the pet's dob month-day (false when no dob)
+  photoMonths: number; // distinct calendar months with >= 1 photo
 }
 interface BadgesFile {
   earned: Record<string, { earnedAt: string }>; // badgeId -> local YYYY-MM-DD
@@ -281,6 +296,18 @@ const badgeCatalog: Record<string, { def: BadgeDef; done: (s: PetBadgeStats) => 
       def: { id: 'miles-century', icon: '💯', name: 'Century Club', description: `Walk ${ACHIEVEMENTS.MILES_CENTURY} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_CENTURY} miles walked — century club!` },
       done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_CENTURY,
     },
+    {
+      def: { id: 'miles-250', icon: '🧭', name: 'Trailblazer', description: `Walk ${ACHIEVEMENTS.MILES_250} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_250} miles — a real trailblazer!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_250,
+    },
+    {
+      def: { id: 'miles-500', icon: '💪', name: 'Iron Paws', description: `Walk ${ACHIEVEMENTS.MILES_500} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_500} miles of iron-paw dedication!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_500,
+    },
+    {
+      def: { id: 'miles-1000', icon: '🌍', name: 'World Walker', description: `Walk ${ACHIEVEMENTS.MILES_1000} miles, all-time.`, congrats: `${ACHIEVEMENTS.MILES_1000} miles walked — world walker!` },
+      done: (s) => s.totalMiles >= ACHIEVEMENTS.MILES_1000,
+    },
   ],
   'photo-days-week': [
     {
@@ -295,27 +322,20 @@ const badgeCatalog: Record<string, { def: BadgeDef; done: (s: PetBadgeStats) => 
       def: { id: 'photo-week-perfect', icon: '✨', name: 'Paparazzi Week', description: 'Take a photo every day for a week.', congrats: 'A photo every single day this week!' },
       done: (s) => s.maxPhotoDaysInWeek >= ACHIEVEMENTS.PHOTO_DAYS_PERFECT_WEEK,
     },
+    // Creative badges (2026-07-13, replacing Shutterbug's stored-photo
+    // count): each needs at most one photo per qualifying day/month, so
+    // none of them pays the user to hoard storage. UTC day boundaries.
     {
-      def: { id: 'photo-total', icon: '📷', name: 'Shutterbug', description: `Save ${ACHIEVEMENTS.PHOTOS_TOTAL} photos, all-time.`, congrats: `${ACHIEVEMENTS.PHOTOS_TOTAL} photos saved!` },
-      done: (s) => s.totalPhotos >= ACHIEVEMENTS.PHOTOS_TOTAL,
-    },
-  ],
-  'care-streak': [
-    {
-      def: { id: 'care-day', icon: '✅', name: 'Perfect Day', description: 'Check off every Daily item in one day.', congrats: 'Every Daily item checked in one day!' },
-      done: (s) => s.hasPerfectCareDay,
+      def: { id: 'photo-weekend', icon: '🎞️', name: 'Weekend Shooter', description: 'Save a photo on both Saturday and Sunday of one weekend.', congrats: 'A full weekend behind the camera!' },
+      done: (s) => s.hasWeekendPhotoPair,
     },
     {
-      def: { id: 'care-streak-short', icon: '🔥', name: 'Three in a Row', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_SHORT} days in a row.`, congrats: `${ACHIEVEMENTS.CARE_STREAK_SHORT} perfect days in a row!` },
-      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_SHORT,
+      def: { id: 'photo-birthday', icon: '🎂', name: 'Birthday Portrait', description: 'Save a photo on their birthday.', congrats: 'A birthday captured forever!' },
+      done: (s) => s.hasBirthdayPhoto,
     },
     {
-      def: { id: 'care-streak-week', icon: '🗓️', name: 'Full Week', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_WEEK} days in a row.`, congrats: `A full week of perfect care!` },
-      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_WEEK,
-    },
-    {
-      def: { id: 'care-streak-habit', icon: '💎', name: 'Habit Formed', description: `Complete the full Daily list ${ACHIEVEMENTS.CARE_STREAK_HABIT} days in a row.`, congrats: `${ACHIEVEMENTS.CARE_STREAK_HABIT} days straight — it's a habit now!` },
-      done: (s) => s.longestCareStreak >= ACHIEVEMENTS.CARE_STREAK_HABIT,
+      def: { id: 'photo-seasons', icon: '🍂', name: 'Through the Seasons', description: `Save photos in ${ACHIEVEMENTS.PHOTO_SEASONS_MONTHS} different months.`, congrats: `Photos across ${ACHIEVEMENTS.PHOTO_SEASONS_MONTHS} months — through the seasons!` },
+      done: (s) => s.photoMonths >= ACHIEVEMENTS.PHOTO_SEASONS_MONTHS,
     },
   ],
 };
@@ -458,6 +478,12 @@ const cleanPet = (input: Record<string, unknown>) => ({
   microchip:         str(input.microchip, 50),
   fixed:             input.fixed === true ? true : undefined,
   notes:             str(input.notes, 1000),
+  // Memorial state (2026-07-13): a passed pet stays fully viewable
+  // (records/photos/passport) but is excluded from stories, reminders,
+  // digests, achievements, Daily, and walk pickers — see the isMemorial
+  // filters at each of those sites.
+  memorial:          input.memorial === true ? true : undefined,
+  passedOn:          str(input.passedOn, 10), // YYYY-MM-DD, optional
 });
 
 async function readJson<T>(key: string): Promise<T | null> {
@@ -527,7 +553,13 @@ interface Limits {
   maxMembers: number; // family members (besides the owner) this plan allows
   dailyHistoryDays: number; // how far back the Daily tab can browse
 }
-type Entitlements = Limits & { plan: 'free' | 'paid' };
+// billingSource distinguishes a Stripe (web) subscriber from a RevenueCat
+// (App Store/iOS) one, so the Settings billing card on native can tell them
+// apart — a web subscriber who later installs the app still gets "managed
+// on the web" instead of an App Store deep link. Defaults to 'stripe' for
+// paid accounts written before this field existed.
+type BillingSource = 'stripe' | 'revenuecat';
+type Entitlements = Limits & { plan: 'free' | 'paid'; billingSource?: BillingSource };
 const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
   free: {
     maxPets: MAX_PETS,
@@ -547,13 +579,16 @@ const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
 const posInt = (v: unknown, fallback: number): number =>
   typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : fallback;
 async function getEntitlements(sub: string): Promise<Entitlements> {
-  const file = await readJson<{ plan?: string; limits?: Partial<Limits> }>(
-    `users/${sub}/plan.json`,
-  );
+  const file = await readJson<{
+    plan?: string;
+    limits?: Partial<Limits>;
+    billingSource?: BillingSource;
+  }>(`users/${sub}/plan.json`);
   const plan = file?.plan === 'paid' ? 'paid' : 'free';
   const base = PLAN_LIMITS[plan];
   return {
     plan,
+    ...(plan === 'paid' ? { billingSource: file?.billingSource ?? 'stripe' } : {}),
     maxPets: posInt(file?.limits?.maxPets, base.maxPets),
     maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
     maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
@@ -737,6 +772,15 @@ function dailyPresetsFor(species: string | undefined): DailyItem[] {
   }
   return meals;
 }
+// Feeding items get special handling in two places: the Summary story never
+// narrates them (GET /summary withholds them from the model — a stat, not
+// story material), and the Daily tab offers to drop them after prolonged
+// disuse (GET daily's feedingIdle hint). Matches the presets plus custom
+// items with meal-ish names.
+const isFeedingDailyItem = (id: string, name: string) =>
+  id === 'preset-breakfast' ||
+  id === 'preset-dinner' ||
+  /\b(breakfast|lunch|dinner|meal|feed(ing)?)\b/i.test(name);
 // ---- Trends tab (GET /trends) ----
 // Window-stats computation (archive-merging, tallies, the "we noticed"
 // picker) lives in shared/dailyStats.ts — the reminder Lambda's new monthly
@@ -823,11 +867,15 @@ async function computeTrendsView(
       trendsPetIds.map(async (petId) => {
         const petPrefix = `${poolPrefix}${petId}/`;
         const [pet, daily, weightsStored] = await Promise.all([
-          readJson<{ name?: string; species?: string }>(`${petPrefix}pet.json`),
+          readJson<{ name?: string; species?: string; memorial?: boolean }>(`${petPrefix}pet.json`),
           readJson<DailyFile>(`${petPrefix}daily.json`),
           readJson<{ entries: WeightEntry[] }>(`${petPrefix}weights.json`),
         ]);
         if (!pet?.name) return null;
+        // Memorial pets are excluded from every stats/story surface this
+        // feeds (Summary, trends routes, report emails) — records stay
+        // viewable, but nothing narrates or nudges about them.
+        if (pet.memorial) return null;
         const petName = pet.name;
         const weights = weightsStored?.entries ?? [];
         const activeItems = (daily?.items ?? dailyPresetsFor(pet.species)).filter((i) =>
@@ -1495,6 +1543,7 @@ async function handleStripeWebhook(
       await putJson(`billing/customers/${customerId}.json`, { sub: userSub });
       await putJson(`users/${userSub}/plan.json`, {
         plan: 'paid',
+        billingSource: 'stripe',
         stripeCustomerId: customerId,
         stripeSubscriptionId:
           typeof session.subscription === 'string' ? session.subscription : session.subscription?.id,
@@ -1515,12 +1564,92 @@ async function handleStripeWebhook(
         ['active', 'trialing', 'past_due'].includes(subscription.status);
       await putJson(`users/${mapping.sub}/plan.json`, {
         plan: stillPaid ? 'paid' : 'free',
+        billingSource: 'stripe',
         stripeCustomerId: customerId,
         stripeSubscriptionId: subscription.id,
       });
       break;
     }
   }
+  return json(200, { received: true });
+}
+
+// ---- billing (RevenueCat / Apple In-App Purchase, iOS app only) ----
+// Stripe (above) still owns web billing untouched. RevenueCat's app_user_id
+// is always the Cognito sub (configured client-side at Purchases.configure
+// time), so both the webhook and the authed sync route below write straight
+// to users/{sub}/plan.json — no reverse customer-id mapping needed, unlike
+// Stripe's billing/customers/{id}.json (Stripe's customer id isn't known
+// until after checkout; RevenueCat's app_user_id is ours from the start).
+const REVENUECAT_SECRET_NAME = process.env.REVENUECAT_SECRET_NAME ?? 'petshots/revenuecat';
+interface RevenueCatConfig {
+  secretApiKey: string;
+  webhookSigningSecret: string;
+}
+let revenueCatCache: RevenueCatConfig | null = null;
+async function getRevenueCatConfig(): Promise<RevenueCatConfig> {
+  if (!revenueCatCache) {
+    const res = await sm.send(new GetSecretValueCommand({ SecretId: REVENUECAT_SECRET_NAME }));
+    revenueCatCache = JSON.parse(res.SecretString!) as RevenueCatConfig;
+  }
+  return revenueCatCache;
+}
+
+// Never trusts a webhook payload's entitlement state directly — RevenueCat's
+// own guidance is to re-fetch GET /subscribers after any webhook, since it's
+// the canonical, consistently-formatted view. This same function backs both
+// the webhook (out-of-band renewals/cancellations) and the authed sync route
+// the app calls right after a purchase/restore (for instant UI correctness,
+// instead of waiting on the webhook to land).
+async function syncRevenueCatEntitlement(appUserId: string): Promise<void> {
+  const { secretApiKey } = await getRevenueCatConfig();
+  const res = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(appUserId)}`, {
+    headers: { Authorization: `Bearer ${secretApiKey}` },
+  });
+  if (!res.ok) throw new Error(`RevenueCat subscriber lookup failed: ${res.status}`);
+  const data = (await res.json()) as {
+    subscriber?: { entitlements?: Record<string, { expires_date?: string | null }> };
+  };
+  const entitlement = data.subscriber?.entitlements?.[REVENUECAT.ENTITLEMENT_ID];
+  // No expires_date (lifetime/non-expiring) counts as active; otherwise
+  // compare against now the same way Stripe's past_due/active check does.
+  const isPaid = !!entitlement && (!entitlement.expires_date || new Date(entitlement.expires_date) > new Date());
+  await putJson(`users/${appUserId}/plan.json`, {
+    plan: isPaid ? 'paid' : 'free',
+    billingSource: 'revenuecat',
+  });
+}
+
+async function handleRevenueCatWebhook(
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+): Promise<APIGatewayProxyResultV2> {
+  const { webhookSigningSecret } = await getRevenueCatConfig();
+  const sigHeader = event.headers?.['x-revenuecat-webhook-signature'];
+  if (!sigHeader) return json(400, { error: 'missing signature' });
+  const raw = event.isBase64Encoded
+    ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
+    : (event.body ?? '');
+
+  // Format: "t=<unix_ts>,v1=<hmac_sha256_hex>" over "<ts>.<raw body>".
+  const parts = Object.fromEntries(
+    sigHeader.split(',').map((p) => p.split('=') as [string, string]),
+  );
+  const timestamp = parts.t;
+  const providedSig = parts.v1;
+  if (!timestamp || !providedSig) return json(400, { error: 'invalid signature' });
+  const expectedSig = createHmac('sha256', webhookSigningSecret)
+    .update(`${timestamp}.${raw}`)
+    .digest('hex');
+  const expected = Buffer.from(expectedSig, 'hex');
+  const provided = Buffer.from(providedSig, 'hex');
+  if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
+    return json(400, { error: 'invalid signature' });
+  }
+
+  const body = JSON.parse(raw) as { event?: { app_user_id?: string } };
+  const appUserId = body.event?.app_user_id;
+  if (!appUserId) return json(400, { error: 'missing app_user_id' });
+  await syncRevenueCatEntitlement(appUserId);
   return json(200, { received: true });
 }
 
@@ -1714,6 +1843,11 @@ export const handler = async (
     try { return await handleStripeWebhook(event); }
     catch (e) { console.error('webhook error', e); return json(500, { error: 'internal error' }); }
   }
+  // RevenueCat calls this server-to-server; auth is the HMAC signature, not a JWT.
+  if (event.routeKey === 'POST /billing/revenuecat-webhook') {
+    try { return await handleRevenueCatWebhook(event); }
+    catch (e) { console.error('revenuecat webhook error', e); return json(500, { error: 'internal error' }); }
+  }
 
   // The Cognito JWT authorizer already verified the token; we just read claims.
   // sub is the stable per-user id we scope every S3 key to - a user can never
@@ -1904,6 +2038,232 @@ export const handler = async (
         return json(200, { ok: true, sent: true });
       }
 
+      // ---- daily summary (the Summary tab) — a warm AI-written story of
+      // the pool's last SUMMARY.LOOKBACK_DAYS, illustrated with recent
+      // photos. Generated at most once per day per pool and cached at
+      // users/{poolSub}/summary/{YYYY-MM-DD}.json; family members share the
+      // day's story. Two phones racing the first GET of the day may both
+      // call the model and last-write wins — same accepted looseness as
+      // badges.json (harmless, pennies). Failures are NOT cached so the
+      // next GET retries. ----
+      case 'GET /summary': {
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        const poolPrefix = `users/${poolSub}/pets/`;
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const cacheKey = `users/${poolSub}/summary/${todayKey}.json`;
+
+        interface SummaryPhotoRef { petId: string; id: string; filename: string }
+        interface SummaryChip {
+          petId: string; name: string; carePct: number; moodAvg: number | null;
+          walks: { count: number; miles: number; kcal: number | null } | null;
+          meals: { done: number; total: number } | null;
+        }
+        interface SummaryCache {
+          generatedAt: string; story: string;
+          rangeStart: string; rangeEnd: string;
+          photoRefs: SummaryPhotoRef[]; pets: SummaryChip[];
+        }
+        const presignPhotos = (refs: SummaryPhotoRef[]) =>
+          Promise.all(
+            refs.map(async (r) => ({
+              petId: r.petId,
+              id: r.id,
+              filename: r.filename,
+              url: await getSignedUrl(
+                s3,
+                new GetObjectCommand({
+                  Bucket: BUCKET,
+                  Key: `${poolPrefix}${r.petId}/photos/${r.id}/${r.filename}`,
+                }),
+                { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
+              ),
+            })),
+          );
+
+        const cached = await readJson<SummaryCache>(cacheKey);
+        if (cached) {
+          return json(200, {
+            story: cached.story,
+            generatedAt: cached.generatedAt,
+            rangeStart: cached.rangeStart,
+            rangeEnd: cached.rangeEnd,
+            pets: cached.pets,
+            photos: await presignPhotos(cached.photoRefs),
+          });
+        }
+
+        const { pets: weekPets, rangeStart, rangeEnd } = await computeTrendsView(
+          poolPrefix,
+          'week',
+          0,
+        );
+        // Chips + model stats come from the shared story pipeline (feeding
+        // folded into a meals stat and withheld from the model there —
+        // shared with the weekly/monthly story crons so the rules can't
+        // drift). computeTrendsView's richer week shape maps down to the
+        // module's leaner one; kcal rides along inside walks.
+        const storyPets: StoryPetStats[] = weekPets.map((p) => ({
+          petId: p.petId,
+          name: p.name,
+          species: '',
+          carePct: p.careConsistency,
+          moodAvg: p.moodAvg,
+          medsGiven: p.medsGiven,
+          weight: p.weight ? { value: p.weight.value, unit: p.weight.unit, delta: p.weight.deltaWeek } : null,
+          walks: p.walks,
+          checklist: p.checklist,
+        }));
+        const chips: SummaryChip[] = buildChips(storyPets);
+        const photoRefs = await pickWindowPhotos(
+          BUCKET,
+          poolSub,
+          weekPets.map((p) => p.petId),
+          rangeStart,
+          rangeEnd,
+        );
+
+        // Min-signal gate: distinct window days where anything at all was
+        // logged (any checklist item or a mood press, any pet). Derived from
+        // the series computeTrendsView already built — no extra reads.
+        const windowDays = weekPets[0]?.moodSeries.length ?? 0;
+        let activeDays = 0;
+        for (let i = 0; i < windowDays; i++) {
+          const active = weekPets.some(
+            (p) =>
+              p.moodSeries[i]?.value !== null ||
+              p.checklistSeries.some((c) => c.days[i]),
+          );
+          if (active) activeDays++;
+        }
+        if (activeDays < SUMMARY.MIN_ACTIVE_DAYS && photoRefs.length === 0) {
+          return json(200, {
+            story: null,
+            reason: 'NOT_ENOUGH_DATA',
+            rangeStart,
+            rangeEnd,
+            pets: chips,
+            photos: [],
+          });
+        }
+
+        let story: string;
+        try {
+          const imageBlocks = await fetchImageBlocks(BUCKET, photoRefs);
+          story = await generateWindowStory({
+            petNames: weekPets.map((p) => p.name),
+            days: SUMMARY.LOOKBACK_DAYS,
+            statsForModel: buildStatsForModel(storyPets),
+            imageBlocks,
+          });
+        } catch (e) {
+          console.error('bedrock summary error', e);
+          return json(200, {
+            story: null,
+            reason: 'AI_FAILED',
+            rangeStart,
+            rangeEnd,
+            pets: chips,
+            photos: await presignPhotos(photoRefs),
+          });
+        }
+
+        const generatedAt = new Date().toISOString();
+        await putJson(cacheKey, {
+          generatedAt,
+          story,
+          rangeStart,
+          rangeEnd,
+          photoRefs: photoRefs.map(({ petId, id, filename }) => ({ petId, id, filename })),
+          pets: chips,
+        } satisfies SummaryCache);
+        return json(200, {
+          story,
+          generatedAt,
+          rangeStart,
+          rangeEnd,
+          pets: chips,
+          photos: await presignPhotos(photoRefs),
+        });
+      }
+
+      // ---- story archive — the persistent weekly/monthly stories the
+      // reminder Lambda's crons write (summary/weeks/, summary/months/).
+      // List is metadata + a preview line; the entry route returns the full
+      // story with fresh presigned photos. Reads every stored story on each
+      // list call — fine for years of weeklies (small JSONs, ~52/yr),
+      // revisit if it ever isn't. ----
+      case 'GET /summary/archive': {
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        interface StoredStory {
+          rangeStart: string; rangeEnd: string; story: string; monthLabel?: string;
+        }
+        const listKind = async (kind: 'weeks' | 'months') => {
+          const list = await s3.send(
+            new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `users/${poolSub}/summary/${kind}/` }),
+          );
+          const keys = (list.Contents ?? []).map((it) => it.Key!).sort().reverse(); // newest first
+          return Promise.all(
+            keys.map(async (k) => {
+              const stored = await readJson<StoredStory>(k);
+              const key = k.split('/').pop()!.replace('.json', '');
+              return stored
+                ? {
+                    key,
+                    rangeStart: stored.rangeStart,
+                    rangeEnd: stored.rangeEnd,
+                    ...(stored.monthLabel ? { monthLabel: stored.monthLabel } : {}),
+                    preview: stored.story.slice(0, 140),
+                  }
+                : null;
+            }),
+          ).then((rows) => rows.filter((r) => r !== null));
+        };
+        const [weeks, months] = await Promise.all([listKind('weeks'), listKind('months')]);
+        return json(200, { weeks, months });
+      }
+
+      case 'GET /summary/archive/{kind}/{key}': {
+        const kind = event.pathParameters?.kind;
+        const key = event.pathParameters?.key ?? '';
+        if (kind !== 'weeks' && kind !== 'months') return json(400, { error: 'kind must be weeks or months' });
+        if (!/^\d{4}-\d{2}(-\d{2})?$/.test(key)) return json(400, { error: 'bad key' });
+        const membership = await readMemberOf(sub);
+        const poolSub = membership?.ownerSub ?? sub;
+        interface StoredStory {
+          rangeStart: string; rangeEnd: string; story: string; monthLabel?: string;
+          photoRefs: { petId: string; id: string; filename: string }[];
+          pets: unknown[]; generatedAt: string;
+        }
+        const stored = await readJson<StoredStory>(`users/${poolSub}/summary/${kind}/${key}.json`);
+        if (!stored) return json(404, { error: 'not found' });
+        const photos = await Promise.all(
+          (stored.photoRefs ?? []).map(async (r) => ({
+            ...r,
+            url: await getSignedUrl(
+              s3,
+              new GetObjectCommand({
+                Bucket: BUCKET,
+                Key: `users/${poolSub}/pets/${r.petId}/photos/${r.id}/${r.filename}`,
+              }),
+              { expiresIn: UPLOADS.DOWNLOAD_URL_TTL_SECONDS },
+            ),
+          })),
+        );
+        return json(200, {
+          key,
+          kind,
+          rangeStart: stored.rangeStart,
+          rangeEnd: stored.rangeEnd,
+          ...(stored.monthLabel ? { monthLabel: stored.monthLabel } : {}),
+          story: stored.story,
+          generatedAt: stored.generatedAt,
+          pets: stored.pets ?? [],
+          photos,
+        });
+      }
+
       // ---- walks (account-level, not pet-scoped — one walk can cover
       // multiple pets, e.g. walking two dogs together, so it can't nest
       // under a single pet's prefix like docs/meds/photos/weights do).
@@ -2041,12 +2401,10 @@ export const handler = async (
       // persistence notes at badgeCatalog above). Card numbers stay the
       // rolling last-7-days window; badge conditions use best-ever calendar
       // weeks / all-time totals so trophies never un-earn. Cats get no walk
-      // cards (Mark, 2026-07-13); the care-streak card (consecutive days
-      // with EVERY active Daily item checked) is the cat-friendly metric,
-      // shown for all species because it's just as meaningful for dogs.
-      // The care scan reads the daily archive regardless of plan — it powers
-      // one aggregate number, not history browsing, so DAILY.HISTORY_DAYS_FREE
-      // (a read-entitlement for the Daily tab) deliberately doesn't gate it.
+      // cards (Mark, 2026-07-13) — just the photo card. The Care-streak card
+      // (consecutive perfect Daily days) was removed entirely 2026-07-14;
+      // any badges pets already earned under it stay as harmless orphaned
+      // keys in badges.json (same precedent as removing Shutterbug).
       case 'GET /achievements': {
         const membership = await readMemberOf(sub);
         const poolSub = membership?.ownerSub ?? sub;
@@ -2072,11 +2430,15 @@ export const handler = async (
           petIds.map(async (petId) => {
             const petPrefix = `${poolPrefix}${petId}/`;
             const [pet, daily, photosList] = await Promise.all([
-              readJson<{ name?: string; species?: string }>(`${petPrefix}pet.json`),
+              readJson<{ name?: string; species?: string; dob?: string; memorial?: boolean }>(`${petPrefix}pet.json`),
               readJson<DailyFile>(`${petPrefix}daily.json`),
               s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${petPrefix}photos/` })),
             ]);
             if (!pet?.name) return null;
+            // Memorial pets keep their earned badges in badges.json but the
+            // cards (and any new earns) stop — achievements are for living
+            // routines, not memorials.
+            if (pet.memorial) return null;
 
             const petWalks = allWalks.filter((w) => w.petIds.includes(petId));
             const weekWalks = petWalks.filter((w) => w.startedAt.slice(0, 10) >= windowStart);
@@ -2088,38 +2450,20 @@ export const handler = async (
               .filter((d): d is string => !!d);
             const daysWithPhoto = new Set(photoDates.filter((d) => windowDates.has(d)));
             const photoBests = weeklyBests(photoDates);
-
-            // Care streak: a day is "perfect" when every Daily item active
-            // THAT day is checked (effective-dated items, presets included;
-            // counters count as done at >= 1 increment). A pet with no items
-            // on a date can't be perfect that date. Today-in-progress doesn't
-            // zero the current streak — it just doesn't count yet.
-            const lookback = ACHIEVEMENTS.CARE_STREAK_LOOKBACK_DAYS;
-            const careDates = Array.from({ length: lookback }, (_, i) =>
-              addToDay(todayKey, { days: -(lookback - 1 - i) }),
+            // Creative photo badges (UTC day boundaries throughout):
+            // Weekend Shooter — some calendar week has a photo on BOTH its
+            // Saturday and its Sunday (Sunday belongs to the following
+            // Mon-start week, so pair Sat with the NEXT day, not weekStartOf).
+            const photoDateSet = new Set(photoDates);
+            const hasWeekendPhotoPair = photoDates.some(
+              (d) => new Date(`${d}T00:00:00Z`).getUTCDay() === 6 && photoDateSet.has(addToDay(d, { days: 1 })),
             );
-            const careEntries = await mergedDailyEntries(petPrefix, daily, careDates, todayKey);
-            const items = daily?.items ?? dailyPresetsFor(pet.species);
-            const perfect = (d: string) => {
-              const active = items.filter((i) => itemVisibleOn(i, d));
-              return active.length > 0 && active.every((i) => Boolean(careEntries[d]?.checks?.[i.id]));
-            };
-            let hasPerfectCareDay = false;
-            let longestCareStreak = 0;
-            let run = 0;
-            for (const d of careDates) {
-              if (perfect(d)) {
-                hasPerfectCareDay = true;
-                longestCareStreak = Math.max(longestCareStreak, ++run);
-              } else run = 0;
-            }
-            let idx = careDates.length - 1;
-            if (!perfect(careDates[idx])) idx--;
-            let currentStreak = 0;
-            while (idx >= 0 && perfect(careDates[idx])) {
-              currentStreak++;
-              idx--;
-            }
+            const hasBirthdayPhoto =
+              !!pet.dob && pet.dob.length >= 10 && photoDates.some((d) => d.slice(5) === pet.dob!.slice(5));
+            const photoMonths = new Set(photoDates.map((d) => d.slice(0, 7))).size;
+
+            const badgesKey = `${petPrefix}badges.json`;
+            const stored = (await readJson<BadgesFile>(badgesKey)) ?? { earned: {} };
 
             const stats: PetBadgeStats = {
               totalWalks: petWalks.length,
@@ -2129,12 +2473,11 @@ export const handler = async (
               longestWalkWeekStreak: walkBests.longestStreak,
               totalPhotos: photoDates.length,
               maxPhotoDaysInWeek: photoBests.maxDays,
-              hasPerfectCareDay,
-              longestCareStreak,
+              hasWeekendPhotoPair,
+              hasBirthdayPhoto,
+              photoMonths,
             };
 
-            const badgesKey = `${petPrefix}badges.json`;
-            const stored = (await readJson<BadgesFile>(badgesKey)) ?? { earned: {} };
             let newlyEarned = false;
             const badgesFor = (cardId: string) =>
               badgeCatalog[cardId].map(({ def, done }) => {
@@ -2147,29 +2490,24 @@ export const handler = async (
                 return { ...def, earnedAt };
               });
 
-            const careCard = {
-              id: 'care-streak',
-              icon: '💚',
-              label: 'Care streak (days)',
-              value: currentStreak >= lookback ? `${lookback}+` : String(currentStreak),
-              badges: badgesFor('care-streak'),
-            };
             const photoCard = {
               id: 'photo-days-week',
               icon: '📸',
-              label: 'Days photographed this week',
+              label: 'Photos this week',
               value: `${daysWithPhoto.size}/${DIGEST.LOOKBACK_DAYS}`,
               badges: badgesFor('photo-days-week'),
             };
             // Cats never evaluate walk badges at all — no stray earns if a
-            // walk gets tagged onto a cat in a mixed-species outing.
+            // walk gets tagged onto a cat in a mixed-species outing. Photo
+            // card leads for every species (2026-07-15) so it lands in the
+            // same grid column whether a pet has 1 card or 3 — cats always
+            // had it first by default; dogs used to bury it after walks/miles.
             const cards = isCatSpecies(pet.species)
-              ? [careCard, photoCard]
+              ? [photoCard]
               : [
+                  photoCard,
                   { id: 'walks-week', icon: '🚶', label: 'Walks this week', value: String(weekWalks.length), badges: badgesFor('walks-week') },
                   { id: 'distance-week', icon: '🗺️', label: 'Miles this week', value: weekMiles.toFixed(1), badges: badgesFor('distance-week') },
-                  photoCard,
-                  careCard,
                 ];
             if (newlyEarned) await putJson(badgesKey, stored);
             return { petId, petName: pet.name, cards };
@@ -2361,7 +2699,9 @@ export const handler = async (
         const quota = await bumpPhotoQuota(petPrefix, cap);
         if (!quota.ok) {
           return json(409, {
-            error: `You've reached today's photo limit for ${pet?.name ?? 'this pet'} — try again tomorrow.`,
+            error: `You've reached today's photo limit for ${pet?.name ?? 'this pet'} — try again tomorrow${
+              ent.plan === 'paid' ? '.' : ', or upgrade for more photos per day.'
+            }`,
           });
         }
 
@@ -2949,7 +3289,28 @@ export const handler = async (
           ),
           ...dailyMedItems(medsStored?.meds ?? [], date, checks),
         ];
-        return json(200, { date, items, checks, mood });
+        // Feeding-disuse hint: active feeding items with ZERO checks across
+        // the whole live log, while everything else shows real use (other
+        // checks on 3+ distinct days — a brand-new account never triggers).
+        // The Daily tab renders a dismissible "drop meal tracking?" prompt.
+        let feedingIdle = false;
+        const feedingIds = new Set(
+          items.filter((i) => !('med' in i) && isFeedingDailyItem(i.id, i.name)).map((i) => i.id),
+        );
+        if (feedingIds.size > 0) {
+          let fedEver = false;
+          let otherDays = 0;
+          for (const dayChecks of Object.values(file?.log ?? {})) {
+            let otherToday = false;
+            for (const id of Object.keys(dayChecks)) {
+              if (feedingIds.has(id)) fedEver = true;
+              else otherToday = true;
+            }
+            if (otherToday) otherDays++;
+          }
+          feedingIdle = !fedEver && otherDays >= 3;
+        }
+        return json(200, { date, items, checks, mood, feedingIdle });
       }
 
       case 'POST /pets/{petId}/daily/mood': {
@@ -3228,6 +3589,12 @@ export const handler = async (
         // retryable: Stripe + orphanable root objects first, then the user's
         // S3 prefix, then the Cognito user LAST (while it exists the user can
         // still re-auth and hit this route again).
+        //
+        // No equivalent cleanup exists for an Apple IAP subscription — unlike
+        // Stripe, there's no server-side "cancel" call available to us; the
+        // user must cancel it themselves via the App Store (standard for
+        // every IAP app). Deleting the Cognito user here still revokes app
+        // access immediately regardless.
         const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
         if (plan?.stripeCustomerId) {
           try {
@@ -3343,6 +3710,14 @@ export const handler = async (
           return_url: `${APP_URL}/dashboard`,
         });
         return json(200, { url: session.url });
+      }
+
+      // Called by the iOS app immediately after purchasePackage()/
+      // restorePurchases() resolves, so the UI reflects the new entitlement
+      // without waiting on the webhook. See syncRevenueCatEntitlement above.
+      case 'POST /billing/revenuecat/sync': {
+        await syncRevenueCatEntitlement(sub);
+        return json(200, await getEntitlements(sub));
       }
 
       // ---- passport management ----

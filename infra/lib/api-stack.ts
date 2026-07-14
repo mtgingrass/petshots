@@ -117,6 +117,11 @@ export class ApiStack extends cdk.Stack {
         STRIPE_SECRET_NAME: 'petshots/stripe',
         APP_URL: EMAIL.APP_URL,
 
+        // Apple In-App Purchase billing (iOS app only, via RevenueCat) — the
+        // web stays Stripe-only. REVENUECAT in shared/config.ts documents the
+        // entitlement/offering/product ids.
+        REVENUECAT_SECRET_NAME: 'petshots/revenuecat',
+
         // DELETE /account removes the caller's own Cognito user (always the
         // verified JWT's sub, never a client-supplied name).
         USER_POOL_ID: userPool.userPoolId,
@@ -154,6 +159,7 @@ export class ApiStack extends cdk.Stack {
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/vapid-*`,
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/apns-*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/revenuecat-*`,
         ],
       }),
     );
@@ -346,11 +352,48 @@ export class ApiStack extends cdk.Stack {
       }),
     );
 
+    // Persistent Summary stories (all plans): the completed week's story
+    // every Monday, consolidated into a month story on the 1st — both run
+    // on this Lambda (5-min timeout; ApiFn's 29s can't walk every pool with
+    // Bedrock calls in between). Quiet pools are skipped inside the handler.
+    const weeklyStoriesRule = new events.Rule(this, 'WeeklyStoriesRule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '6', weekDay: 'MON', month: '*', year: '*' }),
+      description: "Writes each pool's permanent weekly Summary story",
+    });
+    weeklyStoriesRule.addTarget(
+      new eventsTargets.LambdaFunction(reminderFn, {
+        event: events.RuleTargetInput.fromObject({ weeklyStories: true }),
+      }),
+    );
+    const monthlyStoriesRule = new events.Rule(this, 'MonthlyStoriesRule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '6', day: '1', month: '*', year: '*' }),
+      description: "Consolidates last month's weekly stories into the month story",
+    });
+    monthlyStoriesRule.addTarget(
+      new eventsTargets.LambdaFunction(reminderFn, {
+        event: events.RuleTargetInput.fromObject({ monthlyStories: true }),
+      }),
+    );
+    // Story generation needs the same scoped Bedrock access as ApiFn's
+    // document extraction.
+    reminderFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+        resources: [
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6*',
+          `arn:aws:bedrock:*:${this.account}:inference-profile/*anthropic.claude-sonnet-4-6*`,
+        ],
+      }),
+    );
+
     const authedRoutes: [HttpMethod, string][] = [
       [HttpMethod.GET, '/pets'],
       [HttpMethod.POST, '/pets'],
       [HttpMethod.GET, '/trends'],
       [HttpMethod.POST, '/trends/send'],
+      [HttpMethod.GET, '/summary'],
+      [HttpMethod.GET, '/summary/archive'],
+      [HttpMethod.GET, '/summary/archive/{kind}/{key}'],
       [HttpMethod.GET, '/walks'],
       [HttpMethod.POST, '/walks'],
       [HttpMethod.DELETE, '/walks/{id}'],
@@ -395,6 +438,7 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.POST, '/household/leave'],
       [HttpMethod.POST, '/billing/checkout'],
       [HttpMethod.POST, '/billing/portal'],
+      [HttpMethod.POST, '/billing/revenuecat/sync'],
       [HttpMethod.DELETE, '/account'],
     ];
     for (const [method, routePath] of authedRoutes) {
@@ -419,6 +463,10 @@ export class ApiStack extends cdk.Stack {
     // Stripe webhook — server-to-server, authenticated by the webhook signature
     // (verified in the Lambda), so no Cognito authorizer.
     httpApi.addRoutes({ path: '/billing/webhook', methods: [HttpMethod.POST], integration });
+
+    // RevenueCat webhook (iOS App Store billing) — same pattern: HMAC
+    // signature verified in the Lambda, no Cognito authorizer.
+    httpApi.addRoutes({ path: '/billing/revenuecat-webhook', methods: [HttpMethod.POST], integration });
 
     // Unsubscribe-from-all-email — reached from an email link with no login;
     // the Lambda validates the per-user unsubToken itself.

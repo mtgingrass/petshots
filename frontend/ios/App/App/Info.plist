@@ -38,6 +38,10 @@
 	<string>Petshots saves your finished pet walks to Apple Health as walking workouts, so your own activity gets credit too.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Petshots writes your pet walks to Apple Health as walking workouts. It does not read any of your health data.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

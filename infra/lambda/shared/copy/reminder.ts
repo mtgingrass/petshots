@@ -20,65 +20,66 @@
 
 export const reminderCopy = {
   greeting: 'Hi,',
-  introWithItems: "Here's your Petshots reminder:",
+  introWithItems: "A few pet-care items need your attention:",
   introCelebrationOnly: 'A little celebration from Petshots:',
   /** Same two intros, without the trailing colon — used as the HTML email's <h1>. */
-  emailTitleReminder: "Here's your Petshots reminder",
-  emailTitleCelebration: 'A little celebration from Petshots',
-  signoff: '— The Petshots team',
-  manageReminders: "Manage reminders in Settings or on each pet's Meds tab.",
+  emailTitleReminder: 'What needs attention today',
+  emailTitleCelebration: 'A little celebration for your pets',
+  signoff: 'Thanks for keeping up with them,',
+  signoffName: 'The Petshots team',
+  manageReminders: 'You can change reminder timing in Petshots Settings.',
   unsubscribeLine: (url: string) => `Unsubscribe from all Petshots email: ${url}`,
 
-  ctaWithMeds: (url: string) => `Mark meds as given and keep records up to date: ${url}`,
-  ctaDocsOnly: (url: string) => `Keep records up to date: ${url}`,
-  ctaButtonLabel: 'Open Petshots →',
+  ctaWithMeds: (url: string) => `Open Petshots and mark anything done: ${url}`,
+  ctaDocsOnly: (url: string) => `Open Petshots and review the latest records: ${url}`,
+  ctaButtonLabel: 'Open Petshots',
 
   /** Free-plan upgrade nudge — shown to non-paid users on every reminder email. */
   upgradeLine: (maxPets: number, url: string) =>
-    `Free plan covers ${maxPets} pets. Upgrade for unlimited pets & records: ${url}`,
+    `Free plan covers ${maxPets} pets. Upgrade for more pets, records, and family seats: ${url}`,
   upgradeLineHtml: (maxPets: number, url: string) =>
-    `Free plan covers ${maxPets} pets. <a href="${url}" style="color:#6c5ce7;font-weight:600;">Upgrade for unlimited pets &amp; records →</a>`,
+    `Free plan covers ${maxPets} pets. <a href="${url}" style="color:#1f3b36;font-weight:700;">See plan options on Petshots</a>.`,
 
   sectionTitles: {
     overdue: '⚠️ Overdue',
     today: '📅 Due today',
-    upcoming: 'Coming up',
+    upcoming: 'Coming up soon',
   },
 
   // ---- per-item lines (vaccine docs) ----
   docOverdue: (pet: string, label: string, formattedExpiry: string, overdueDays: number) =>
-    `${pet}'s ${label} — expired ${formattedExpiry} (${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue)`,
-  docToday: (pet: string, label: string) => `${pet}'s ${label} — expires today`,
+    `${pet}'s ${label} expired ${formattedExpiry} (${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue)`,
+  docToday: (pet: string, label: string) => `${pet}'s ${label} expires today`,
   docUpcoming: (pet: string, label: string, formattedExpiry: string, when: string) =>
-    `${pet}'s ${label} — expires ${formattedExpiry} (${when})`,
+    `${pet}'s ${label} expires ${formattedExpiry} (${when})`,
 
   // ---- per-item lines (medications) ----
   medOverdue: (pet: string, name: string, formattedDue: string, overdueDays: number) =>
-    `${pet}'s ${name} — ${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue (was due ${formattedDue})`,
-  medToday: (pet: string, name: string) => `${pet}'s ${name} — due today`,
+    `${pet}'s ${name} is ${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue (was due ${formattedDue})`,
+  medToday: (pet: string, name: string) => `${pet}'s ${name} is due today`,
   medUpcoming: (pet: string, name: string, formattedDue: string, when: string) =>
-    `${pet}'s ${name} — due ${formattedDue} (${when})`,
+    `${pet}'s ${name} is due ${formattedDue} (${when})`,
 
   birthdayLine: (pet: string, age: number) =>
-    age >= 1 ? `🎂 ${pet} turns ${age} today — happy birthday!` : `🎂 It's ${pet}'s birthday today — happy birthday!`,
+    age >= 1 ? `🎂 ${pet} turns ${age} today. Happy birthday.` : `🎂 It's ${pet}'s birthday today. Happy birthday.`,
 
   // ---- subject line variants ----
   subjectBirthdaySingle: (pet: string, age: number) =>
-    age >= 1 ? `🎂 ${pet} turns ${age} today!` : `🎂 Happy birthday, ${pet}!`,
-  subjectBirthdayMulti: (count: number) => `🎂 ${count} Petshots birthdays today!`,
+    age >= 1 ? `🎂 ${pet} turns ${age} today` : `🎂 Happy birthday, ${pet}`,
+  subjectBirthdayMulti: (count: number) => `🎂 ${count} Petshots birthdays today`,
   subjectOverdueSingleDoc: (pet: string, label: string, overdueDays: number) =>
-    `⚠️ ${pet}'s ${label} is ${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue`,
+    `⚠️ ${pet}'s ${label} is overdue`,
   subjectOverdueSingleMed: (pet: string, name: string, overdueDays: number) =>
-    `⚠️ ${pet}'s ${name} is ${overdueDays} day${overdueDays === 1 ? '' : 's'} overdue`,
-  subjectOverdueMulti: (count: number) => `⚠️ Petshots: ${count} overdue reminder${count !== 1 ? 's' : ''}`,
-  subjectTodaySingleDoc: (pet: string, label: string) => `Reminder: ${pet}'s ${label} expires today`,
-  subjectTodaySingleMed: (pet: string, name: string) => `Reminder: ${pet}'s ${name} is due today`,
-  subjectTodayMulti: (count: number) => `Petshots: ${count} reminder${count !== 1 ? 's' : ''} due today`,
+    `⚠️ ${pet}'s ${name} is overdue`,
+  subjectOverdueMulti: (count: number) => `⚠️ ${count} pet care item${count !== 1 ? 's' : ''} overdue`,
+  subjectTodaySingleDoc: (pet: string, label: string) => `${pet}'s ${label} expires today`,
+  subjectTodaySingleMed: (pet: string, name: string) => `${pet}'s ${name} is due today`,
+  subjectTodayMulti: (count: number) => `${count} pet care item${count !== 1 ? 's' : ''} due today`,
   subjectUpcomingSingleMed: (pet: string, name: string, days: number) =>
-    `Reminder: ${pet}'s ${name} is due in ${days} day${days !== 1 ? 's' : ''}`,
+    `${pet}'s ${name} is due soon`,
   subjectUpcomingSingleDoc: (pet: string, label: string, days: number) =>
-    `Reminder: ${pet}'s ${label} expires in ${days} day${days !== 1 ? 's' : ''}`,
-  subjectUpcomingDocsOnly: (count: number) => `Petshots: ${count} vaccine records expiring soon`,
-  subjectUpcomingMedsOnly: (count: number) => `Petshots: ${count} medications due soon`,
-  subjectUpcomingMixed: (count: number) => `Petshots: ${count} pet care reminders`,
+    `${pet}'s ${label} expires soon`,
+  subjectUpcomingDocsOnly: (count: number) => `${count} vaccine record${count !== 1 ? 's' : ''} expiring soon`,
+  subjectUpcomingMedsOnly: (count: number) => `${count} medication reminder${count !== 1 ? 's' : ''} coming up`,
+  subjectUpcomingMixed: (count: number) => `${count} pet care reminder${count !== 1 ? 's' : ''} coming up`,
 } as const;

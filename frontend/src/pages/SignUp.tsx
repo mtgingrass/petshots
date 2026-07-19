@@ -64,16 +64,18 @@ export function SignUp() {
           <label>
             Email
             <input
+              name="username"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              autoComplete="email"
+              autoComplete="username"
             />
           </label>
           <label>
             Password
             <input
+              name="new-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}

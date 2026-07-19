@@ -16,7 +16,7 @@ When your lived workaround is *asking an LLM to grep Gmail for a PDF at the dog-
 - Dashboard for pets and their documents (PDF, JPG) — uploads go straight from the browser to S3 via size-limited presigned POST
 - **Pet passports**: shareable QR/URL that shows vaccination status publicly, with token expiry and revocation
 - Daily vaccine-expiry reminder emails (EventBridge cron → Lambda → SES)
-- Free-tier limits (3 pets, 4 documents each) so the data model and authz patterns support a paid tier later
+- Free-tier limits (2 pets, 8 documents each); Apple IAP unlocks the paid tier in the iOS app
 
 ## Architecture
 

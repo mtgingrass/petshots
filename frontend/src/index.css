@@ -1239,6 +1239,26 @@ a {
   margin: 0;
 }
 
+.doc-detail__about {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.doc-detail__cadence {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.doc-detail__disclaimer {
+  font-size: 0.75rem;
+  line-height: 1.5;
+  font-style: italic;
+  margin: 0;
+}
+
 .doc-detail__reminder {
   font-size: 0.8rem;
   margin: 0;
@@ -1853,6 +1873,18 @@ a {
   opacity: 1;
 }
 
+.walk-screen__picker-member {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 999px;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  font-size: 0.85rem;
+  padding: 0.4rem 1rem;
+  opacity: 0.6;
+}
+
 .walk-screen__picker-check {
   position: absolute;
   top: -2px;
@@ -2031,6 +2063,41 @@ a {
   gap: 0.9rem;
 }
 
+.summary-all__heading .large-title {
+  margin-bottom: 0.25rem;
+}
+
+.summary-all__period {
+  margin: 0 0 0.7rem;
+  font-size: 0.9rem;
+}
+
+/* Archive detail uses a stacked header so the back affordance and a long
+   week/month title can never compete for the same horizontal space. */
+.summary-entry__header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.summary-entry__back {
+  min-height: 36px;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.summary-entry__title {
+  margin: 0;
+  font-size: clamp(1.55rem, 6vw, 2rem);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
 /* First-visit-of-the-day state while the model writes — centered, calm. */
 .summary-all__writing {
   display: flex;
@@ -2089,6 +2156,49 @@ a {
 
 .summary-all__story p:last-child {
   margin-bottom: 0;
+}
+
+.summary-all__section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.summary-all__section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.summary-all__section-head h2,
+.summary-all__section-head p {
+  margin: 0;
+}
+
+.summary-all__section-head h2 {
+  font-size: 1rem;
+}
+
+.summary-all__section-head p {
+  font-size: 0.88rem;
+}
+
+.summary-all__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.summary-all__list-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.summary-all__list-row + .summary-all__list-row {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: var(--hairline) solid var(--separator);
 }
 
 .summary-all__empty {
@@ -2352,6 +2462,42 @@ a {
   align-items: center;
   gap: 0.25rem;
   border-bottom: var(--hairline) solid var(--separator);
+}
+
+/* Archived records read as de-emphasized wherever they appear. */
+.doc-item--archived .doc-main {
+  opacity: 0.6;
+}
+
+/* Collapsed "Archived · N" section under the active records list. */
+.doc-archived {
+  margin-top: 0.5rem;
+  border-top: var(--hairline) solid var(--separator);
+  padding-top: 0.5rem;
+}
+
+.doc-archived__toggle {
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+}
+
+.doc-list--archived {
+  margin-top: 0.25rem;
+}
+
+.edit-doc__archive {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: var(--hairline) solid var(--separator);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.doc-detail__archived-note {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0;
 }
 
 /* The tappable row body: dot + label + expiry, opens the detail view. */
@@ -3250,8 +3396,28 @@ a {
   border: none;
   background: var(--panel-raised);
   border-radius: 12px;
-  padding: 0.75rem 1rem 0.9rem;
+  padding: 1rem;
   margin: 0;
+}
+
+.settings-card__title {
+  margin: 0 0 0.15rem;
+  color: var(--text);
+  font-size: 1.05rem;
+  font-weight: 720;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.settings-card__title--danger {
+  color: var(--error);
+}
+
+.settings-card__description {
+  flex: 1;
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .settings-group legend {
@@ -3282,6 +3448,171 @@ a {
   width: 100%;
   font-size: 0.78rem;
   margin: 0.1rem 0 0;
+}
+
+.tester-plan {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+}
+
+.tester-plan__label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.tester-plan__label span {
+  color: var(--subtle);
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+
+.tester-plan__control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.tester-plan__option {
+  min-width: 3.5rem;
+  min-height: 32px;
+  padding: 0.25rem 0.65rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--subtle);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.tester-plan__option--active {
+  background: var(--panel-raised);
+  color: var(--text);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 14%);
+}
+
+.purchase-options {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.purchase-option {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 108px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.12rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+}
+
+.purchase-option--featured {
+  border-color: color-mix(in srgb, var(--primary) 65%, var(--border));
+  background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+}
+
+.purchase-option__badge {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  padding: 0.16rem 0.38rem;
+  border-radius: 999px;
+  background: var(--primary);
+  color: white;
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.purchase-option__name {
+  color: var(--subtle);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.purchase-option strong {
+  font-size: 1.2rem;
+  line-height: 1.15;
+}
+
+.purchase-option__period {
+  color: var(--subtle);
+  font-size: 0.68rem;
+}
+
+.plan-error {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, var(--border));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--error) 7%, var(--panel));
+}
+
+.plan-error__icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.plan-error__copy {
+  min-width: 0;
+}
+
+.plan-error__copy strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.plan-error__copy p {
+  margin: 0.15rem 0 0;
+  color: var(--subtle);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.plan-error__retry {
+  min-height: 34px;
+  padding: 0.3rem 0.55rem;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .settings-row__label {
@@ -3317,10 +3648,6 @@ a {
 
 .settings-group--danger {
   background: color-mix(in srgb, var(--error) 7%, var(--panel-raised));
-}
-
-.settings-group--danger legend {
-  color: var(--error);
 }
 
 .danger-confirm {
@@ -3367,10 +3694,11 @@ a {
 }
 
 .settings-save-status {
-  display: flex;
-  align-items: center;
-  font-size: 0.85rem;
-  min-width: 3.5rem;
+  position: absolute;
+  right: 1rem;
+  color: var(--subtle);
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .settings-days {
@@ -4065,6 +4393,12 @@ a {
   font-size: 0.8rem;
 }
 
+.daily-item__nudge {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 0.85rem;
+}
+
 .daily__add {
   display: flex;
   gap: 0.5rem;
@@ -4433,6 +4767,10 @@ a {
     font-weight: 800;
     letter-spacing: -0.02em;
   }
+  .screen-view--root .settings-save-status {
+    right: 0;
+    bottom: 0.3rem;
+  }
   .screen-view--root .screen-view__body {
     padding: 1rem 0;
   }
@@ -4521,6 +4859,10 @@ html[data-native="true"] .screen-view--root .screen-nav__title {
   font-size: 2rem;
   font-weight: 800;
   letter-spacing: -0.02em;
+}
+html[data-native="true"] .screen-view--root .settings-save-status {
+  right: 0;
+  bottom: 0.3rem;
 }
 html[data-native="true"] .screen-view--root .screen-view__body {
   padding: 1rem 0;

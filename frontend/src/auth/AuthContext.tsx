@@ -12,7 +12,7 @@ import { clearDoorCache } from '../doorCache';
 
 interface AuthContextValue {
   email: string | null;
-  // Cognito sub (stable per-user id). Only the RevenueCat native purchase
+  // Cognito sub (stable per-user id). The StoreKit purchase
   // flow needs this client-side — every other request lets the API derive
   // sub from the verified JWT itself.
   sub: string | null;

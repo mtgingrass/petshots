@@ -39,16 +39,20 @@ export function Login() {
         <label>
           Email
           <input
+            id="login-username"
+            name="username"
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
-            autoComplete="email"
+            autoComplete="username"
           />
         </label>
         <label>
           Password
           <input
+            id="login-password"
+            name="password"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

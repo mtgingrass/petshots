@@ -9,9 +9,8 @@ import { SplashScreen } from '@capacitor/splash-screen';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { PushNotifications } from '@capacitor/push-notifications';
 import { App } from '@capacitor/app';
-import { Purchases, type PurchasesPackage } from '@revenuecat/purchases-capacitor';
 import type { Theme } from './utils/theme';
-import { config } from './config';
+import { APPLE_IAP } from './productConfig';
 
 export const isNative = Capacitor.isNativePlatform();
 
@@ -81,6 +80,62 @@ export function saveWalkToAppleHealth(startedAtMs: number, endedAtMs: number, di
   void Health.saveWalkWorkout({ startedAtMs, endedAtMs, distanceMeters }).catch(() => {});
 }
 
+// App-local iOS plugin (frontend/ios/App/App/BackgroundWalkPlugin.swift) —
+// replaces @capacitor/geolocation for NATIVE walk tracking so a walk keeps
+// recording distance while the phone is locked/backgrounded (that plugin has
+// no way to set CLLocationManager.allowsBackgroundLocationUpdates). Web still
+// uses @capacitor/geolocation directly in useWalkTracker — browsers have no
+// background-location capability, so there's nothing for this plugin to do
+// there; every wrapper below is a no-op on web.
+interface BackgroundWalkPlugin {
+  requestAlways(): Promise<{ status: 'always' | 'whenInUse' | 'denied' }>;
+  start(): Promise<void>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  end(): Promise<{ distanceMeters: number }>;
+  snapshot(): Promise<{ distanceMeters: number }>;
+}
+const BackgroundWalk = registerPlugin<BackgroundWalkPlugin>('BackgroundWalk');
+
+// Requests location permission, escalating to "Always" if only "When In Use"
+// is granted so far (the plugin handles both round-trips through iOS's
+// permission UI). Never throws — a denial just means background tracking
+// silently degrades to foreground-only, same as before this feature existed.
+export async function requestAlwaysLocation(): Promise<'always' | 'whenInUse' | 'denied'> {
+  if (!isNative) return 'denied';
+  try {
+    return (await BackgroundWalk.requestAlways()).status;
+  } catch {
+    return 'denied';
+  }
+}
+
+export async function backgroundWalkStart(): Promise<void> {
+  if (!isNative) return;
+  await BackgroundWalk.start();
+}
+export async function backgroundWalkPause(): Promise<void> {
+  if (!isNative) return;
+  await BackgroundWalk.pause();
+}
+export async function backgroundWalkResume(): Promise<void> {
+  if (!isNative) return;
+  await BackgroundWalk.resume();
+}
+// Resolves the final GPS-truth distance and stops tracking. Also used as the
+// "stop everything" call for Cancel/Discard, where the distance is ignored.
+export async function backgroundWalkEnd(): Promise<number> {
+  if (!isNative) return 0;
+  return (await BackgroundWalk.end()).distanceMeters;
+}
+// Polled once a second while a walk is active (see useWalkTracker) so the
+// displayed distance catches up the instant the app returns to the
+// foreground, without needing a separate appStateChange listener.
+export async function backgroundWalkSnapshot(): Promise<number> {
+  if (!isNative) return 0;
+  return (await BackgroundWalk.snapshot()).distanceMeters;
+}
+
 // version = CFBundleShortVersionString ("1.0"), build = CFBundleVersion
 // ("3") — set from MARKETING_VERSION/CURRENT_PROJECT_VERSION in the Xcode
 // project (App.xcodeproj/project.pbxproj), bumped there when Mark archives
@@ -97,51 +152,74 @@ export async function getAppVersion(): Promise<{ version: string; build: string 
   }
 }
 
-export type { PurchasesPackage };
+export interface StoreKitProduct {
+  identifier: string;
+  displayName: string;
+  description: string;
+  displayPrice: string;
+}
 
-// Apple In-App Purchase billing (iOS app only, via RevenueCat) — the paid
-// tier's native rail alongside Stripe on the web. app_user_id is always the
-// Cognito sub, so the backend webhook/sync route can write plan.json without
-// a reverse-mapping step. No-ops without a real public API key (e.g. before
-// the RevenueCat dashboard is set up) so nothing crashes; the purchase
-// buttons in Settings simply won't offer packages until it's configured.
-let revenueCatConfigured = false;
-export async function configureRevenueCat(appUserId: string) {
-  if (!isNative || !config.revenueCatPublicApiKey || revenueCatConfigured) return;
+interface StoreKitBillingPlugin {
+  getProducts(): Promise<{ products: StoreKitProduct[] }>;
+  purchase(options: {
+    productId: string;
+    appAccountToken: string;
+  }): Promise<{ signedTransaction?: string; cancelled?: boolean; pending?: boolean }>;
+  currentEntitlements(): Promise<{ signedTransactions: string[] }>;
+  restore(): Promise<{ signedTransactions: string[] }>;
+}
+
+const StoreKitBilling = registerPlugin<StoreKitBillingPlugin>('StoreKitBilling');
+
+export interface PaidOfferingPackages {
+  monthly: StoreKitProduct | null;
+  annual: StoreKitProduct | null;
+  warning?: string;
+}
+
+// Product metadata and localized prices come straight from StoreKit/App Store
+// Connect. There is no intermediary SDK, dashboard, API key, or offering.
+export async function getPaidOfferingPackages(): Promise<PaidOfferingPackages> {
+  if (!isNative) throw new Error('App Store billing is only available in the iOS app.');
   try {
-    await Purchases.configure({ apiKey: config.revenueCatPublicApiKey, appUserID: appUserId });
-    revenueCatConfigured = true;
-  } catch {
-    /* not fatal — purchase buttons just won't offer packages */
+    const { products } = await StoreKitBilling.getProducts();
+    const monthly = products.find((product) => product.identifier === APPLE_IAP.MONTHLY_PRODUCT_ID) ?? null;
+    const annual = products.find((product) => product.identifier === APPLE_IAP.ANNUAL_PRODUCT_ID) ?? null;
+    if (!monthly && !annual) {
+      throw new Error('No subscriptions are available from the App Store for this build.');
+    }
+    const missing = [!monthly && 'monthly', !annual && 'annual'].filter(Boolean);
+    return {
+      monthly,
+      annual,
+      ...(missing.length ? { warning: `The ${missing.join(' and ')} plan is temporarily unavailable.` } : {}),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Unknown App Store error';
+    throw new Error(detail.startsWith('App Store') || detail.startsWith('No subscriptions')
+      ? detail
+      : `App Store plans could not be loaded. ${detail}`);
   }
 }
 
-// The monthly/annual packages from the dashboard-configured "default"
-// offering, or null if not configured yet / offline / not native.
-export async function getPaidOfferingPackages(): Promise<{
-  monthly: PurchasesPackage | null;
-  annual: PurchasesPackage | null;
-} | null> {
-  if (!isNative || !revenueCatConfigured) return null;
-  try {
-    const offerings = await Purchases.getOfferings();
-    const current = offerings.current;
-    if (!current) return null;
-    return { monthly: current.monthly, annual: current.annual };
-  } catch {
-    return null;
-  }
+export async function purchaseStoreKitProduct(
+  appAccountToken: string,
+  product: StoreKitProduct,
+): Promise<{ signedTransaction?: string; cancelled?: boolean; pending?: boolean }> {
+  if (!isNative) throw new Error('App Store billing is only available in the iOS app.');
+  return StoreKitBilling.purchase({ productId: product.identifier, appAccountToken });
 }
 
-// Lets Apple's purchase sheet run; throws on failure (including user
-// cancellation) so the caller's existing busy/error handling shows it,
-// same pattern as the web's handleCheckout.
-export async function purchaseRevenueCatPackage(pkg: PurchasesPackage): Promise<void> {
-  await Purchases.purchasePackage({ aPackage: pkg });
+// AppStore.sync() is intentionally called only behind this explicit action.
+export async function restoreStoreKitPurchases(): Promise<string[]> {
+  if (!isNative) throw new Error('App Store billing is only available in the iOS app.');
+  return (await StoreKitBilling.restore()).signedTransactions;
 }
 
-// Required by App Store review for any app selling non-consumable/
-// subscription IAP. Throws on failure, same as purchaseRevenueCatPackage.
-export async function restoreRevenueCatPurchases(): Promise<void> {
-  await Purchases.restorePurchases();
+// Reads StoreKit's locally/currently known entitlements without showing UI or
+// forcing AppStore.sync(). Used at launch so renewals repair server state even
+// if App Store Server Notifications have not been configured yet.
+export async function getCurrentStoreKitEntitlements(): Promise<string[]> {
+  if (!isNative) return [];
+  return (await StoreKitBilling.currentEntitlements()).signedTransactions;
 }

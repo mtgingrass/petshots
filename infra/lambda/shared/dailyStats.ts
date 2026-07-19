@@ -136,12 +136,17 @@ export function pickInsight(
   stats: RangeStats,
   itemLabel: (id: string) => string,
 ): string | null {
+  const isFeedingItem = (itemId: string) =>
+    itemId === 'preset-breakfast' ||
+    itemId === 'preset-dinner' ||
+    /\b(breakfast|lunch|dinner|meal|feed(ing)?)\b/i.test(itemLabel(itemId));
   if (stats.moodAvg !== null && stats.moodAvg < DIGEST.MOOD_DIP_THRESHOLD) {
     return digestInsightCopy.moodDip(petName);
   }
   const trackedEnoughDays = stats.activeDates.size >= DIGEST.MIN_ACTIVE_DAYS_FOR_INSIGHT;
   if (!trackedEnoughDays) return null;
   const low = [...stats.checkCountsByItemId.entries()]
+    .filter(([itemId]) => !isFeedingItem(itemId))
     .filter(([, n]) => n <= stats.totalDays - DIGEST.LOW_COMPLETION_MISSED_DAYS)
     .sort((a, b) => a[1] - b[1])[0];
   if (!low) return null;

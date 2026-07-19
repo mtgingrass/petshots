@@ -24,12 +24,12 @@
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.0",
+    "@apple/app-store-server-library": "^3.1.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1081.0",
     "@aws-sdk/client-sesv2": "^3.1079.0",
     "@types/web-push": "^3.6.4",
     "aws-cdk-lib": "^2.260.0",
     "constructs": "^10.5.0",
-    "stripe": "^22.3.0",
     "web-push": "^3.6.7"
   }
 }

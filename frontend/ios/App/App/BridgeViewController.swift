@@ -8,5 +8,7 @@ import Capacitor
 class BridgeViewController: CAPBridgeViewController {
     override open func capacitorDidLoad() {
         bridge?.registerPluginInstance(HealthPlugin())
+        bridge?.registerPluginInstance(BackgroundWalkPlugin())
+        bridge?.registerPluginInstance(StoreKitBillingPlugin())
     }
 }

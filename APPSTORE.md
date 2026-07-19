@@ -97,8 +97,9 @@ Things reviewers may want context on:
 - The Passport tab generates a shareable link + QR code. Opening it shows a
   public read-only page (no account needed) — that is the intended feature:
   the pet owner shows the QR to front-desk staff.
-- A paid tier exists on our website. The iOS app does not sell, price, or
-  link to any purchase; every feature shown works on the free tier.
+- The paid tier is available in the iOS app through Apple's in-app purchase
+  sheet. The web app does not sell subscriptions. Restore Purchases is in
+  Settings → Account.
 - Push notifications deliver vaccine/medication reminders; enabling them is
   optional and the app is fully functional without them.
 - Account deletion is self-service: Settings → Danger zone → Delete account.
@@ -108,8 +109,9 @@ Things reviewers may want context on:
 
 ## App Privacy (nutrition labels)
 
-Declare "Data collected", all **linked to identity**, all for **App
-Functionality** only. Answer **No** to tracking.
+Declare "Data collected" and answer **No** to tracking. The types below are
+linked to identity because account content and subscription status use the
+Cognito user id.
 
 | Data type | What it is |
 |---|---|
@@ -117,9 +119,11 @@ Functionality** only. Answer **No** to tracking.
 | User Content → Photos or Videos | Pet photos + photographed records |
 | User Content → Other User Content | Record labels/dates, pet profiles, notes, checklists |
 | Identifiers → User ID | Cognito user id |
+| Purchases → Purchase History | Apple subscription verification and paid access |
 
-Everything else: not collected. There are no analytics, no ads, no
-third-party tracking (matches the privacy policy). If the upload wizard
+For Purchase History select **App Functionality**; the other types above are
+also App Functionality. Everything else is not collected. There
+are no advertising analytics, ads, or third-party tracking. If the upload wizard
 flags ITMS-91053 (privacy manifest), add a `PrivacyInfo.xcprivacy` in
 Xcode declaring UserDefaults access, reason code CA92.1 — the Capacitor 8
 SPM packages ship their own manifests, so this likely won't come up.
@@ -132,15 +136,14 @@ SPM packages ship their own manifests, so this likely won't come up.
   Info.plist (file inputs offer "Take Photo" — missing strings would
   crash on tap = instant rejection).
 - iPhone-only (`TARGETED_DEVICE_FAMILY = 1` in both build configs).
-- Guideline 3.1.1 (payments): the native build hides ALL purchase
-  surfaces — Stripe checkout/portal buttons (s23), the overview
-  "Upgrade for more →" / "Upgrade to unlock →" links, and the plan-card
-  web pointer for free users (this session, gated on `isNative`). Paid
-  users see only "Your subscription is managed on the web" (allowed
-  account management). Never re-introduce purchase links/pricing in
-  native code paths without switching to StoreKit IAP.
+- Password AutoFill: the signed app declares `webcredentials:petshots.app`,
+  and the domain serves a matching Apple App Site Association file.
+- Guideline 3.1.1 (payments): native upgrades use Apple IAP through StoreKit 2,
+  which is the only purchase path. App Store subscribers
+  get Apple's subscription-management deep link; the web app only displays
+  entitlement status.
 - Guideline 5.1.1(v) (account deletion): in-app, Settings → Danger zone.
-- Privacy policy at /privacy updated for Stripe, push tokens, AI
+- Privacy policy at /privacy updated for Apple billing, push tokens, AI
   extraction, and in-app deletion.
 
 ## Guideline 4.2 ("minimum functionality" / web-wrapper) defense

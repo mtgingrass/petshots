@@ -124,6 +124,16 @@ export const FREE_PLAN_LIMITS = { maxPets: 2, maxDocs: 8, maxMeds: 4, maxMembers
 export const PAID_PLAN_LIMITS = { maxPets: 10, maxDocs: 999, maxMeds: 20 } as const;
 
 /**
+ * APP STORE PRODUCT CATALOG
+ * These identifiers are public routing keys, not secrets. They must match the
+ * subscriptions configured for the iOS app in App Store Connect.
+ */
+export const APPLE_IAP = {
+  MONTHLY_PRODUCT_ID: 'petshots_paid_monthly',
+  ANNUAL_PRODUCT_ID: 'petshots_paid_yearly',
+} as const;
+
+/**
  * TYPICAL BOOSTER CADENCES — tap-to-fill expiry suggestions on the AI review
  * screen when the document printed neither a date nor a duration. Never
  * auto-applied: protocols genuinely vary (1yr vs 3yr rabies), the user picks.

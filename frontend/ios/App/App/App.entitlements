@@ -14,5 +14,11 @@
 	     sees this key. -->
 	<key>com.apple.developer.healthkit</key>
 	<true/>
+	<!-- Links credentials saved for petshots.app to this Capacitor app so
+	     iOS Password AutoFill can offer them inside the WKWebView. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:petshots.app</string>
+	</array>
 </dict>
 </plist>

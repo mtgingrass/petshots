@@ -70,8 +70,9 @@ export function saveSettings(settings: UserSettings): Promise<UserSettings> {
   return request('PUT', '/settings', settings);
 }
 
-// Permanently deletes everything: S3 data, passports, Stripe subscription,
-// and the Cognito user itself. The caller must sign the user out afterwards.
+// Permanently deletes everything stored by Petshots: S3 data, passports, and
+// the Cognito user itself. App Store subscriptions are managed by Apple and
+// must be cancelled separately. The caller must sign the user out afterwards.
 export function deleteAccount(): Promise<void> {
   return request('DELETE', '/account');
 }
@@ -118,6 +119,9 @@ export interface Doc {
   expiry?: string; // YYYY-MM-DD, the vaccine's expiration date (optional)
   given?: string; // YYYY-MM-DD, the date the shot was administered (optional)
   remindersEnabled: boolean; // per-record reminder opt-in; true by default
+  // "Archived": hidden from the main records list and skipped by status badges,
+  // the passport, and reminders. Stays viewable in the Archived section.
+  dismissed?: boolean;
   filename: string;
   size: number;
   etag?: string; // S3 content identity — same file committed as N records shares it
@@ -245,6 +249,8 @@ export interface DailyState {
   /** Server hint: feeding items are active but unused across the whole live
    *  window while other tracking IS used — the tab offers to drop them. */
   feedingIdle?: boolean;
+  /** Other household members who could receive a manual nudge for today's list. */
+  householdRecipients?: number;
 }
 
 // The list is a LOCAL day (dinner at 8pm ET must not roll into tomorrow's UTC list).
@@ -287,16 +293,29 @@ export function saveDailyItems(
   return request('PUT', `/pets/${petId}/daily/items`, { items, date });
 }
 
+export function nudgeDailyTask(
+  petId: string,
+  itemId: string,
+): Promise<{ ok: true; notified: number; pushed: number }> {
+  return request('POST', `/pets/${petId}/daily/nudge`, { itemId });
+}
+
 // Per-user limits, resolved server-side from the user's plan and returned by
 // GET /pets. The defaults mirror the free tier and only cover the moment
 // before the first listPets response (or an older API without limits).
 export interface Limits {
   plan: 'free' | 'paid';
-  // Which billing rail a paid plan came from — Stripe (web) or RevenueCat
-  // (iOS App Store). Only present for paid accounts. Distinguishes the two
-  // native billing-card messages: "managed on the web" vs an App Store
-  // subscription-management deep link.
-  billingSource?: 'stripe' | 'revenuecat';
+  // Apple is the App Store entitlement source. manual is an explicit
+  // operator/tester override rather than a second purchase path.
+  billingSource?: 'apple' | 'manual';
+  billingSources?: ('apple' | 'manual')[];
+  billingApple?: {
+    status?: string;
+    expiresAt?: string | null;
+    productId?: string;
+    environment?: string;
+    updatedAt?: string;
+  };
   maxPets: number;
   maxDocs: number;
   maxMeds: number;
@@ -398,6 +417,16 @@ export interface SummaryResponse {
   rangeStart: string;
   rangeEnd: string;
   pets: SummaryPetChip[];
+  insights?: { petId: string; petName: string; text: string }[];
+  deadlines?: {
+    petId: string;
+    petName: string;
+    kind: 'doc' | 'med';
+    label: string;
+    date: string;
+    days: number;
+    status: 'overdue' | 'today' | 'due-soon';
+  }[];
   photos: SummaryPhoto[];
 }
 export function getSummary(): Promise<SummaryResponse> {
@@ -442,6 +471,13 @@ export interface WalkRecord {
   endedAt: string; // ISO timestamp
   distanceMeters: number;
   by?: string; // actor email, server-stamped; absent on pre-attribution walks
+  // Family-tagged walks: emails of household members tagged as "walked with
+  // me". countsForPet:false means a matching twin walk was found (see
+  // backend) and this is the shorter of the pair — still shows here, just
+  // excluded from the pet's aggregate stats.
+  withMembers?: string[];
+  countsForPet?: boolean;
+  mergedWithId?: string;
   // Dog energy estimates (≈kcal, latest weight × distance), computed by the
   // server per dog on the walk. Missing for cats / dogs with no weight log.
   kcalByPet?: Record<string, number>;
@@ -456,8 +492,9 @@ export function createWalk(
   startedAt: string,
   endedAt: string,
   distanceMeters: number,
+  withMembers?: string[],
 ): Promise<{ walk: WalkRecord; kcalByPet?: Record<string, number> }> {
-  return request('POST', '/walks', { petIds, startedAt, endedAt, distanceMeters });
+  return request('POST', '/walks', { petIds, startedAt, endedAt, distanceMeters, withMembers });
 }
 
 export function deleteWalk(id: string): Promise<void> {
@@ -517,8 +554,9 @@ export type Household =
       members: HouseholdMemberView[];
       invites: HouseholdInviteView[];
       maxMembers: number;
+      participants: string[]; // other members' emails — for the walk "who else was there" picker
     }
-  | { role: 'member'; ownerEmail: string; joinedAt: string };
+  | { role: 'member'; ownerEmail: string; joinedAt: string; participants: string[] };
 
 export function getHousehold(): Promise<Household> {
   return request('GET', '/household');
@@ -639,6 +677,12 @@ export function updateDoc(
   });
 }
 
+// Archive (hide) or restore a record. A partial PATCH — the server preserves
+// label/expiry/given and, when archiving, also silences the record's reminders.
+export function setDocArchived(petId: string, id: string, dismissed: boolean): Promise<{ ok: true }> {
+  return request('PATCH', `/pets/${petId}/docs/${id}`, { dismissed });
+}
+
 export function deleteDoc(petId: string, id: string): Promise<void> {
   return request('DELETE', `/pets/${petId}/docs/${id}`);
 }
@@ -669,22 +713,25 @@ export function revokePassport(petId: string): Promise<void> {
 
 // ---- billing ----
 
-// Both return a Stripe-hosted URL to redirect the browser to.
-export function createCheckout(interval: 'month' | 'year'): Promise<{ url: string }> {
-  return request('POST', '/billing/checkout', { interval });
+// Apple signs each StoreKit transaction. The API verifies those JWS values,
+// ties appAccountToken to the signed-in Cognito sub, and returns fresh limits.
+export function syncAppleTransactions(
+  signedTransactions: string[],
+  clearTesterPlan = true,
+  preserveIfEmpty = false,
+): Promise<Limits> {
+  return request('POST', '/billing/apple/sync', {
+    signedTransactions,
+    clearTesterPlan,
+    preserveIfEmpty,
+  });
 }
 
-export function createBillingPortal(): Promise<{ url: string }> {
-  return request('POST', '/billing/portal');
-}
-
-// Called by the native app right after purchasePackage()/restorePurchases()
-// resolves — the server re-fetches RevenueCat's canonical subscriber state
-// and returns the refreshed limits, so the UI updates immediately instead of
-// waiting on the webhook (which also flips plan.json, out-of-band, shortly
-// after).
-export function syncRevenueCatEntitlement(): Promise<Limits> {
-  return request('POST', '/billing/revenuecat/sync');
+// Temporary owner-only preview of the real server-side free/paid behavior.
+// The API verifies the Cognito sub; hiding the control in the UI is not the
+// security boundary.
+export function setBillingTestPlan(plan: 'free' | 'paid'): Promise<Limits> {
+  return request('POST', '/billing/test-plan', { plan });
 }
 
 export async function fetchPassport(token: string): Promise<PassportData> {
@@ -779,19 +826,27 @@ export function commitUpload(
   uploadId: string,
   records: CommitRecord[],
   profile?: ProfilePatch,
+  // Existing doc ids to swap out (a fresh shot replacing the same expired
+  // vaccine). The server deletes them only after the new records are written.
+  replaceDocIds?: string[],
 ): Promise<{ docs: (CommitRecord & { id: string; filename: string })[] }> {
   return request('POST', `/pets/${petId}/docs/commit`, {
     uploadId,
     records,
     ...(profile && Object.keys(profile).length > 0 ? { profile } : {}),
+    ...(replaceDocIds && replaceDocIds.length > 0 ? { replaceDocIds } : {}),
   });
 }
 
 export function createManualRecords(
   petId: string,
   records: CommitRecord[],
+  replaceDocIds?: string[],
 ): Promise<{ docs: (CommitRecord & { id: string; filename: string })[] }> {
-  return request('POST', `/pets/${petId}/docs/create-record`, { records });
+  return request('POST', `/pets/${petId}/docs/create-record`, {
+    records,
+    ...(replaceDocIds && replaceDocIds.length > 0 ? { replaceDocIds } : {}),
+  });
 }
 
 export async function uploadDoc(

@@ -55,7 +55,7 @@ export const LIMITS_FREE = {
 } as const;
 
 /**
- * PAID-TIER LIMITS ($5/mo / $49/yr via Stripe).
+ * PAID-TIER LIMITS ($5/mo / $49/yr via Apple IAP on iOS).
  * MUST MATCH `PAID_PLAN_LIMITS` in frontend/src/productConfig.ts
  * (the plan card's fine print shows these numbers).
  */
@@ -288,6 +288,18 @@ export const WALKS = {
    * estimate, not a measurement.
    */
   DOG_KCAL_PER_KG_KM: 0.8,
+  /**
+   * Family-tagged walks: two household members can independently GPS-track
+   * the same outing. A new walk is only considered a candidate match for an
+   * existing one if their startedAt times are this close together.
+   */
+  FAMILY_MATCH_WINDOW_MS: 20 * 60 * 1000,
+  /**
+   * Matched walks only get deduped (shorter one excluded from the pet's
+   * totals) if their durations are within this fraction of each other —
+   * otherwise they're treated as unrelated and both count in full.
+   */
+  FAMILY_MATCH_DURATION_TOLERANCE: 0.1,
 } as const;
 
 /** WEIGHT LOG */
@@ -382,28 +394,22 @@ export const SUMMARY = {
    * photos, the route returns NOT_ENOUGH_DATA without calling the model.
    */
   MIN_ACTIVE_DAYS: 2,
+  /** Vaccine/document deadlines due within this many days show in Summary. */
+  UPCOMING_DEADLINE_DAYS: 30,
+  /** Keep the Summary's action list short and scannable. */
+  MAX_DEADLINES: 6,
 } as const;
 
 /**
- * APPLE IN-APP PURCHASE BILLING (via RevenueCat)
- * The iOS app's paid tier — Stripe (infra/scripts/setup-stripe.mjs) still
- * owns web billing untouched. RevenueCat's REST API key + webhook signing
- * secret live in Secrets Manager (`petshots/revenuecat`), mirroring the
- * `petshots/stripe` secret. app_user_id is always the Cognito sub, so both
- * the webhook and the client-triggered sync route write straight to
- * users/{sub}/plan.json with no reverse customer-id mapping needed.
- *
- * Dashboard/App Store Connect placeholders (set up once, values live in
- * RevenueCat + App Store Connect, not here):
- *   - Entitlement id: "Petshots Pro" (below — set in the RevenueCat dashboard,
- *     matched here; the exact string, spaces and capitalization included)
- *   - Offering id: "petshots" (marked "current" in the dashboard — the app
- *     reads whichever offering is current, never by this name, so the
- *     identifier itself is only documentation)
- *   - Product ids: "petshots_paid_monthly", "petshots_paid_yearly"
+ * APPLE IN-APP PURCHASE BILLING
+ * StoreKit product identifiers are public routing keys, not credentials.
+ * The native plugin and API verifier intentionally keep matching copies so a
+ * transaction for any unrelated product can never grant paid access.
  */
-export const REVENUECAT = {
-  ENTITLEMENT_ID: 'Petshots Pro',
+export const APPLE_IAP = {
+  BUNDLE_ID: 'app.petshots.ios',
+  MONTHLY_PRODUCT_ID: 'petshots_paid_monthly',
+  ANNUAL_PRODUCT_ID: 'petshots_paid_yearly',
 } as const;
 
 /** MEDICATIONS */
@@ -449,7 +455,7 @@ export const AI = {
 export const EMAIL = {
   /** SES sender. Must be a verified identity on the petshots.app domain. */
   FROM_EMAIL: 'no-reply@petshots.app',
-  /** Base URL used in email links and Stripe redirects. */
+  /** Base URL used in email links. */
   APP_URL: 'https://petshots.app',
 } as const;
 

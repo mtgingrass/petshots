@@ -7,7 +7,7 @@ export function Privacy() {
       <SiteHeader />
       <main className="page privacy">
         <h1>Privacy Policy</h1>
-        <p className="subtle">Effective July 9, 2026</p>
+        <p className="subtle">Effective July 15, 2026</p>
 
         <section>
           <h2>What we collect</h2>
@@ -17,12 +17,10 @@ export function Privacy() {
             <li>Documents you upload: vaccine records, vet paperwork, and pet photos.</li>
           </ul>
           <p>
-            We don't collect your real name, address, or payment card numbers. If you
-            upgrade to a paid plan, payment is handled entirely by{' '}
-            <a href="https://stripe.com/privacy" target="_blank" rel="noopener noreferrer">
-              Stripe
-            </a>{' '}
-            — we never see or store your card details.
+            We don't collect your real name, address, or payment card numbers. Paid
+            upgrades are available only in the iOS app and payment is handled by Apple.
+            We verify and store your subscription status to unlock the paid plan, but we never
+            see or store your card details.
           </p>
           <p>
             If you turn on reminder notifications, we store a push token for your device
@@ -44,9 +42,13 @@ export function Privacy() {
         <section>
           <h2>Who can see it</h2>
           <p>
-            Only you. Access to your records requires your email and password. We do not
-            sell, rent, or share your personal information or uploaded files with any third
-            party. Petshots staff cannot view your documents.
+            Only you and family members you explicitly invite. Access to private records
+            requires an authenticated account. We do not
+            sell or rent your personal information or uploaded files. We share only what is
+            necessary with service providers that operate Petshots: AWS for hosting and AI,
+            Apple for iOS billing, Cloudflare for signup
+            abuse prevention, and email/push delivery providers. Petshots staff do not
+            routinely access your documents.
           </p>
         </section>
 
@@ -54,7 +56,7 @@ export function Privacy() {
           <h2>What we don't do</h2>
           <ul>
             <li>No advertising or retargeting.</li>
-            <li>No analytics tracking (no Google Analytics, Mixpanel, or similar).</li>
+            <li>No behavioral product analytics tracking (no Google Analytics, Mixpanel, or similar).</li>
             <li>No third-party tracking pixels or ad network scripts.</li>
             <li>No selling or sharing of your data.</li>
           </ul>
@@ -103,9 +105,11 @@ export function Privacy() {
           <p>
             You can delete your account yourself at any time: open{' '}
             <em>Settings → Danger zone → Delete account</em>. Deletion is immediate and
-            permanent — your records, photos, and any active passport links are removed,
-            and any paid subscription is cancelled automatically. If you'd rather we do
-            it, email{' '}
+            permanent — your records, photos, and any active passport links are removed.
+            Apple subscriptions must be cancelled separately in your App Store subscription
+            settings; deleting the
+            Petshots account does not stop Apple's billing. If you'd rather we do it,
+            email{' '}
             <a href="mailto:mark.gingrass@gmail.com">mark.gingrass@gmail.com</a> with
             the subject <em>"Delete my Petshots account"</em> and we'll take care of it
             within 7 days.

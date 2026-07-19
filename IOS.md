@@ -64,7 +64,7 @@ Then Run in Xcode targets a simulated iPhone. No Apple account needed.
 
 ### 2. Run on your real iPhone (free Apple ID)
 
-Xcode → open `frontend/ios/App/App.xcodeproj` → target **App** → Signing &
+Xcode → open `frontend/ios/App/App.xcodeproj` → target **Petshots** → Signing &
 Capabilities → check "Automatically manage signing" → Team: add your Apple ID
 (free "Personal Team" works). Plug in the phone, trust the computer, Run.
 Free-team caveats: app expires after 7 days (re-run from Xcode), **push
@@ -76,8 +76,7 @@ Management).
 
 https://developer.apple.com/programs/enroll — needed for TestFlight, the App
 Store, and APNs push. **Cost: $99/yr, recurring.** Enroll as an individual
-(fine to switch to an LLC later — this overlaps with the open Stripe
-LLC-vs-sole-prop decision; an org enrollment needs a D-U-N-S number, so
+(fine to switch to an LLC later; an org enrollment needs a D-U-N-S number, so
 individual is the fast path).
 
 After enrolling, in Xcode set the Team to the paid team. The bundle ID
@@ -147,70 +146,48 @@ device. A real send happens at the next 9:00 UTC cron.
 5. Review guideline note: the app has account deletion in Settings (required
    by Apple — already shipped s18) and sign-up works in-app. Both good.
 
-### 7. Apple In-App Purchase billing via RevenueCat
+### 7. Apple In-App Purchase billing with StoreKit 2
 
-The paid tier's native rail — Stripe (web) untouched, RevenueCat wraps
-StoreKit for the iOS app. `frontend/src/native.ts` has the
-configure/getOfferings/purchasePackage/restorePurchases wrappers (no-op
-without a real key); backend is `infra/lambda/api/index.ts`'s
-`syncRevenueCatEntitlement` + `POST /billing/revenuecat-webhook` +
-`POST /billing/revenuecat/sync`, config in
-`infra/lambda/shared/config.ts`'s `REVENUECAT` block. Cost: free at this
-scale (RevenueCat's free tier goes up to $2.5k/mo tracked revenue).
+The paid tier is sold only through the iOS app. The local
+`StoreKitBillingPlugin.swift` loads the products, presents Apple's purchase
+sheet, returns Apple's signed transaction, and restores current entitlements.
+There is no billing SDK, account, API key, or intermediary dashboard.
 
-> **✅ DONE 2026-07-14** — RevenueCat account + "Petshots" project created.
-> Entitlement identifier is **`Petshots Pro`** (not `paid` — matched in
-> `shared/config.ts`'s `REVENUECAT.ENTITLEMENT_ID`, deployed). App Store
-> Connect **In-App Purchase key** (`SubscriptionKey_*.p8` — a distinct key
-> type from the general "App Store Connect API" key used for APNs/CI;
-> generated under Users and Access → Integrations → **In-App Purchase**,
-> role Admin) connected in RevenueCat. RevenueCat Secret API key + a
-> webhook (HMAC-signed, pointed at
-> `https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com/billing/revenuecat-webhook`)
-> both created; both values live in Secrets Manager `petshots/revenuecat`
-> (`secretApiKey`, `webhookSigningSecret`). The real iOS app "Petshots (App
-> Store)" (bundle `app.petshots.ios`) exists in RevenueCat (distinct from
-> the auto-created "Test Store" sandbox app) — its **public** SDK key is in
-> `frontend/.env` as `VITE_REVENUECAT_PUBLIC_API_KEY`, built and deployed to
-> both web and the iOS project (`cap sync`).
+The API endpoint `POST /billing/apple/sync` verifies Apple's JWS certificate
+chain, bundle ID, product ID, expiration, and `appAccountToken` before granting
+paid limits. App Store Server Notifications V2 can be configured at
+`https://ycg5npcyk8.execute-api.us-east-1.amazonaws.com/billing/apple-webhook`;
+that endpoint verifies Apple's outer notification and inner transaction. See
+`PAYMENTS.md` for the complete data shape and threat model.
 
-> **✅ DONE 2026-07-14** — both subscriptions created under Features →
-> **Subscriptions** (group "Petshots Paid"): `petshots_paid_monthly` (1
-> month) and `petshots_paid_yearly` (1 year), both **Ready to Submit**.
-> Pricing, localization (Display Name/Description), and Review Screenshot
-> all set. Two gotchas hit along the way, worth remembering: (1) the Review
-> Screenshot uploader rejected every valid device-size **PNG** we tried
-> (1179×2556, 1284×2778, 1290×2796 — all correct per Apple's own
-> screenshot-specs page) with "the dimensions of one or more screenshots are
-> wrong" — converting the same image to **JPEG** fixed it immediately
-> (`sips -s format jpeg -s formatOptions 90 -s dpiWidth 72 -s dpiHeight 72
-> in.png --out out.jpg`), so this uploader appears to reject PNG outright,
-> unrelated to actual pixel dimensions. (2) Both subscriptions stayed stuck
-> on "Missing Metadata" even with everything above filled in — the real
-> blocker was the **Subscription Group's own App Store Localization**
-> (Subscriptions page → above the Level 1/2 table → Add App Store
-> Localization → Subscription Group Display Name, set to "Petshots"), a
-> separate, easy-to-miss field from each individual plan's own localization.
+Both subscriptions already exist in App Store Connect under subscription group
+"Petshots Paid": `petshots_paid_monthly` (one month) and
+`petshots_paid_yearly` (one year). Pricing and localization live only in App
+Store Connect. The group itself also needs an App Store Localization; without
+it, products can remain in "Missing Metadata" even when their individual
+localizations are complete. The review screenshot uploader accepted JPEG when
+it rejected equivalent PNG files.
 
-> **✅ DONE 2026-07-14** — Product Catalog wired up: both products
-> (`petshots_paid_monthly`, `petshots_paid_yearly`, App: "Petshots (App
-> Store)" — not the auto-created "Test Store" demo app/products, which are
-> a different, unrelated leftover from onboarding) attached to the
-> `Petshots Pro` entitlement. Offering **`petshots`** created (not
-> `default` — that identifier was already taken by RevenueCat's onboarding
-> demo offering) with Monthly/Annual packages, marked **current**. The
-> app never reads an offering by name, only `offerings.current`, so the
-> actual identifier is documentation only — matched in `shared/config.ts`.
+Remaining device verification:
 
-Remaining:
+1. Archive a fresh signed build and install it through TestFlight or Xcode.
+2. With a sandbox Apple account, confirm both localized prices render, buy a
+   plan, and verify `plan.json` contains an active `billing.apple` rail.
+3. Toggle the owner-only Free/Paid tester switch and confirm the free tier
+   exposes only two pets without deleting the others.
+4. Confirm Restore Purchases reactivates the plan and a sandbox expiration
+   returns the account to free. If products are empty, check App Store Connect
+   metadata, Paid Apps agreement, tax, and banking—not application credentials.
 
-1. **Test**: sandbox Apple ID purchase, on-device or in Xcode → confirm
-   `plan.json` flips (via the sync call immediately, via the webhook shortly
-   after) → confirm Restore Purchases works on a fresh install. Needs a
-   Sandbox tester (App Store Connect → Users and Access → Sandbox).
-2. A fresh TestFlight archive is needed regardless to pick up the RevenueCat
-   SDK + the new Settings → Account purchase UI — nothing above ships to
-   real devices until Mark archives one.
+#### Password AutoFill
+
+The login form uses `autocomplete="username"` + `current-password`, but that is
+not enough inside a Capacitor WKWebView. `App.entitlements` now declares
+`webcredentials:petshots.app`, and
+`frontend/public/.well-known/apple-app-site-association` links the domain to
+`8ST43C8H2Z.app.petshots.ios`. `FrontendStack` forces the extensionless file's
+response Content-Type to JSON. Deploy the frontend file + FrontendStack, then
+install a newly signed build; iOS performs the association check at install.
 
 ### 8. Universal links (later, optional)
 
@@ -220,9 +197,62 @@ the frontend bucket/CloudFront) + add the Associated Domains capability
 (`applinks:petshots.app`) in Xcode. Deferred — plain https links work fine
 meanwhile (they open Safari, which is where logged-out invitees land anyway).
 
+### 9. Background location for walk tracking
+
+Walk tracking was foreground-only through session 34 — locking the screen or
+switching apps stopped `@capacitor/geolocation`'s `watchPosition` fixes from
+arriving (a real walk logged 0.05mi instead of ~1mi because the phone was in
+a pocket). `@capacitor/geolocation` has no way to set iOS's
+`CLLocationManager.allowsBackgroundLocationUpdates`, so a small app-local
+Swift plugin was added instead — same precedent as `HealthPlugin.swift`
+(Capacitor's official plugin doesn't expose the capability this needs).
+
+**Scope, deliberately (Mark, 2026-07-15): survive backgrounding/locking/app-
+switching, NOT a force-quit.** No persisted state, no relaunch-on-location-
+event handling — if the app is actually killed mid-walk, the walk is still
+lost, same as before. Web is unaffected and unchanged — browsers have no
+background-location capability at all, foreground-only there is permanent.
+
+- `frontend/ios/App/App/BackgroundWalkPlugin.swift` — owns a single
+  `CLLocationManager` for the whole walk (registered in
+  `BridgeViewController.swift`, wrapped in `frontend/src/native.ts` as
+  `BackgroundWalk`). Methods: `requestAlways()` (handles both round-trips
+  through iOS's permission UI — When-In-Use first, then the Always upgrade),
+  `start()`/`pause()`/`resume()`/`end()`, `snapshot()`. Distance accumulates
+  natively (great-circle distance + a >3m jitter filter that MUST MATCH the
+  JS `haversineMeters` filter in `Dashboard.tsx`'s `useWalkTracker`).
+- `useWalkTracker` (`Dashboard.tsx`) branches on `isNative`: native calls the
+  plugin at every state transition instead of touching
+  `Geolocation.watchPosition`; the existing 1-second tick effect polls
+  `backgroundWalkSnapshot()` on native so the displayed distance catches up
+  the instant the app returns to the foreground — no separate
+  `appStateChange` listener needed.
+- **Bug found on the first real-device test (2026-07-15): distance/pace
+  never moved at all, even walking in the foreground.** Root cause: Capacitor
+  runs plugin methods on a background dispatch queue by default, but
+  `CLLocationManager` needs an active run loop to reliably start updates and
+  deliver delegate callbacks — in practice, the main thread. Every method in
+  `BackgroundWalkPlugin.swift` now wraps its body in
+  `DispatchQueue.main.async` (creation, permission requests, start/stop, and
+  the resolve calls). Fixed and compiles clean; **still needs the next
+  real-device walk to confirm** — this exact bug means the plugin was never
+  actually verified working at all until this fix goes on a device.
+- `Info.plist` gained `UIBackgroundModes: [location]` — a plain array key,
+  **not an entitlement or an Apple Developer Portal capability** (unlike
+  HealthKit/APNs), so no dashboard/provisioning steps were needed.
+  `NSLocationAlwaysAndWhenInUseUsageDescription` already existed (added
+  alongside the original walk feature, unused until now).
+- New Swift files need a **manual project.pbxproj entry** to be compiled —
+  Xcode's project format here uses explicit `PBXBuildFile`/`PBXFileReference`
+  entries (not the newer file-system-synchronized groups), so a new `.swift`
+  file dropped in the directory alone won't build until it's wired into
+  `project.pbxproj` (done here by hand, mirroring `HealthPlugin.swift`'s
+  entries) — remember this next time a new native file is added.
+
 ## What was verified without an Apple account
 
-- `xcodebuild` compile against the iOS simulator SDK (no signing) — green.
+- `xcodebuild` compile against the iOS simulator SDK (no signing) — green,
+  including the new `BackgroundWalkPlugin.swift`.
 - Web bundle typechecks + builds with all native code paths in place.
 - Web behavior unchanged (everything is gated on `Capacitor.isNativePlatform()`).
 - API + reminder Lambda changes deployed and smoke-tested (`smoke-api`,
@@ -239,3 +269,10 @@ meanwhile (they open Safari, which is where logged-out invitees land anyway).
   the Cloudflare dashboard as a fallback).
 - Face ID / biometric app lock: not built. Candidate for v2 of the app
   (plugin: `capacitor-native-biometric`), noted in TODO.md.
+- **Background location tracking (section 9)** — 100% native/client code,
+  can't be simulated or smoke-tested. Needs a real outdoor walk: start
+  tracking, lock the screen or switch apps for a few minutes while actually
+  walking, return to the app, confirm distance caught up correctly; also
+  confirm ending/discarding a walk actually stops updates (battery/privacy
+  correctness). Needs a fresh `cap sync ios` + Xcode rebuild + TestFlight
+  archive first — nothing above has touched a device yet.

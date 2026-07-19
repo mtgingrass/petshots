@@ -10,7 +10,6 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import {
   CognitoIdentityProviderClient,
@@ -18,8 +17,7 @@ import {
   AdminGetUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { AnthropicBedrock } from '@anthropic-ai/bedrock-sdk';
-import Stripe from 'stripe';
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type {
   APIGatewayProxyEventV2WithJWTAuthorizer,
   APIGatewayProxyResultV2,
@@ -42,8 +40,13 @@ import {
   ACHIEVEMENTS,
   WALKS,
   SUMMARY,
-  REVENUECAT,
 } from '../shared/config';
+import {
+  transactionIsActive,
+  verifyAppleNotification,
+  verifyAppleTransaction,
+} from './appleBilling';
+import type { JWSTransactionDecodedPayload } from '@apple/app-store-server-library';
 // Window-stats math (archive-merging, tallies, the "we noticed" line) is
 // shared with the reminder Lambda's report emails — see that file's header.
 import {
@@ -69,7 +72,7 @@ import {
   buildStatsForModel,
   type StoryPetStats,
 } from '../shared/summaryStory';
-import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
+import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml, infoCardHtml } from '../shared/emailHtml';
 // Real-time push (e.g. "new photo added" to household members) — shared with
 // the reminder Lambda's daily/weekly nudges. See that file's header.
 import { sendPushes } from '../shared/push';
@@ -90,6 +93,9 @@ const ses = new SESv2Client({});
 const FROM_EMAIL = process.env.FROM_EMAIL ?? EMAIL.FROM_EMAIL;
 const BUCKET = process.env.UPLOADS_BUCKET!;
 const USER_POOL_ID = process.env.USER_POOL_ID ?? '';
+// Temporary production-safe plan preview. The route below is a no-op for
+// every other Cognito user, so this cannot become a public self-upgrade path.
+const BILLING_TESTER_SUB = process.env.BILLING_TESTER_SUB ?? '';
 const MAX_PETS = Number(process.env.MAX_PETS ?? LIMITS_FREE.MAX_PETS);
 const MAX_DOCS = Number(process.env.MAX_DOCS ?? LIMITS_FREE.MAX_DOCS);
 const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? UPLOADS.MAX_FILE_BYTES);
@@ -119,8 +125,14 @@ interface DocMeta {
   expiry?: string; // YYYY-MM-DD
   given?: string; // YYYY-MM-DD date administered
   remindersEnabled?: boolean; // per-record opt-out; absent/true = remind, false = skip
+  // "Archived": kept on record but hidden from the main list, and skipped by
+  // status badges, the passport, and reminders. Mirrors a med's `dismissed`.
+  dismissed?: boolean;
 }
-const encodeMeta = (m: DocMeta): string => encodeURIComponent(JSON.stringify(m));
+// Only store dismissed when true, so unarchived records keep the legacy key
+// shape and the encoded meta stays small.
+const encodeMeta = (m: DocMeta): string =>
+  encodeURIComponent(JSON.stringify({ ...m, dismissed: m.dismissed ? true : undefined }));
 function decodeMeta(seg: string | undefined): DocMeta {
   const raw = decodeURIComponent(seg ?? '');
   try {
@@ -132,6 +144,7 @@ function decodeMeta(seg: string | undefined): DocMeta {
         given: m.given ? String(m.given) : undefined,
         // Legacy keys have no remindersEnabled — treat absence as true (opted in).
         remindersEnabled: m.remindersEnabled !== false,
+        dismissed: m.dismissed === true ? true : undefined,
       };
     }
   } catch {
@@ -142,6 +155,8 @@ function decodeMeta(seg: string | undefined): DocMeta {
 // Accept only a strict YYYY-MM-DD date; ignore anything else.
 const cleanExpiry = (v: unknown): string | undefined =>
   typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined;
+const daysUntil = (day: string) =>
+  Math.round((Date.parse(`${day}T00:00:00`) - new Date(new Date().setHours(0, 0, 0, 0)).getTime()) / 86_400_000);
 
 const isUuid = (v: string | undefined): v is string =>
   !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -166,6 +181,21 @@ interface WalkRecord {
   // leaderboard. Walks logged before 2026-07-12 predate attribution and
   // simply don't count toward any member's tally.
   by?: string;
+  // Family-tagged walks (2026-07-15): emails of household members the saver
+  // says were also on this walk. Matching is symmetric — either side tagging
+  // the other is enough, no requirement both do — see the merge logic in
+  // POST /walks.
+  withMembers?: string[];
+  // false when a matching twin walk (same pet, tagged/tagged-by the other
+  // side, similar start time and duration — see FAMILY_MATCH_* in
+  // config.ts) was found and this is the SHORTER of the pair: it still shows
+  // in walk history and still counts toward this human's own leaderboard
+  // tally, but is excluded from the pet's aggregate stats (miles/kcal/badges)
+  // so the same outing isn't counted twice for the dog. Absent/true = counts.
+  countsForPet?: boolean;
+  // id of the matched twin walk (set on both sides when merged) — not
+  // surfaced in the UI yet, just there for debugging/future display.
+  mergedWithId?: string;
 }
 // One species-dispatch convention (review finding, 2026-07-12): cats get no
 // walk cards/stats anywhere. dailyPresetsFor's separate /dog/i test is a
@@ -538,6 +568,34 @@ async function putJsonGuarded(key: string, body: unknown, etag: string | null): 
   }
 }
 
+// Sanitize a client-supplied replaceDocIds list down to unique ids that
+// actually belong to this pet — never trust the client to name a real doc.
+function parseReplaceIds(raw: unknown, existingDocIds: Set<string>): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((x): x is string => typeof x === 'string'))].filter((id) =>
+    existingDocIds.has(id),
+  );
+}
+
+// Hard-delete each doc id under docsPrefix (current file + any archived
+// versions), mirroring DELETE /docs/{id}. Used by the "replace existing
+// records" save path so re-vaccinating swaps the expired record for the new
+// one instead of leaving both behind.
+async function deleteDocsByIds(docsPrefix: string, ids: string[]): Promise<void> {
+  await Promise.all(
+    ids.map(async (id) => {
+      const list = await s3.send(
+        new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${docsPrefix}${id}/` }),
+      );
+      await Promise.all(
+        (list.Contents ?? []).map((it) =>
+          s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: it.Key! })),
+        ),
+      );
+    }),
+  );
+}
+
 // ---- plans / entitlements ----
 // Free-tier limits come from the env; a paid user has users/{sub}/plan.json,
 // written only by billing tooling or an operator — never by any user-writable
@@ -553,13 +611,46 @@ interface Limits {
   maxMembers: number; // family members (besides the owner) this plan allows
   dailyHistoryDays: number; // how far back the Daily tab can browse
 }
-// billingSource distinguishes a Stripe (web) subscriber from a RevenueCat
-// (App Store/iOS) one, so the Settings billing card on native can tell them
-// apart — a web subscriber who later installs the app still gets "managed
-// on the web" instead of an App Store deep link. Defaults to 'stripe' for
-// paid accounts written before this field existed.
-type BillingSource = 'stripe' | 'revenuecat';
-type Entitlements = Limits & { plan: 'free' | 'paid'; billingSource?: BillingSource };
+// The App Store is the only payment rail. `manual` covers this
+// project's owner/tester and any future comped beta account whose plan file is
+// simply { plan: 'paid' }.
+type BillingSource = 'apple' | 'manual';
+interface BillingRailState {
+  active: boolean;
+  updatedAt: string;
+  status?: string;
+  expiresAt?: string | null;
+  productId?: string;
+  transactionId?: string;
+  originalTransactionId?: string;
+  environment?: string;
+  signedAt?: string;
+}
+export interface PlanFile {
+  plan?: string;
+  limits?: Partial<Limits>;
+  // Legacy summary fields remain readable for old deployments/operators.
+  billingSource?: BillingSource;
+  billingSources?: BillingSource[];
+  // New source-of-truth fields. `plan` is derived from these on every write.
+  manualPaid?: boolean;
+  // Temporary owner-only override for exercising both real server-side plans.
+  // Unlike manualPaid, `free` deliberately wins over a live entitlement.
+  testerPlan?: 'free' | 'paid';
+  billing?: { apple?: BillingRailState };
+}
+type Entitlements = Limits & {
+  plan: 'free' | 'paid';
+  billingSource?: BillingSource;
+  billingSources?: BillingSource[];
+  billingApple?: {
+    status?: string;
+    expiresAt?: string | null;
+    productId?: string;
+    environment?: string;
+    updatedAt?: string;
+  };
+};
 const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
   free: {
     maxPets: MAX_PETS,
@@ -578,23 +669,114 @@ const PLAN_LIMITS: Record<Entitlements['plan'], Limits> = {
 };
 const posInt = (v: unknown, fallback: number): number =>
   typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : fallback;
+
+// Lazily migrates every legacy plan shape in memory. We only persist the
+// normalized shape when a billing event actually changes it, so deployment
+// requires no one-off data migration.
+export function normalizePlanFile(input: PlanFile | null): PlanFile {
+  const file: PlanFile = { ...(input ?? {}), billing: { ...(input?.billing ?? {}) } };
+  const hasModernState =
+    file.manualPaid !== undefined ||
+    file.testerPlan !== undefined ||
+    file.billing?.apple !== undefined;
+  if (!hasModernState && file.plan === 'paid') {
+    file.manualPaid = true;
+  }
+  return file;
+}
+
+export function activeBillingSources(file: PlanFile): BillingSource[] {
+  if (file.testerPlan === 'free') return [];
+  if (file.testerPlan === 'paid') return ['manual'];
+  const sources: BillingSource[] = [];
+  const apple = file.billing?.apple;
+  const appleNotExpired = !apple?.expiresAt || Date.parse(apple.expiresAt) > Date.now();
+  if (apple?.active && appleNotExpired) sources.push('apple');
+  if (file.manualPaid) sources.push('manual');
+  return sources;
+}
+
+export function withDerivedPlan(input: PlanFile): PlanFile {
+  const file = normalizePlanFile(input);
+  const sources = activeBillingSources(file);
+  file.plan = sources.length > 0 ? 'paid' : 'free';
+  if (sources.length > 0) {
+    file.billingSources = sources;
+    // Prefer a processor for the legacy singular field; manual is the
+    // fallback only when no subscription processor owns the access.
+    file.billingSource = sources.find((source) => source !== 'manual') ?? 'manual';
+  } else {
+    delete file.billingSources;
+    delete file.billingSource;
+  }
+  return file;
+}
+
 async function getEntitlements(sub: string): Promise<Entitlements> {
-  const file = await readJson<{
-    plan?: string;
-    limits?: Partial<Limits>;
-    billingSource?: BillingSource;
-  }>(`users/${sub}/plan.json`);
-  const plan = file?.plan === 'paid' ? 'paid' : 'free';
+  const file = normalizePlanFile(await readJson<PlanFile>(`users/${sub}/plan.json`));
+  const sources = activeBillingSources(file);
+  const plan = sources.length > 0 ? 'paid' : 'free';
   const base = PLAN_LIMITS[plan];
+  const apple = file.billing?.apple;
   return {
     plan,
-    ...(plan === 'paid' ? { billingSource: file?.billingSource ?? 'stripe' } : {}),
+    ...(plan === 'paid'
+      ? {
+          billingSource: sources.find((source) => source !== 'manual') ?? 'manual',
+          billingSources: sources,
+        }
+      : {}),
+    ...(apple
+      ? {
+          billingApple: {
+            status: apple.status,
+            expiresAt: apple.expiresAt,
+            productId: apple.productId,
+            environment: apple.environment,
+            updatedAt: apple.updatedAt,
+          },
+        }
+      : {}),
     maxPets: posInt(file?.limits?.maxPets, base.maxPets),
     maxDocs: posInt(file?.limits?.maxDocs, base.maxDocs),
     maxMeds: posInt(file?.limits?.maxMeds, base.maxMeds),
     maxMembers: posInt(file?.limits?.maxMembers, base.maxMembers),
     dailyHistoryDays: posInt(file?.limits?.dailyHistoryDays, base.dailyHistoryDays),
   };
+}
+
+// The post-purchase sync and a renewal webhook can arrive simultaneously. The
+// ETag guard prevents either from clobbering a manual tester override or a
+// fresher Apple state.
+async function updateAppleRail(
+  sub: string,
+  state: BillingRailState,
+  clearTesterPlan = false,
+): Promise<PlanFile> {
+  const key = `users/${sub}/plan.json`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const { value, etag } = await readJsonTagged<PlanFile>(key);
+    const file = normalizePlanFile(value);
+    const currentSignedAt = file.billing?.apple?.signedAt;
+    if (currentSignedAt && state.signedAt && currentSignedAt > state.signedAt) return file;
+    file.billing = { apple: state };
+    if (clearTesterPlan) delete file.testerPlan;
+    const next = withDerivedPlan(file);
+    if (await putJsonGuarded(key, next, etag)) return next;
+  }
+  throw new Error(`billing plan update conflicted repeatedly for ${sub}`);
+}
+
+async function updateTesterPlan(sub: string, testerPlan: 'free' | 'paid'): Promise<PlanFile> {
+  const key = `users/${sub}/plan.json`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const { value, etag } = await readJsonTagged<PlanFile>(key);
+    const file = normalizePlanFile(value);
+    file.testerPlan = testerPlan;
+    const next = withDerivedPlan(file);
+    if (await putJsonGuarded(key, next, etag)) return next;
+  }
+  throw new Error(`tester plan update conflicted repeatedly for ${sub}`);
 }
 
 // ---- family / household ----
@@ -829,6 +1011,20 @@ interface TrendsMonthPet {
   weightUnit: string | null;
   checklistSeries: { id: string; label: string; days: boolean[] }[];
 }
+interface SummaryInsight {
+  petId: string;
+  petName: string;
+  text: string;
+}
+interface SummaryDeadline {
+  petId: string;
+  petName: string;
+  kind: 'doc' | 'med';
+  label: string;
+  date: string;
+  days: number;
+  status: 'overdue' | 'today' | 'due-soon';
+}
 async function computeTrendsView(
   poolPrefix: string, view: 'week', offset: number,
 ): Promise<{ pets: TrendsWeekPet[]; rangeStart: string; rangeEnd: string }>;
@@ -991,6 +1187,60 @@ async function computeTrendsView(
   return { pets, rangeStart: thisDates[0], rangeEnd: thisDates[thisDates.length - 1] };
 }
 
+function summaryInsights(pets: TrendsWeekPet[]): SummaryInsight[] {
+  return pets
+    .filter((pet) => pet.insight)
+    .map((pet) => ({ petId: pet.petId, petName: pet.name, text: pet.insight! }));
+}
+
+async function summaryDeadlines(poolSub: string, petIds: string[]): Promise<SummaryDeadline[]> {
+  const all = (
+    await Promise.all(
+      petIds.map(async (petId) => {
+        const petPrefix = `users/${poolSub}/pets/${petId}/`;
+        const [pet, docsList, medsStored] = await Promise.all([
+          readJson<{ name?: string }>(`${petPrefix}pet.json`),
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${petPrefix}docs/` })),
+          readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
+        ]);
+        if (!pet?.name) return [];
+        const petName = pet.name;
+        const docs: SummaryDeadline[] = [];
+        for (const it of (docsList.Contents ?? []).filter((row) => !row.Key!.includes('/_archived/'))) {
+          const meta = decodeMeta(it.Key!.split('/')[6]);
+          if (meta.dismissed === true) continue; // archived — user opted out of nags
+          if (!meta.expiry) continue;
+          const days = daysUntil(meta.expiry);
+          if (days < 0) {
+            docs.push({ petId, petName, kind: 'doc', label: meta.label, date: meta.expiry, days, status: 'overdue' });
+          } else if (days === 0) {
+            docs.push({ petId, petName, kind: 'doc', label: meta.label, date: meta.expiry, days, status: 'today' });
+          } else if (days <= SUMMARY.UPCOMING_DEADLINE_DAYS) {
+            docs.push({ petId, petName, kind: 'doc', label: meta.label, date: meta.expiry, days, status: 'due-soon' });
+          }
+        }
+        const meds: SummaryDeadline[] = [];
+        for (const med of (medsStored?.meds ?? []).filter((item) => item.dismissed !== true)) {
+          const days = daysUntil(med.nextDue);
+          if (days < 0) {
+            meds.push({ petId, petName, kind: 'med', label: med.name, date: med.nextDue, days, status: 'overdue' });
+          } else if (days === 0) {
+            meds.push({ petId, petName, kind: 'med', label: med.name, date: med.nextDue, days, status: 'today' });
+          } else if (days <= REMINDERS.MED_HEADSUP_DAYS) {
+            meds.push({ petId, petName, kind: 'med', label: med.name, date: med.nextDue, days, status: 'due-soon' });
+          }
+        }
+        return [...docs, ...meds];
+      }),
+    )
+  ).flat();
+
+  const severity = (d: SummaryDeadline) => (d.status === 'overdue' ? 0 : d.status === 'today' ? 1 : 2);
+  return all
+    .sort((a, b) => severity(a) - severity(b) || a.days - b.days || a.petName.localeCompare(b.petName) || a.label.localeCompare(b.label))
+    .slice(0, SUMMARY.MAX_DEADLINES);
+}
+
 // Renders computeTrendsView's output as a plain-text email — the on-demand
 // ("email me this report") flow. Always offset 0 (the current week/month);
 // swiping to older periods is a Trends-tab-only feature for now.
@@ -1037,6 +1287,7 @@ function composeReportEmail(
     copy.cta(`${APP_URL}/dashboard`),
     ``,
     copy.signoff,
+    copy.signoffName,
     ``,
     copy.unsubscribeLine(unsubUrl),
   ].join('\n');
@@ -1075,10 +1326,14 @@ function composeReportEmailHtml(
         });
 
   const copy = period === 'month' ? monthlyReportCopy : weeklyReportCopy;
-  const footerHtml = `<a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+  const introHtml = infoCardHtml(`<div style="font-size:14px;line-height:1.6;color:#4b463e;">${escapeHtml(copy.onDemandNote)}</div>`);
+  const footerHtml = `<a href="${APP_URL}" style="color:#31584c;">petshots.app</a> · <a href="${APP_URL}/dashboard" style="color:#31584c;">Open dashboard</a><br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
   return emailHtml(
     copy.intro,
-    sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'See the full breakdown'),
+    `<p style="margin:0 0 18px;color:#4b463e;">${escapeHtml(copy.intro)}</p>` +
+      introHtml +
+      sectionsHtml.join('') +
+      ctaButtonHtml(`${APP_URL}/dashboard`, copy.ctaButtonLabel),
     footerHtml,
   );
 }
@@ -1492,164 +1747,72 @@ async function petAcceptsWrites(petsPrefix: string, petId: string, maxPets: numb
 const READ_ONLY_PET_ERROR =
   'This pet is read-only on your current plan. Upgrade to add new records.';
 
-// ---- billing (Stripe) ----
-// The Stripe secret key, webhook signing secret, and price ids live in one
-// Secrets Manager secret (written by infra/scripts/setup-stripe.mjs), fetched
-// lazily so non-billing routes never pay the lookup. plan.json is written
-// ONLY here (webhook) or by an operator — no user-authed route can touch it.
-const STRIPE_SECRET_NAME = process.env.STRIPE_SECRET_NAME ?? 'petshots/stripe';
 const APP_URL = process.env.APP_URL ?? EMAIL.APP_URL;
-interface StripeConfig {
-  secretKey: string;
-  webhookSecret: string;
-  priceMonthly?: string;
-  priceYearly?: string;
-}
-const sm = new SecretsManagerClient({});
-let stripeCache: { stripe: Stripe; config: StripeConfig } | null = null;
-async function getStripe(): Promise<{ stripe: Stripe; config: StripeConfig }> {
-  if (!stripeCache) {
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: STRIPE_SECRET_NAME }));
-    const config = JSON.parse(res.SecretString!) as StripeConfig;
-    stripeCache = { stripe: new Stripe(config.secretKey), config };
-  }
-  return stripeCache;
-}
-
-async function handleStripeWebhook(
-  event: APIGatewayProxyEventV2WithJWTAuthorizer,
-): Promise<APIGatewayProxyResultV2> {
-  const { stripe, config } = await getStripe();
-  const sig = event.headers?.['stripe-signature'];
-  if (!sig) return json(400, { error: 'missing signature' });
-  const raw = event.isBase64Encoded
-    ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
-    : (event.body ?? '');
-  let evt: Stripe.Event;
-  try {
-    evt = stripe.webhooks.constructEvent(raw, sig, config.webhookSecret);
-  } catch {
-    return json(400, { error: 'invalid signature' });
-  }
-
-  switch (evt.type) {
-    case 'checkout.session.completed': {
-      const session = evt.data.object as Stripe.Checkout.Session;
-      const userSub = session.client_reference_id;
-      const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-      if (!userSub || !customerId) break;
-      // customer -> Cognito sub mapping, so later subscription.* events (which
-      // carry only the customer id) can find the user's plan.json.
-      await putJson(`billing/customers/${customerId}.json`, { sub: userSub });
-      await putJson(`users/${userSub}/plan.json`, {
-        plan: 'paid',
-        billingSource: 'stripe',
-        stripeCustomerId: customerId,
-        stripeSubscriptionId:
-          typeof session.subscription === 'string' ? session.subscription : session.subscription?.id,
-      });
-      break;
-    }
-    case 'customer.subscription.updated':
-    case 'customer.subscription.deleted': {
-      const subscription = evt.data.object as Stripe.Subscription;
-      const customerId =
-        typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
-      const mapping = await readJson<{ sub: string }>(`billing/customers/${customerId}.json`);
-      if (!mapping) break; // customer not created through our checkout — ignore
-      // past_due stays paid: Stripe retries the charge for days before firing
-      // subscription.deleted, and yanking access mid-retry punishes card hiccups.
-      const stillPaid =
-        evt.type !== 'customer.subscription.deleted' &&
-        ['active', 'trialing', 'past_due'].includes(subscription.status);
-      await putJson(`users/${mapping.sub}/plan.json`, {
-        plan: stillPaid ? 'paid' : 'free',
-        billingSource: 'stripe',
-        stripeCustomerId: customerId,
-        stripeSubscriptionId: subscription.id,
-      });
-      break;
-    }
-  }
-  return json(200, { received: true });
-}
-
-// ---- billing (RevenueCat / Apple In-App Purchase, iOS app only) ----
-// Stripe (above) still owns web billing untouched. RevenueCat's app_user_id
-// is always the Cognito sub (configured client-side at Purchases.configure
-// time), so both the webhook and the authed sync route below write straight
-// to users/{sub}/plan.json — no reverse customer-id mapping needed, unlike
-// Stripe's billing/customers/{id}.json (Stripe's customer id isn't known
-// until after checkout; RevenueCat's app_user_id is ours from the start).
-const REVENUECAT_SECRET_NAME = process.env.REVENUECAT_SECRET_NAME ?? 'petshots/revenuecat';
-interface RevenueCatConfig {
-  secretApiKey: string;
-  webhookSigningSecret: string;
-}
-let revenueCatCache: RevenueCatConfig | null = null;
-async function getRevenueCatConfig(): Promise<RevenueCatConfig> {
-  if (!revenueCatCache) {
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: REVENUECAT_SECRET_NAME }));
-    revenueCatCache = JSON.parse(res.SecretString!) as RevenueCatConfig;
-  }
-  return revenueCatCache;
-}
-
-// Never trusts a webhook payload's entitlement state directly — RevenueCat's
-// own guidance is to re-fetch GET /subscribers after any webhook, since it's
-// the canonical, consistently-formatted view. This same function backs both
-// the webhook (out-of-band renewals/cancellations) and the authed sync route
-// the app calls right after a purchase/restore (for instant UI correctness,
-// instead of waiting on the webhook to land).
-async function syncRevenueCatEntitlement(appUserId: string): Promise<void> {
-  const { secretApiKey } = await getRevenueCatConfig();
-  const res = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(appUserId)}`, {
-    headers: { Authorization: `Bearer ${secretApiKey}` },
-  });
-  if (!res.ok) throw new Error(`RevenueCat subscriber lookup failed: ${res.status}`);
-  const data = (await res.json()) as {
-    subscriber?: { entitlements?: Record<string, { expires_date?: string | null }> };
+// ---- billing (direct StoreKit 2 / Apple In-App Purchase) ----
+function appleRailState(transaction: JWSTransactionDecodedPayload): BillingRailState {
+  const active = transactionIsActive(transaction);
+  const status = transaction.revocationDate
+    ? 'revoked'
+    : transaction.isUpgraded
+      ? 'upgraded'
+      : active
+        ? 'active'
+        : 'expired';
+  return {
+    active,
+    updatedAt: new Date().toISOString(),
+    status,
+    expiresAt: transaction.expiresDate ? new Date(transaction.expiresDate).toISOString() : null,
+    productId: transaction.productId,
+    transactionId: transaction.transactionId,
+    originalTransactionId: transaction.originalTransactionId,
+    environment: transaction.environment,
+    signedAt: transaction.signedDate ? new Date(transaction.signedDate).toISOString() : undefined,
   };
-  const entitlement = data.subscriber?.entitlements?.[REVENUECAT.ENTITLEMENT_ID];
-  // No expires_date (lifetime/non-expiring) counts as active; otherwise
-  // compare against now the same way Stripe's past_due/active check does.
-  const isPaid = !!entitlement && (!entitlement.expires_date || new Date(entitlement.expires_date) > new Date());
-  await putJson(`users/${appUserId}/plan.json`, {
-    plan: isPaid ? 'paid' : 'free',
-    billingSource: 'revenuecat',
-  });
 }
 
-async function handleRevenueCatWebhook(
+async function syncAppleTransactions(
+  appUserId: string,
+  signedTransactions: string[],
+  clearTesterPlan = false,
+): Promise<void> {
+  const transactions = await Promise.all(signedTransactions.map(verifyAppleTransaction));
+  for (const transaction of transactions) {
+    if (!transaction.appAccountToken || transaction.appAccountToken.toLowerCase() !== appUserId.toLowerCase()) {
+      throw new Error('Apple transaction belongs to a different account');
+    }
+  }
+  const latest = transactions.sort((a, b) => (b.expiresDate ?? 0) - (a.expiresDate ?? 0))[0];
+  await updateAppleRail(
+    appUserId,
+    latest
+      ? appleRailState(latest)
+      : {
+      active: false,
+      updatedAt: new Date().toISOString(),
+      status: 'not-entitled',
+      expiresAt: null,
+      signedAt: new Date().toISOString(),
+    },
+    clearTesterPlan,
+  );
+}
+
+async function handleAppleWebhook(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> {
-  const { webhookSigningSecret } = await getRevenueCatConfig();
-  const sigHeader = event.headers?.['x-revenuecat-webhook-signature'];
-  if (!sigHeader) return json(400, { error: 'missing signature' });
   const raw = event.isBase64Encoded
     ? Buffer.from(event.body ?? '', 'base64').toString('utf8')
     : (event.body ?? '');
-
-  // Format: "t=<unix_ts>,v1=<hmac_sha256_hex>" over "<ts>.<raw body>".
-  const parts = Object.fromEntries(
-    sigHeader.split(',').map((p) => p.split('=') as [string, string]),
-  );
-  const timestamp = parts.t;
-  const providedSig = parts.v1;
-  if (!timestamp || !providedSig) return json(400, { error: 'invalid signature' });
-  const expectedSig = createHmac('sha256', webhookSigningSecret)
-    .update(`${timestamp}.${raw}`)
-    .digest('hex');
-  const expected = Buffer.from(expectedSig, 'hex');
-  const provided = Buffer.from(providedSig, 'hex');
-  if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
-    return json(400, { error: 'invalid signature' });
-  }
-
-  const body = JSON.parse(raw) as { event?: { app_user_id?: string } };
-  const appUserId = body.event?.app_user_id;
-  if (!appUserId) return json(400, { error: 'missing app_user_id' });
-  await syncRevenueCatEntitlement(appUserId);
+  const body = JSON.parse(raw) as { signedPayload?: unknown };
+  if (typeof body.signedPayload !== 'string') return json(400, { error: 'missing signedPayload' });
+  const notification = await verifyAppleNotification(body.signedPayload);
+  const signedTransaction = notification.data?.signedTransactionInfo;
+  if (!signedTransaction) return json(200, { received: true, ignored: true });
+  const transaction = await verifyAppleTransaction(signedTransaction);
+  const appUserId = transaction.appAccountToken;
+  if (!appUserId || !isUuid(appUserId)) return json(200, { received: true, ignored: true });
+  await updateAppleRail(appUserId, appleRailState(transaction));
   return json(200, { received: true });
 }
 
@@ -1699,11 +1862,15 @@ async function handlePublicPassport(
     const days = Math.round((d.getTime() - today.getTime()) / 86_400_000);
     return days < 0 ? 0 : days <= 30 ? 1 : 2;
   };
+  // Archived records are hidden from the owner's list, so keep them off the
+  // shareable passport too — decode meta first, then drop dismissed ones.
+  const docEntries = (list.Contents ?? [])
+    .filter((it) => !it.Key!.includes('/_archived/'))
+    .map((it) => ({ key: it.Key!, meta: decodeMeta(it.Key!.split('/')[6]) }))
+    .filter((e) => e.meta.dismissed !== true);
   const docs = await Promise.all(
-    (list.Contents ?? []).filter((it) => !it.Key!.includes('/_archived/')).map(async (it) => {
-      const key = it.Key!;
+    docEntries.map(async ({ key, meta }) => {
       const parts = key.split('/');
-      const meta = decodeMeta(parts[6]);
       const url = await getSignedUrl(
         s3,
         new GetObjectCommand({ Bucket: BUCKET, Key: key }),
@@ -1838,15 +2005,10 @@ export const handler = async (
     try { return await handleUnsubscribe(event); }
     catch (e) { console.error('unsubscribe error', e); return json(500, { error: 'internal error' }); }
   }
-  // Stripe calls this server-to-server; auth is the webhook signature, not a JWT.
-  if (event.routeKey === 'POST /billing/webhook') {
-    try { return await handleStripeWebhook(event); }
-    catch (e) { console.error('webhook error', e); return json(500, { error: 'internal error' }); }
-  }
-  // RevenueCat calls this server-to-server; auth is the HMAC signature, not a JWT.
-  if (event.routeKey === 'POST /billing/revenuecat-webhook') {
-    try { return await handleRevenueCatWebhook(event); }
-    catch (e) { console.error('revenuecat webhook error', e); return json(500, { error: 'internal error' }); }
+  // Apple calls this server-to-server; its JWS certificate chain is the auth.
+  if (event.routeKey === 'POST /billing/apple-webhook') {
+    try { return await handleAppleWebhook(event); }
+    catch (e) { console.error('Apple webhook verification error', e); return json(400, { error: 'invalid Apple notification' }); }
   }
 
   // The Cognito JWT authorizer already verified the token; we just read claims.
@@ -2063,6 +2225,8 @@ export const handler = async (
           generatedAt: string; story: string;
           rangeStart: string; rangeEnd: string;
           photoRefs: SummaryPhotoRef[]; pets: SummaryChip[];
+          insights?: SummaryInsight[];
+          deadlines?: SummaryDeadline[];
         }
         const presignPhotos = (refs: SummaryPhotoRef[]) =>
           Promise.all(
@@ -2083,12 +2247,22 @@ export const handler = async (
 
         const cached = await readJson<SummaryCache>(cacheKey);
         if (cached) {
+          let insights = cached.insights;
+          let deadlines = cached.deadlines;
+          if (!insights || !deadlines) {
+            const { pets: weekPets } = await computeTrendsView(poolPrefix, 'week', 0);
+            insights = summaryInsights(weekPets);
+            deadlines = await summaryDeadlines(poolSub, weekPets.map((p) => p.petId));
+            await putJson(cacheKey, { ...cached, insights, deadlines });
+          }
           return json(200, {
             story: cached.story,
             generatedAt: cached.generatedAt,
             rangeStart: cached.rangeStart,
             rangeEnd: cached.rangeEnd,
             pets: cached.pets,
+            insights,
+            deadlines,
             photos: await presignPhotos(cached.photoRefs),
           });
         }
@@ -2115,6 +2289,11 @@ export const handler = async (
           checklist: p.checklist,
         }));
         const chips: SummaryChip[] = buildChips(storyPets);
+        const insights = summaryInsights(weekPets);
+        const deadlines = await summaryDeadlines(
+          poolSub,
+          weekPets.map((p) => p.petId),
+        );
         const photoRefs = await pickWindowPhotos(
           BUCKET,
           poolSub,
@@ -2143,6 +2322,8 @@ export const handler = async (
             rangeStart,
             rangeEnd,
             pets: chips,
+            insights,
+            deadlines,
             photos: [],
           });
         }
@@ -2164,6 +2345,8 @@ export const handler = async (
             rangeStart,
             rangeEnd,
             pets: chips,
+            insights,
+            deadlines,
             photos: await presignPhotos(photoRefs),
           });
         }
@@ -2176,6 +2359,8 @@ export const handler = async (
           rangeEnd,
           photoRefs: photoRefs.map(({ petId, id, filename }) => ({ petId, id, filename })),
           pets: chips,
+          insights,
+          deadlines,
         } satisfies SummaryCache);
         return json(200, {
           story,
@@ -2183,6 +2368,8 @@ export const handler = async (
           rangeStart,
           rangeEnd,
           pets: chips,
+          insights,
+          deadlines,
           photos: await presignPhotos(photoRefs),
         });
       }
@@ -2320,7 +2507,12 @@ export const handler = async (
         const poolPrefix = `users/${poolSub}/pets/`;
         // Confirm every petId actually belongs to this pool before writing —
         // a walk can't be tagged onto a pet the caller can't see.
-        const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix }));
+        const [list, who, ownerEmail, household] = await Promise.all([
+          s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: poolPrefix })),
+          actorEmail(sub),
+          actorEmail(poolSub),
+          readHousehold(poolSub),
+        ]);
         const validIds = new Set(
           (list.Contents ?? [])
             .filter((it) => it.Key!.endsWith('/pet.json'))
@@ -2329,7 +2521,15 @@ export const handler = async (
         const confirmedPetIds = petIds.filter((id): id is string => validIds.has(id as string));
         if (confirmedPetIds.length === 0) return json(404, { error: 'no matching pets found' });
 
-        const who = await actorEmail(sub);
+        // Family-tagged walks: only accept emails that are actually in this
+        // household (owner + members), never yourself.
+        const participantEmails = new Set([ownerEmail, ...household.members.map((m) => m.email)]);
+        participantEmails.delete(who);
+        const rawWithMembers: unknown[] = Array.isArray(input.withMembers) ? input.withMembers : [];
+        const withMembers: string[] = [
+          ...new Set(rawWithMembers.filter((e): e is string => typeof e === 'string' && participantEmails.has(e))),
+        ];
+
         const walk: WalkRecord = {
           id: randomUUID(),
           petIds: confirmedPetIds,
@@ -2337,8 +2537,42 @@ export const handler = async (
           endedAt,
           distanceMeters,
           by: who,
+          ...(withMembers.length > 0 ? { withMembers } : {}),
         };
-        if (!(await mutateWalksIndex(poolSub, (walks) => [...walks, walk]))) {
+        if (
+          !(await mutateWalksIndex(poolSub, (walks) => {
+            // Look for a twin: someone else's walk covering the same pet
+            // around the same time, where either side tagged the other —
+            // symmetric on purpose (Mark, 2026-07-15): "if I tag a family
+            // member, or if a family member tags me" both count, no
+            // requirement both people tag each other.
+            const match = walks.find(
+              (w) =>
+                w.by &&
+                w.by !== who &&
+                w.petIds.some((id) => confirmedPetIds.includes(id)) &&
+                Math.abs(Date.parse(w.startedAt) - Date.parse(startedAt)) <= WALKS.FAMILY_MATCH_WINDOW_MS &&
+                (withMembers.includes(w.by) || (w.withMembers ?? []).includes(who)),
+            );
+            if (match) {
+              const newDurMs = Date.parse(endedAt) - Date.parse(startedAt);
+              const matchDurMs = Date.parse(match.endedAt) - Date.parse(match.startedAt);
+              const longerMs = Math.max(newDurMs, matchDurMs);
+              // Only dedup if the two durations roughly agree — too
+              // different and it's safer to assume they weren't really the
+              // same outing (Mark's explicit call) and count both in full.
+              if (longerMs > 0 && Math.abs(newDurMs - matchDurMs) / longerMs <= WALKS.FAMILY_MATCH_DURATION_TOLERANCE) {
+                const shorter = newDurMs <= matchDurMs ? walk : match;
+                const longer = newDurMs <= matchDurMs ? match : walk;
+                shorter.countsForPet = false;
+                longer.countsForPet = true;
+                shorter.mergedWithId = longer.id;
+                longer.mergedWithId = shorter.id;
+              }
+            }
+            return [...walks, walk];
+          }))
+        ) {
           return json(409, { error: 'could not save the walk, try again' });
         }
 
@@ -2440,7 +2674,9 @@ export const handler = async (
             // routines, not memorials.
             if (pet.memorial) return null;
 
-            const petWalks = allWalks.filter((w) => w.petIds.includes(petId));
+            // countsForPet:false excludes the shorter twin of a family-tagged
+            // matched pair — same outing, don't double-count for the dog.
+            const petWalks = allWalks.filter((w) => w.petIds.includes(petId) && w.countsForPet !== false);
             const weekWalks = petWalks.filter((w) => w.startedAt.slice(0, 10) >= windowStart);
             const weekMiles = toMiles(weekWalks.reduce((sum, w) => sum + w.distanceMeters, 0));
             const walkBests = weeklyBests(petWalks.map((w) => w.startedAt.slice(0, 10)));
@@ -2791,6 +3027,7 @@ export const handler = async (
               expiry: meta.expiry,
               given: meta.given,
               remindersEnabled: meta.remindersEnabled !== false,
+              dismissed: meta.dismissed === true ? true : undefined,
               filename: parts.slice(7).join('/'),
               size: it.Size,
               // Content identity (MD5 for our single-part uploads/copies) —
@@ -3026,7 +3263,14 @@ export const handler = async (
         const currentDocs = (docList.Contents ?? []).filter(
           (it) => !it.Key!.includes('/_archived/'),
         );
-        if (currentDocs.length + records.length > ent.maxDocs) {
+        // "Replace existing records": ids the client asked to swap out (a fresh
+        // shot for the same vaccine). Only ids that actually exist under this
+        // pet count — the net doc total after the swap is what the limit gates.
+        const existingDocIds = new Set(
+          currentDocs.map((it) => it.Key!.slice(docsPrefix.length).split('/')[0]),
+        );
+        const replaceIds = parseReplaceIds(input.replaceDocIds, existingDocIds);
+        if (currentDocs.length - replaceIds.length + records.length > ent.maxDocs) {
           return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
         }
         if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
@@ -3071,6 +3315,10 @@ export const handler = async (
           }
         }
 
+        // New records exist now, so swapping out the replaced ones can't lose
+        // data if this step fails partway.
+        if (replaceIds.length > 0) await deleteDocsByIds(docsPrefix, replaceIds);
+
         return json(200, { docs: created });
       }
 
@@ -3110,7 +3358,11 @@ export const handler = async (
         const currentDocs = (docList.Contents ?? []).filter(
           (it) => !it.Key!.includes('/_archived/'),
         );
-        if (currentDocs.length + records.length > ent.maxDocs) {
+        const existingDocIds = new Set(
+          currentDocs.map((it) => it.Key!.slice(docsPrefix.length).split('/')[0]),
+        );
+        const replaceIds = parseReplaceIds(input.replaceDocIds, existingDocIds);
+        if (currentDocs.length - replaceIds.length + records.length > ent.maxDocs) {
           return json(409, { error: `limit of ${ent.maxDocs} documents reached` });
         }
         if (!(await petAcceptsWrites(petsPrefix, petId!, ent.maxPets))) {
@@ -3132,6 +3384,10 @@ export const handler = async (
             return { id: docId, ...rec, filename: '_manual' };
           }),
         );
+
+        // New records exist now, so swapping out the replaced ones is safe.
+        if (replaceIds.length > 0) await deleteDocsByIds(docsPrefix, replaceIds);
+
         return json(200, { docs: created });
       }
 
@@ -3142,9 +3398,6 @@ export const handler = async (
         const id = event.pathParameters?.id;
         if (!id) return json(400, { error: 'id required' });
         const input = JSON.parse(event.body ?? '{}');
-        const newLabel = String(input.label ?? '').slice(0, 200);
-        if (!newLabel) return json(400, { error: 'label required' });
-        const newExpiry = cleanExpiry(input.expiry);
 
         const prefix = `${docsPrefix}${id}/`;
         const list = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }));
@@ -3155,17 +3408,28 @@ export const handler = async (
         const oldParts = oldKey.split('/');
         const filename = oldParts.slice(7).join('/');
         const oldMeta = decodeMeta(oldParts[6]);
-        // Preserve existing remindersEnabled/given if not provided in request.
-        const newRemindersEnabled = typeof input.remindersEnabled === 'boolean'
-          ? input.remindersEnabled
-          : oldMeta.remindersEnabled !== false;
+        // Partial-patch friendly: an absent field keeps its stored value, so a
+        // bare { dismissed: true } archive toggle won't wipe label/expiry/given.
+        const newLabel = input.label === undefined ? oldMeta.label : String(input.label).slice(0, 200);
+        if (!newLabel) return json(400, { error: 'label required' });
+        const newExpiry = input.expiry === undefined ? oldMeta.expiry : cleanExpiry(input.expiry);
+        // Preserve existing dismissed/remindersEnabled/given if not provided.
+        const newDismissed =
+          typeof input.dismissed === 'boolean' ? input.dismissed : oldMeta.dismissed === true;
         const newGiven =
           input.given === null || input.given === ''
             ? undefined // explicit clear
             : isStrictDay(input.given)
               ? input.given
               : oldMeta.given;
-        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry, given: newGiven, remindersEnabled: newRemindersEnabled })}/${filename}`;
+        // Archiving a record also silences its reminders — a hidden record
+        // nagging by email would be the opposite of "I don't care about this."
+        const newRemindersEnabled = newDismissed
+          ? false
+          : typeof input.remindersEnabled === 'boolean'
+            ? input.remindersEnabled
+            : oldMeta.remindersEnabled !== false;
+        const newKey = `${prefix}${encodeMeta({ label: newLabel, expiry: newExpiry, given: newGiven, remindersEnabled: newRemindersEnabled, dismissed: newDismissed })}/${filename}`;
         if (newKey === oldKey) return json(200, { ok: true });
 
         // CopySource must be a URL-encoded bucket/key, but with '/' preserved as
@@ -3260,9 +3524,10 @@ export const handler = async (
         }
         const petInfo = await readJson<{ species?: string }>(petKey);
         if (petInfo === null) return json(404, { error: 'not found' });
-        const [file, medsStored] = await Promise.all([
+        const [file, medsStored, household] = await Promise.all([
           readJson<DailyFile>(`${petPrefix}daily.json`),
           readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
+          readHousehold(dataSub),
         ]);
         let checks = file?.log?.[date] ?? {};
         let mood = file?.moods?.[date] ?? null;
@@ -3310,7 +3575,8 @@ export const handler = async (
           }
           feedingIdle = !fedEver && otherDays >= 3;
         }
-        return json(200, { date, items, checks, mood, feedingIdle });
+        const householdRecipients = [dataSub, ...household.members.map((m) => m.sub)].filter((s) => s !== sub).length;
+        return json(200, { date, items, checks, mood, feedingIdle, householdRecipients });
       }
 
       case 'POST /pets/{petId}/daily/mood': {
@@ -3476,6 +3742,49 @@ export const handler = async (
         return json(200, { date, checks: day });
       }
 
+      case 'POST /pets/{petId}/daily/nudge': {
+        const input = JSON.parse(event.body ?? '{}');
+        const itemId = String(input.itemId ?? '');
+        if (!itemId || itemId.length > 80) return json(400, { error: 'itemId required' });
+        const today = new Date().toISOString().slice(0, 10);
+        const [pet, file, medsStored, household, who] = await Promise.all([
+          readJson<{ name?: string; species?: string }>(petKey),
+          readJson<DailyFile>(`${petPrefix}daily.json`),
+          readJson<{ meds: Med[] }>(`${petPrefix}meds.json`),
+          readHousehold(dataSub),
+          actorEmail(sub),
+        ]);
+        if (!pet?.name) return json(404, { error: 'not found' });
+        const checks = file?.log?.[today] ?? {};
+        const items = [
+          ...(file?.items ?? dailyPresetsFor(pet.species)).filter((i) => itemVisibleOn(i, today)),
+          ...dailyMedItems(medsStored?.meds ?? [], today, checks),
+        ];
+        const item = items.find((i) => i.id === itemId);
+        if (!item) return json(404, { error: 'item not found' });
+        if (checks[itemId]) return json(409, { error: 'already checked off' });
+
+        const recipientSubs = [dataSub, ...household.members.map((m) => m.sub)].filter((s) => s !== sub);
+        if (recipientSubs.length === 0) return json(409, { error: 'No household members to nudge yet.' });
+
+        const title = '🐾 Household nudge';
+        const actor = who.split('@')[0];
+        const body =
+          item.id === 'preset-walk'
+            ? `${actor} says nobody has checked off ${pet.name}'s walk yet today.`
+            : isFeedingDailyItem(item.id, item.name)
+              ? `${actor} says ${pet.name}'s ${item.name.toLowerCase()} still is not checked off today.`
+              : `${actor} says ${pet.name}'s ${item.name} still needs a check today.`;
+        const pushed = (
+          await Promise.all(
+            recipientSubs.map((recipientSub) =>
+              sendPushes(BUCKET, `users/${recipientSub}/`, title, body, APP_URL),
+            ),
+          )
+        ).reduce((sum, count) => sum + count, 0);
+        return json(200, { ok: true, notified: recipientSubs.length, pushed });
+      }
+
       case 'PUT /pets/{petId}/daily/items': {
         // Whole-list replace of the VISIBLE custom items (med rows derive from
         // meds.json and can't be edited here). Removals become tombstones, not
@@ -3586,36 +3895,10 @@ export const handler = async (
 
       case 'DELETE /account': {
         // Hard delete, everything, in an order that keeps a mid-failure
-        // retryable: Stripe + orphanable root objects first, then the user's
-        // S3 prefix, then the Cognito user LAST (while it exists the user can
-        // still re-auth and hit this route again).
-        //
-        // No equivalent cleanup exists for an Apple IAP subscription — unlike
-        // Stripe, there's no server-side "cancel" call available to us; the
-        // user must cancel it themselves via the App Store (standard for
-        // every IAP app). Deleting the Cognito user here still revokes app
-        // access immediately regardless.
-        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
-        if (plan?.stripeCustomerId) {
-          try {
-            const { stripe } = await getStripe();
-            // Default list excludes already-canceled subscriptions.
-            const subs = await stripe.subscriptions.list({ customer: plan.stripeCustomerId });
-            for (const s of subs.data) {
-              await stripe.subscriptions.cancel(s.id);
-            }
-            await s3.send(
-              new DeleteObjectCommand({
-                Bucket: BUCKET,
-                Key: `billing/customers/${plan.stripeCustomerId}.json`,
-              }),
-            );
-          } catch (e) {
-            // Don't strand the user with an undeletable account; an orphaned
-            // subscription is visible (and cancellable) in the Stripe dashboard.
-            console.error(`account delete: Stripe cleanup failed for ${sub}`, e);
-          }
-        }
+        // retryable: orphanable root objects first, then the user's S3 prefix,
+        // then the Cognito user LAST (while it exists the user can still
+        // re-auth and hit this route again). Apple subscriptions cannot be
+        // canceled server-side; the user must cancel in App Store settings.
 
         // Passport tokens live at the bucket root keyed by token — collect them
         // from each pet.json before the prefix delete orphans them as live links.
@@ -3682,41 +3965,54 @@ export const handler = async (
 
       // ---- billing ----
 
-      case 'POST /billing/checkout': {
-        const { stripe, config } = await getStripe();
-        const input = JSON.parse(event.body ?? '{}');
-        const price = input.interval === 'year' ? config.priceYearly : config.priceMonthly;
-        if (!price) return json(503, { error: 'billing not configured' });
-        // Reuse the Stripe customer on re-upgrade so their history stays whole.
-        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
-        const session = await stripe.checkout.sessions.create({
-          mode: 'subscription',
-          line_items: [{ price, quantity: 1 }],
-          client_reference_id: sub,
-          ...(plan?.stripeCustomerId ? { customer: plan.stripeCustomerId } : {}),
-          allow_promotion_codes: true,
-          success_url: `${APP_URL}/dashboard?billing=success`,
-          cancel_url: `${APP_URL}/dashboard?billing=cancelled`,
-        });
-        return json(200, { url: session.url });
+      // Called by the iOS app immediately after StoreKit purchase/restore, so
+      // the UI reflects the verified transaction without waiting on Apple.
+      case 'POST /billing/apple/sync': {
+        // A deliberate purchase/restore exits any forced tester preview so
+        // the real App Store result is what the screen immediately shows.
+        const input = JSON.parse(event.body ?? '{}') as {
+          signedTransactions?: unknown;
+          clearTesterPlan?: unknown;
+          preserveIfEmpty?: unknown;
+        };
+        if (!Array.isArray(input.signedTransactions)
+          || input.signedTransactions.length > 4
+          || input.signedTransactions.some((value) => typeof value !== 'string' || value.length > 20_000)) {
+          return json(400, { error: 'signedTransactions must be an array of Apple transactions' });
+        }
+        try {
+          if (!(input.signedTransactions.length === 0 && input.preserveIfEmpty === true)) {
+            await syncAppleTransactions(
+              sub,
+              input.signedTransactions,
+              sub === BILLING_TESTER_SUB && input.clearTesterPlan === true,
+            );
+          }
+        } catch (error) {
+          console.error('Apple transaction verification failed', error);
+          const detail = error instanceof Error ? error.message : '';
+          if (detail.includes('different account')) {
+            return json(400, {
+              error: 'This Apple subscription belongs to a different Petshots account. Sign into that account and tap Restore Purchases.',
+            });
+          }
+          return json(400, { error: 'Apple could not verify this purchase.' });
+        }
+        return json(200, await getEntitlements(sub));
       }
 
-      case 'POST /billing/portal': {
-        const { stripe } = await getStripe();
-        const plan = await readJson<{ stripeCustomerId?: string }>(`users/${sub}/plan.json`);
-        if (!plan?.stripeCustomerId) return json(404, { error: 'no billing account' });
-        const session = await stripe.billingPortal.sessions.create({
-          customer: plan.stripeCustomerId,
-          return_url: `${APP_URL}/dashboard`,
-        });
-        return json(200, { url: session.url });
-      }
-
-      // Called by the iOS app immediately after purchasePackage()/
-      // restorePurchases() resolves, so the UI reflects the new entitlement
-      // without waiting on the webhook. See syncRevenueCatEntitlement above.
-      case 'POST /billing/revenuecat/sync': {
-        await syncRevenueCatEntitlement(sub);
+      // Temporary owner-only switch used to preview the actual free/paid
+      // backend behavior without editing S3 by hand. Authorization is the
+      // verified Cognito sub, never an email or client-provided identifier.
+      case 'POST /billing/test-plan': {
+        if (!BILLING_TESTER_SUB || sub !== BILLING_TESTER_SUB) {
+          return json(404, { error: 'not found' });
+        }
+        const input = JSON.parse(event.body ?? '{}') as { plan?: unknown };
+        if (input.plan !== 'free' && input.plan !== 'paid') {
+          return json(400, { error: 'plan must be free or paid' });
+        }
+        await updateTesterPlan(sub, input.plan);
         return json(200, await getEntitlements(sub));
       }
 
@@ -3974,10 +4270,17 @@ export const handler = async (
       case 'GET /household': {
         const membership = await readMemberOf(sub);
         if (membership) {
+          // Walk tagging (family-tagged walks) needs every participant, not
+          // just the owner — read the owner's household for siblings too.
+          const [ownerHousehold, myEmail] = await Promise.all([readHousehold(membership.ownerSub), actorEmail(sub)]);
+          const participants = [membership.ownerEmail, ...ownerHousehold.members.map((m) => m.email)].filter(
+            (e) => e !== myEmail,
+          );
           return json(200, {
             role: 'member',
             ownerEmail: membership.ownerEmail,
             joinedAt: membership.joinedAt,
+            participants,
           });
         }
         const [raw, ent] = await Promise.all([readHousehold(sub), getEntitlements(sub)]);
@@ -3993,6 +4296,7 @@ export const handler = async (
             sentTo: i.sentTo,
           })),
           maxMembers: ent.maxMembers,
+          participants: h.members.map((m) => m.email),
         });
       }
 
@@ -4042,6 +4346,28 @@ export const handler = async (
           // Send AFTER the invite exists; a failed send leaves a working
           // link the owner can still share by hand.
           try {
+            const inviteText = [
+              `Hi,`,
+              ``,
+              `${ownerEmail} invited you to join their Petshots family.`,
+              ``,
+              `You'll see the same pets, records, medications, and daily care list in one shared place.`,
+              ``,
+              `Accept the invite:`,
+              url,
+              ``,
+              `This link expires in 7 days. If you weren't expecting this, you can ignore it.`,
+              ``,
+              `— The Petshots team`,
+            ].join('\n');
+            const inviteHtml = emailHtml(
+              `${ownerEmail} invited you to Petshots`,
+              `<p style="margin:0 0 16px;color:#4b463e;">${escapeHtml(ownerEmail)} invited you to join their Petshots family.</p>
+               ${infoCardHtml(`<div style="font-size:14px;line-height:1.7;color:#4b463e;">You'll see the same pets, records, medications, and daily care list in one shared place.</div>`)}
+               ${ctaButtonHtml(url, 'Accept invite')}
+               <p style="margin:18px 0 0;color:#6d655a;font-size:13px;line-height:1.6;">This invite link expires in 7 days. If you weren't expecting it, you can ignore this email.</p>`,
+              `<a href="${APP_URL}" style="color:#31584c;">petshots.app</a> · <a href="${url}" style="color:#31584c;">Open invite</a>`,
+            );
             await ses.send(
               new SendEmailCommand({
                 FromEmailAddress: FROM_EMAIL,
@@ -4054,23 +4380,10 @@ export const handler = async (
                     },
                     Body: {
                       Text: {
-                        Data: [
-                          `Hi,`,
-                          ``,
-                          `${ownerEmail} uses Petshots to keep their pets' vaccine records,`,
-                          `medications, and daily care in one place — and they'd like to share`,
-                          `it with you.`,
-                          ``,
-                          `Accept the invite (a free account takes a minute):`,
-                          url,
-                          ``,
-                          `This link expires in 7 days. If you weren't expecting this, you can`,
-                          `ignore it — nothing is shared until you accept.`,
-                          ``,
-                          `— The Petshots team`,
-                        ].join('\n'),
+                        Data: inviteText,
                         Charset: 'UTF-8',
                       },
+                      Html: { Data: inviteHtml, Charset: 'UTF-8' },
                     },
                   },
                 },
@@ -4181,7 +4494,7 @@ export const handler = async (
         return json(404, { error: 'not found' });
     }
   } catch (e) {
-    // Billing routes before setup-stripe.mjs has run: the secret isn't there yet.
+    // Push routes before their Secrets Manager values exist.
     if ((e as { name?: string }).name === 'ResourceNotFoundException') {
       return json(503, { error: 'billing not configured yet' });
     }

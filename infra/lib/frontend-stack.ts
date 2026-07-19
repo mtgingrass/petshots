@@ -46,6 +46,21 @@ export class FrontendStack extends cdk.Stack {
       validation: acm.CertificateValidation.fromDns(hostedZone),
     });
 
+    // The extensionless Apple association file must be served as JSON for
+    // Password AutoFill's app↔website trust check. This response hook keeps
+    // the header correct even when a manual S3 sync guesses octet-stream.
+    const appleAssociationHeaders = new cloudfront.Function(this, 'AppleAssociationHeaders', {
+      code: cloudfront.FunctionCode.fromInline(`
+function handler(event) {
+  var response = event.response;
+  if (event.request.uri === '/.well-known/apple-app-site-association') {
+    response.headers['content-type'] = { value: 'application/json; charset=utf-8' };
+    response.headers['cache-control'] = { value: 'public, max-age=3600' };
+  }
+  return response;
+}`),
+    });
+
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       defaultRootObject: 'index.html',
       domainNames: [DOMAIN, WWW],
@@ -57,6 +72,12 @@ export class FrontendStack extends cdk.Stack {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        functionAssociations: [
+          {
+            function: appleAssociationHeaders,
+            eventType: cloudfront.FunctionEventType.VIEWER_RESPONSE,
+          },
+        ],
       },
       // SPA routing: S3 returns 403/404 for client-side routes like /dashboard.
       // Serve index.html with a 200 so React Router can handle the path.

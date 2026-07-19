@@ -112,15 +112,11 @@ export class ApiStack extends cdk.Stack {
         MAX_AI_SCANS: String(LIMITS_FREE.MAX_AI_SCANS_PER_DAY),
         PAID_MAX_AI_SCANS: String(LIMITS_PAID.MAX_AI_SCANS_PER_DAY),
 
-        // Stripe key/webhook-secret/price-ids live in this Secrets Manager
-        // secret, maintained by infra/scripts/setup-stripe.mjs.
-        STRIPE_SECRET_NAME: 'petshots/stripe',
         APP_URL: EMAIL.APP_URL,
 
-        // Apple In-App Purchase billing (iOS app only, via RevenueCat) — the
-        // web stays Stripe-only. REVENUECAT in shared/config.ts documents the
-        // entitlement/offering/product ids.
-        REVENUECAT_SECRET_NAME: 'petshots/revenuecat',
+        // Temporary tester-only plan preview route. The Lambda compares the
+        // verified JWT sub against this exact value before touching plan.json.
+        BILLING_TESTER_SUB: '64686408-0081-70b4-7626-67875aba845a',
 
         // DELETE /account removes the caller's own Cognito user (always the
         // verified JWT's sub, never a client-supplied name).
@@ -156,10 +152,8 @@ export class ApiStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
         resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/stripe-*`,
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/vapid-*`,
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/apns-*`,
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:petshots/revenuecat-*`,
         ],
       }),
     );
@@ -420,6 +414,7 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.DELETE, '/pets/{petId}/weights/{date}'],
       [HttpMethod.GET, '/pets/{petId}/daily'],
       [HttpMethod.POST, '/pets/{petId}/daily/check'],
+      [HttpMethod.POST, '/pets/{petId}/daily/nudge'],
       [HttpMethod.POST, '/pets/{petId}/daily/mood'],
       [HttpMethod.PUT, '/pets/{petId}/daily/items'],
       [HttpMethod.POST, '/pets/{petId}/passport'],
@@ -436,9 +431,8 @@ export class ApiStack extends cdk.Stack {
       [HttpMethod.POST, '/household/join'],
       [HttpMethod.DELETE, '/household/members/{memberSub}'],
       [HttpMethod.POST, '/household/leave'],
-      [HttpMethod.POST, '/billing/checkout'],
-      [HttpMethod.POST, '/billing/portal'],
-      [HttpMethod.POST, '/billing/revenuecat/sync'],
+      [HttpMethod.POST, '/billing/apple/sync'],
+      [HttpMethod.POST, '/billing/test-plan'],
       [HttpMethod.DELETE, '/account'],
     ];
     for (const [method, routePath] of authedRoutes) {
@@ -460,13 +454,9 @@ export class ApiStack extends cdk.Stack {
       integration,
     });
 
-    // Stripe webhook — server-to-server, authenticated by the webhook signature
-    // (verified in the Lambda), so no Cognito authorizer.
-    httpApi.addRoutes({ path: '/billing/webhook', methods: [HttpMethod.POST], integration });
-
-    // RevenueCat webhook (iOS App Store billing) — same pattern: HMAC
-    // signature verified in the Lambda, no Cognito authorizer.
-    httpApi.addRoutes({ path: '/billing/revenuecat-webhook', methods: [HttpMethod.POST], integration });
+    // App Store Server Notifications V2 — Apple's signed JWS certificate chain
+    // is verified in Lambda, so this route intentionally has no Cognito auth.
+    httpApi.addRoutes({ path: '/billing/apple-webhook', methods: [HttpMethod.POST], integration });
 
     // Unsubscribe-from-all-email — reached from an email link with no login;
     // the Lambda validates the per-user unsubToken itself.

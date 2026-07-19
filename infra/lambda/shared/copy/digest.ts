@@ -13,29 +13,31 @@
  * back to lowGeneric. Keep every line short — this is a nudge, not a report.
  */
 export const digestInsightCopy = {
-  moodDip: (pet: string) => `We noticed ${pet}'s mood was lower than usual this week — everything okay?`,
+  moodDip: (pet: string) => `${pet}'s mood looked lower than usual this week. Worth a quick check-in?`,
   lowBreakfast: (pet: string, n: number, total: number) =>
-    `We noticed ${pet} only had breakfast logged ${n} of the last ${total} days — forgot to log it, or is ${pet} eating less?`,
+    `${pet} only had breakfast logged ${n} of the last ${total} days. Just a missed log, or something to watch?`,
   lowDinner: (pet: string, n: number, total: number) =>
-    `We noticed ${pet} only had dinner logged ${n} of the last ${total} days — forgot to log it, or is ${pet} feeling off?`,
+    `${pet} only had dinner logged ${n} of the last ${total} days. Just a missed log, or something to watch?`,
   lowWalk: (pet: string, n: number, total: number) =>
-    `We noticed ${pet}'s walks dropped to ${n} of the last ${total} days — anything keeping you two inside?`,
+    `${pet}'s walks dropped to ${n} of the last ${total} days. Anything keeping you two inside?`,
   lowGeneric: (pet: string, itemName: string, n: number, total: number) =>
-    `We noticed ${pet}'s ${itemName} was only logged ${n} of the last ${total} days — just a logging gap, or worth a check-in?`,
+    `${pet}'s ${itemName} was only logged ${n} of the last ${total} days. Worth a look?`,
   /** Replaces the digest's normal "Weight: X" line when the latest entry
    *  predates the digest window by WEIGHTS.STALE_NUDGE_DAYS or more. */
   weightStale: (pet: string, days: number) =>
-    `It's been ${days} days since ${pet}'s last weight update — worth logging one?`,
+    `It's been ${days} days since ${pet}'s last weight update. Worth logging one?`,
 } as const;
 
 export const digestCopy = {
   subjectSingle: (petName: string) => `🐾 ${petName}'s week at a glance`,
   subjectMulti: `🐾 Your pets' week at a glance`,
   greeting: 'Hi,',
-  intro: "Here's how the last 7 days went:",
-  cta: (url: string) => `Keep it up: ${url}`,
-  signoff: '— The Petshots team',
-  toggleOff: 'Turn the weekly digest off in Settings.',
+  intro: "Here's the short version of the last 7 days:",
+  cta: (url: string) => `See the full week in Petshots: ${url}`,
+  ctaButtonLabel: 'Open the weekly recap',
+  signoff: 'See you in Petshots,',
+  signoffName: 'The Petshots team',
+  toggleOff: 'You can turn the weekly digest off in Petshots Settings.',
   unsubscribeLine: (url: string) => `Unsubscribe from all Petshots email: ${url}`,
 } as const;
 
@@ -49,7 +51,7 @@ export const monthlyReportCopy = {
   subjectSingle: (petName: string) => `🐾 ${petName}'s month at a glance`,
   subjectMulti: `🐾 Your pets' month at a glance`,
   greeting: 'Hi,',
-  intro: "Here's how the last 30 days went:",
+  intro: "Here's the clearest view of the last 30 days:",
   careConsistency: (pct: number) => `Care consistency: ${pct}%`,
   mood: (avg: number, lastMonthAvg: number | null) =>
     `Mood: ${avg.toFixed(1)}/5${lastMonthAvg != null ? ` (last month: ${lastMonthAvg.toFixed(1)})` : ''}`,
@@ -57,9 +59,11 @@ export const monthlyReportCopy = {
     `Weight: ${value} ${unit}${deltaMonth != null ? ` (${deltaMonth > 0 ? '▲' : '▼'} ${Math.abs(deltaMonth)} ${unit} this month)` : ''}`,
   walks: (count: number, miles: number, kcal: number | null, countLast: number, milesLast: number) =>
     `Walks: ${count} (${miles} mi${kcal ? `, ≈${kcal} kcal` : ''}) — last month: ${countLast} (${milesLast} mi)`,
-  cta: (url: string) => `See the full breakdown: ${url}`,
-  signoff: '— The Petshots team',
-  onDemandNote: 'You requested this report from the Trends tab.',
+  cta: (url: string) => `See the full breakdown in Petshots: ${url}`,
+  ctaButtonLabel: 'Open the monthly report',
+  signoff: 'Thanks for staying on top of it,',
+  signoffName: 'The Petshots team',
+  onDemandNote: 'You asked Petshots to send this report.',
   unsubscribeLine: (url: string) => `Unsubscribe from all Petshots email: ${url}`,
 } as const;
 
@@ -75,13 +79,15 @@ export const weeklyReportCopy = {
   subjectSingle: (petName: string) => `🐾 ${petName}'s week at a glance`,
   subjectMulti: `🐾 Your pets' week at a glance`,
   greeting: 'Hi,',
-  intro: "Here's how the last 7 days went:",
+  intro: "Here's the clearest view of the last 7 days:",
   weight: (value: number, unit: string, deltaWeek: number | null) =>
     `Weight: ${value} ${unit}${deltaWeek != null ? ` (${deltaWeek > 0 ? '▲' : '▼'} ${Math.abs(deltaWeek)} ${unit} this week)` : ''}`,
   walks: (count: number, miles: number, kcal: number | null) =>
     `Walks: ${count} (${miles} mi${kcal ? `, ≈${kcal} kcal burned` : ''})`,
-  cta: (url: string) => `See the full breakdown: ${url}`,
-  signoff: '— The Petshots team',
-  onDemandNote: 'You requested this report from the Trends tab.',
+  cta: (url: string) => `See the full breakdown in Petshots: ${url}`,
+  ctaButtonLabel: 'Open the weekly report',
+  signoff: 'See you back in Petshots,',
+  signoffName: 'The Petshots team',
+  onDemandNote: 'You asked Petshots to send this report.',
   unsubscribeLine: (url: string) => `Unsubscribe from all Petshots email: ${url}`,
 } as const;

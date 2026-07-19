@@ -19,6 +19,7 @@ import {
   listDocs,
   updateDoc,
   deleteDoc,
+  setDocArchived,
   uploadForAnalysis,
   analyzeUpload,
   commitUpload,
@@ -27,9 +28,8 @@ import {
   saveMeds,
   createPassport,
   revokePassport,
-  createCheckout,
-  createBillingPortal,
-  syncRevenueCatEntitlement,
+  syncAppleTransactions,
+  setBillingTestPlan,
   getSettings,
   saveSettings,
   deleteAccount,
@@ -42,6 +42,7 @@ import {
   checkDaily,
   setDailyMood,
   saveDailyItems,
+  nudgeDailyTask,
   localToday,
   listWeights,
   logWeight,
@@ -85,11 +86,18 @@ import {
   hapticWarning,
   saveWalkToAppleHealth,
   getAppVersion,
-  configureRevenueCat,
   getPaidOfferingPackages,
-  purchaseRevenueCatPackage,
-  restoreRevenueCatPurchases,
-  type PurchasesPackage,
+  purchaseStoreKitProduct,
+  restoreStoreKitPurchases,
+  getCurrentStoreKitEntitlements,
+  requestAlwaysLocation,
+  backgroundWalkStart,
+  backgroundWalkPause,
+  backgroundWalkResume,
+  backgroundWalkEnd,
+  backgroundWalkSnapshot,
+  type StoreKitProduct,
+  type PaidOfferingPackages,
 } from '../native';
 import { Geolocation } from '@capacitor/geolocation';
 import {
@@ -104,6 +112,7 @@ import {
   UPLOADS,
   DASHBOARD as DASHBOARD_CONFIG,
   ACHIEVEMENTS as ACHIEVEMENTS_CONFIG,
+  APPLE_IAP,
   APP_STORE_URL,
   PAID_PLAN_LIMITS,
   REMINDER_DAY_OPTIONS,
@@ -118,7 +127,6 @@ const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 // Product-tunable values live in productConfig.ts — edit them there.
 const MAX_FILE_BYTES = UPLOADS.MAX_FILE_BYTES;
-const MAX_AVATAR_BYTES = UPLOADS.MAX_AVATAR_BYTES;
 const DUE_SOON_DAYS = DASHBOARD_CONFIG.DUE_SOON_DAYS;
 // Pure UI tuning (not backend-enforced, so it lives here rather than
 // productConfig.ts) — how many photos show per pet on the Albums overview
@@ -148,6 +156,16 @@ function formatDate(day: string): string {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
+  });
+}
+
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
   });
 }
 
@@ -213,9 +231,16 @@ function trackedMeds(meds: Med[] | undefined): Med[] {
   return (meds ?? []).filter((m) => m.dismissed !== true);
 }
 
+// Records still in play: archived (dismissed) records stay stored but drop out
+// of status badges, banners, and the overview ring — the owner said they don't
+// care about them.
+function trackedDocs(docs: Doc[] | undefined): Doc[] {
+  return (docs ?? []).filter((d) => !d.dismissed);
+}
+
 // Worst-case status across a pet's docs AND meds — drives the overview pin ring.
-function petOverallStatus(docs: Doc[], meds?: Med[]): Status {
-  let worst = docs.reduce<Status>((w, doc) => {
+function petOverallStatus(allDocs: Doc[], meds?: Med[]): Status {
+  let worst = trackedDocs(allDocs).reduce<Status>((w, doc) => {
     const s = statusOf(doc.expiry);
     return STATUS_RANK[s] < STATUS_RANK[w] ? s : w;
   }, 'none');
@@ -227,7 +252,8 @@ function petOverallStatus(docs: Doc[], meds?: Med[]): Status {
 }
 
 // Compact status that fits under a pet pin without truncating.
-function petPinStatus(docs: Doc[], meds?: Med[]): string {
+function petPinStatus(allDocs: Doc[], meds?: Med[]): string {
+  const docs = trackedDocs(allDocs);
   const tracked = trackedMeds(meds);
   if (docs.length === 0 && tracked.length === 0) return 'No records yet';
   const overdue =
@@ -261,6 +287,38 @@ function vaccineBlurb(label: string): string | null {
   if (/fvrcp|rhinotracheitis|calici/.test(l))
     return 'Core feline vaccine protecting against feline herpesvirus, calicivirus, and panleukopenia. Usually renewed every 1–3 years.';
   return null;
+}
+
+// "year" / "3 years" / "6 months" — a single interval in words.
+function humanEvery(months: number): string {
+  if (months % 12 === 0) {
+    const y = months / 12;
+    return y === 1 ? 'year' : `${y} years`;
+  }
+  return months === 1 ? 'month' : `${months} months`;
+}
+
+// Turn a vaccine's cadence options into a phrase like "about every year" or
+// "every 1–3 years". Ranges collapse to a shared unit (years when both are
+// whole years, otherwise months).
+function cadencePhrase(options: { months: number }[]): string {
+  const ms = [...new Set(options.map((o) => o.months))].sort((a, b) => a - b);
+  const lo = ms[0];
+  const hi = ms[ms.length - 1];
+  if (lo === hi) return `about every ${humanEvery(lo)}`;
+  if (lo % 12 === 0 && hi % 12 === 0) return `every ${lo / 12}–${hi / 12} years`;
+  return `every ${lo}–${hi} months`;
+}
+
+// Informational "typical schedule" line for a recognized vaccine, e.g. "Most
+// dogs get this about every year." NOT medical advice — the Record Details
+// screen always pairs it with a "check with your vet" disclaimer. Returns null
+// for labels we don't recognize (nothing to say, so nothing shows).
+function vaccineCadenceNote(label: string, species?: string): string | null {
+  const c = VACCINE_CADENCES.find((v) => v.match.test(label));
+  if (!c) return null;
+  const who = species === 'cat' ? 'cats' : species === 'dog' ? 'dogs' : 'pets';
+  return `Most ${who} get this ${cadencePhrase(c.options)}.`;
 }
 
 // ---- navigation state ----
@@ -365,18 +423,13 @@ export function Dashboard() {
   const { email, sub, logout } = useAuth();
   const navigate = useNavigate();
 
-  // Apple In-App Purchase billing (native only) is configured once per
-  // signed-in user — RevenueCat's app_user_id is always the Cognito sub, so
-  // the backend webhook/sync route can write plan.json straight to
-  // users/{sub}/plan.json. No-ops without a real key (see native.ts).
-  useEffect(() => {
-    if (isNative && sub) void configureRevenueCat(sub);
-  }, [sub]);
-
   const [theme, setTheme] = useState<Theme>(getSavedTheme);
 
   const [pets, setPets] = useState<Pet[] | null>(null); // null = still loading
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
+  // The API returns over-limit pets with active:false so no data is deleted on
+  // downgrade. They stay out of every picker/cache until paid access returns.
+  const [lockedPetCount, setLockedPetCount] = useState(0);
   // The app opens on the pets overview (the pinned circles) everywhere;
   // the every-day surface is one tap away (Daily tab, or a pet's Daily —
   // its landing segment).
@@ -653,10 +706,24 @@ export function Dashboard() {
   const loadPets = useCallback(async () => {
     setError(null);
     try {
+      if (isNative && sub) {
+        try {
+          const current = await getCurrentStoreKitEntitlements();
+          // A temporarily empty local sequence (for example while offline)
+          // must not erase still-unexpired server state. Explicit Restore may
+          // clear missing state; this background refresh may not.
+          await syncAppleTransactions(current, false, true);
+        } catch (error) {
+          // Records must still load if StoreKit is temporarily unavailable.
+          console.error('[StoreKit] entitlement refresh failed', error);
+        }
+      }
       const res = await listPets();
-      setPets(res.pets);
+      const accessiblePets = res.pets.filter((pet) => pet.active !== false);
+      setLockedPetCount(res.pets.length - accessiblePets.length);
+      setPets(accessiblePets);
       setLimits(res.limits ?? DEFAULT_LIMITS);
-      return res.pets;
+      return accessiblePets;
     } catch (err) {
       // Offline with saved records = the door moment. Skip the dead dashboard
       // and go straight to the offline copy.
@@ -665,10 +732,11 @@ export function Dashboard() {
         return [];
       }
       setPets([]);
+      setLockedPetCount(0);
       setError(err instanceof Error ? err.message : 'Failed to load your pets');
       return [];
     }
-  }, [navigate]);
+  }, [navigate, sub]);
 
   const loadAllDocs = useCallback(async (petList: Pet[]) => {
     if (petList.length === 0) {
@@ -738,20 +806,6 @@ export function Dashboard() {
   useEffect(() => {
     if (pets !== null) void loadAllDocs(pets);
   }, [pets, loadAllDocs]);
-
-  // Returning from Stripe checkout. The webhook that flips the plan usually
-  // lands before the redirect does, but give it a moment and refetch limits.
-  useEffect(() => {
-    const billing = new URLSearchParams(window.location.search).get('billing');
-    if (!billing) return;
-    window.history.replaceState({}, '', window.location.pathname);
-    if (billing === 'success') {
-      showNotice('Payment received — welcome to Petshots Paid! 🎉');
-      const t = setTimeout(() => void loadPets(), 2500);
-      return () => clearTimeout(t);
-    }
-    if (billing === 'cancelled') showNotice('Checkout cancelled — nothing was charged');
-  }, [showNotice, loadPets]);
 
   useEffect(() => {
     document.title = detailPet ? `${detailPet.name} · Petshots` : 'Petshots';
@@ -826,7 +880,7 @@ export function Dashboard() {
     hapticWarning();
     try {
       await deletePet(petId);
-      setPets((prev) => (prev ?? []).filter((p) => p.id !== petId));
+      await loadPets(); // may promote a safely stored over-limit pet
       setAllDocs((prev) => { const n = { ...prev }; delete n[petId]; return n; });
       setAllMeds((prev) => { const n = { ...prev }; delete n[petId]; return n; });
       backToOverview();
@@ -973,6 +1027,7 @@ export function Dashboard() {
           <SettingsScreen
             section={dashView.section}
             email={email ?? ''}
+            sub={sub ?? ''}
             limits={limits}
             theme={theme}
             onThemeChange={(t) => { applyTheme(t); setTheme(t); }}
@@ -981,7 +1036,10 @@ export function Dashboard() {
             onLogout={handleLogout}
             onError={setError}
             onNotice={showNotice}
-            onLimitsChange={setLimits}
+            onLimitsChange={(next) => {
+              setLimits(next);
+              void loadPets();
+            }}
             onUpgrade={() => setDashView({ type: 'settings', section: 'account' })}
             onAccountDeleted={() => { logout(); navigate('/'); }}
           />
@@ -995,6 +1053,7 @@ export function Dashboard() {
           <DailyAllScreen
             pets={pets.filter((p) => !p.memorial)}
             onError={setError}
+            onNotice={showNotice}
             onOpenPet={(petId) => setDashView({ type: 'detail', petId, tab: 'daily' })}
             onMedsChanged={(petId, meds) =>
               setAllMeds((prev) => ({ ...prev, [petId]: meds }))
@@ -1037,6 +1096,7 @@ export function Dashboard() {
           />
         ) : dashView.type === 'achievements' ? (
           <AchievementsAllScreen
+            accessiblePetIds={pets.map((pet) => pet.id)}
             onError={setError}
             onLoaded={setAchievementsCache}
             onOpenBadges={(petId, cardId) => setDashView({ type: 'badges', petId, cardId })}
@@ -1091,6 +1151,7 @@ export function Dashboard() {
           ) : editView.type === 'doc' ? (
             <DocDetailScreen
               doc={editView.doc}
+              species={detailPet?.species}
               onBack={() => setEditView({ type: 'list' })}
               onEdit={() => setEditView({ type: 'edit', doc: editView.doc, petId: editView.petId })}
             />
@@ -1281,15 +1342,10 @@ export function Dashboard() {
                 </button>
               )}
             </div>
-            {pets.length > limits.maxPets ? (
-              // Over the cap (downgraded/lapsed plan): softer framing — their
-              // data is intact, some pets just stopped accepting new records.
+            {lockedPetCount > 0 ? (
               <p className="pet-pins__limit">
-                Your plan includes {limits.maxPets} pets, so{' '}
-                {pets.length - limits.maxPets === 1
-                  ? 'one of your pets is'
-                  : `${pets.length - limits.maxPets} of your pets are`}{' '}
-                read-only — everything stays viewable.{' '}
+                {lockedPetCount === 1 ? 'One additional pet is' : `${lockedPetCount} additional pets are`}{' '}
+                safely stored and locked on the free plan.{' '}
                 <button
                   className="btn btn--link"
                   onClick={() => setDashView({ type: 'settings', section: 'account' })}
@@ -1409,10 +1465,30 @@ function SummaryScreen({
 
   const moodEmoji = (avg: number | null) =>
     avg === null ? null : avg >= 4.5 ? '😄' : avg >= 3.5 ? '🙂' : avg >= 2.5 ? '😐' : avg >= 1.5 ? '🙁' : '😢';
+  const deadlineCopy = (deadline: NonNullable<SummaryResponse['deadlines']>[number]) =>
+    deadline.status === 'overdue'
+      ? `${deadline.kind === 'doc' ? 'Expired' : 'Due'} ${Math.abs(deadline.days)}d ago`
+      : deadline.status === 'today'
+        ? 'Due today'
+        : deadline.days === 1
+          ? 'Due tomorrow'
+          : `Due in ${deadline.days}d`;
+  const accessiblePetIds = new Set(pets.map((pet) => pet.id));
+  const visiblePhotos = data?.photos.filter((photo) => accessiblePetIds.has(photo.petId)) ?? [];
+  const visibleChips = data?.pets.filter((pet) => accessiblePetIds.has(pet.petId)) ?? [];
+  const visibleInsights = data?.insights?.filter((item) => accessiblePetIds.has(item.petId)) ?? [];
+  const visibleDeadlines = data?.deadlines?.filter((item) => accessiblePetIds.has(item.petId)) ?? [];
 
   return (
     <div className="page summary-all">
-      <h1 className="large-title">Summary</h1>
+      <header className="summary-all__heading">
+        <h1 className="large-title">Summary</h1>
+        {data && (
+          <p className="subtle summary-all__period">
+            Week of {formatDate(data.rangeStart)} – {formatDate(data.rangeEnd)}
+          </p>
+        )}
+      </header>
       {failed ? (
         <div className="card summary-all__empty">
           <p>Couldn't load today's summary — check your connection and try again.</p>
@@ -1425,9 +1501,9 @@ function SummaryScreen({
         </div>
       ) : (
         <>
-          {data.photos.length > 0 && (
+          {visiblePhotos.length > 0 && (
             <div className="summary-all__photos">
-              {data.photos.map((p) => (
+              {visiblePhotos.map((p) => (
                 <img key={p.id} src={p.url} alt="" loading="lazy" />
               ))}
             </div>
@@ -1447,8 +1523,44 @@ function SummaryScreen({
               </p>
             </div>
           )}
+          {visibleDeadlines.length > 0 && (
+            <section className="card summary-all__section">
+              <div className="summary-all__section-head">
+                <h2>Upcoming deadlines</h2>
+                <p className="subtle">The next things that need attention.</p>
+              </div>
+              <div className="summary-all__list">
+                {visibleDeadlines.map((item) => (
+                  <div key={`${item.kind}-${item.petId}-${item.label}-${item.date}`} className="summary-all__list-row">
+                    <div>
+                      <strong>{item.petName}</strong> · {item.label}
+                    </div>
+                    <span className="subtle">
+                      {deadlineCopy(item)} · {formatDate(item.date)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {visibleInsights.length > 0 && (
+            <section className="card summary-all__section">
+              <div className="summary-all__section-head">
+                <h2>Unusual changes</h2>
+                <p className="subtle">Signals worth a quick look.</p>
+              </div>
+              <div className="summary-all__list">
+                {visibleInsights.map((item) => (
+                  <div key={`${item.petId}-${item.text}`} className="summary-all__list-row">
+                    <strong>{item.petName}</strong>
+                    <span className="subtle">{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
           <div className="summary-all__chips">
-            {data.pets.map((p) => (
+            {visibleChips.map((p) => (
               <div key={p.petId} className="summary-all__chip card">
                 <span className="summary-all__chip-name">{p.name}</span>
                 <span className="subtle">
@@ -1534,12 +1646,12 @@ function SummaryArchiveEntryScreen({
 
   return (
     <div className="page summary-all">
-      <nav className="screen-nav">
-        <button className="screen-nav__back btn btn--link" type="button" onClick={onBack}>
+      <header className="summary-entry__header">
+        <button className="summary-entry__back btn btn--link" type="button" onClick={onBack}>
           ‹ Summary
         </button>
-        <span className="screen-nav__title">{title}</span>
-      </nav>
+        <h1 className="summary-entry__title">{title}</h1>
+      </header>
       {failed ? (
         <div className="card summary-all__empty">
           <p>Couldn't load this story — try again in a moment.</p>
@@ -2054,10 +2166,6 @@ function PetForm({
         onError('Pet photo must be a JPG, PNG, or WebP image.');
         return;
       }
-      if (photo.size > MAX_AVATAR_BYTES) {
-        onError(`That photo is ${formatSize(photo.size)} - the limit is 5 MB.`);
-        return;
-      }
     }
     setBusy(true);
     onError(null);
@@ -2088,7 +2196,7 @@ function PetForm({
         </select>
       </label>
       <label>
-        Photo (optional · JPG, PNG · max 5 MB)
+        Photo (optional · JPG, PNG · large photos are compressed automatically)
         <input ref={photoRef} type="file" accept="image/jpeg,image/png,image/webp" />
       </label>
       <div className="actions">
@@ -2109,7 +2217,7 @@ function PetForm({
 
 // Headline health check across all documents: the most severe status wins.
 function StatusSummary({ docs }: { docs: Doc[] }) {
-  const dated = docs.filter((d) => d.expiry);
+  const dated = trackedDocs(docs).filter((d) => d.expiry);
   if (dated.length === 0) {
     return (
       <section className="summary summary--none">
@@ -2289,7 +2397,7 @@ function PetDetailScreen({
 
         {tab === 'records' ? (
           <>
-            {docs.length > 0 && <StatusSummary docs={docs} />}
+            {trackedDocs(docs).length > 0 && <StatusSummary docs={docs} />}
             <DocsSection
               petId={pet.id}
               docs={docs}
@@ -2641,7 +2749,13 @@ function PetDailyHistory({
           </p>
         )
       )}
-      <DailySection petId={petId} date={date} onError={onError} onMedsChanged={onMedsChanged} />
+      <DailySection
+        petId={petId}
+        date={date}
+        onError={onError}
+        onNotice={onNotice}
+        onMedsChanged={onMedsChanged}
+      />
     </div>
   );
 }
@@ -2653,12 +2767,14 @@ function PetDailyHistory({
 function DailyAllScreen({
   pets,
   onError,
+  onNotice,
   onOpenPet,
   onMedsChanged,
   onAddPet,
 }: {
   pets: Pet[];
   onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
   onOpenPet: (petId: string) => void;
   onMedsChanged: (petId: string, meds: Med[]) => void;
   onAddPet: () => void;
@@ -2683,6 +2799,7 @@ function DailyAllScreen({
           pet={pet}
           onOpenPet={onOpenPet}
           onError={onError}
+          onNotice={onNotice}
           onMedsChanged={(meds) => onMedsChanged(pet.id, meds)}
         />
       ))}
@@ -2709,11 +2826,13 @@ function DailyPetSection({
   pet,
   onOpenPet,
   onError,
+  onNotice,
   onMedsChanged,
 }: {
   pet: Pet;
   onOpenPet: (petId: string) => void;
   onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
   onMedsChanged: (meds: Med[]) => void;
 }) {
   const [collapsed, setCollapsed] = useState(() => readDailyCollapsed().has(pet.id));
@@ -2759,7 +2878,7 @@ function DailyPetSection({
         </button>
       </div>
       {!collapsed && (
-        <DailySection petId={pet.id} onError={onError} onMedsChanged={onMedsChanged} />
+        <DailySection petId={pet.id} onError={onError} onNotice={onNotice} onMedsChanged={onMedsChanged} />
       )}
     </section>
   );
@@ -2769,11 +2888,13 @@ function DailySection({
   petId,
   date,
   onError,
+  onNotice,
   onMedsChanged,
 }: {
   petId: string;
   date?: string; // defaults to today; past days render read-only
   onError: (msg: string | null) => void;
+  onNotice: (msg: string) => void;
   onMedsChanged: (meds: Med[]) => void;
 }) {
   const [state, setState] = useState<DailyState | null>(null);
@@ -2781,6 +2902,8 @@ function DailySection({
   const [editing, setEditing] = useState(false);
   const [newItem, setNewItem] = useState('');
   const [busy, setBusy] = useState(false);
+  const [nudgingItemId, setNudgingItemId] = useState<string | null>(null);
+  const [nudgedItems, setNudgedItems] = useState<Record<string, true>>({});
   const [mealNudgeDismissed, setMealNudgeDismissed] = useState(
     () => localStorage.getItem(`petshots.mealNudgeDismissed.${petId}`) === '1',
   );
@@ -2802,6 +2925,10 @@ function DailySection({
   useEffect(() => {
     if (readOnly) setEditing(false);
   }, [readOnly]);
+  useEffect(() => {
+    setNudgingItemId(null);
+    setNudgedItems({});
+  }, [petId, day]);
 
   // Med check-offs change the med schedule — keep the rest of the app in sync.
   const refreshMeds = useCallback(() => {
@@ -2851,6 +2978,23 @@ function DailySection({
       onError(err instanceof Error ? err.message : 'Could not save the list');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function nudge(item: DailyItem) {
+    if (readOnly) return;
+    setNudgingItemId(item.id);
+    onError(null);
+    try {
+      const res = await nudgeDailyTask(petId, item.id);
+      setNudgedItems((prev) => ({ ...prev, [item.id]: true }));
+      onNotice(
+        res.notified === 1 ? 'Nudged 1 household member.' : `Nudged ${res.notified} household members.`,
+      );
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not send the nudge');
+    } finally {
+      setNudgingItemId(null);
     }
   }
 
@@ -2948,6 +3092,11 @@ function DailySection({
 
       {state.items.map((item) => {
         const checkInfo = state.checks[item.id];
+        const canNudge =
+          !readOnly &&
+          !checkInfo &&
+          !item.med &&
+          (state.householdRecipients ?? 0) > 0;
         const removeBtn = editing && !item.med && (
           <button
             type="button"
@@ -2980,6 +3129,16 @@ function DailySection({
                 <span className="subtle daily-item__who">{whoAndWhen(checkInfo.by, checkInfo.at)}</span>
               )}
             </span>
+            {canNudge && (
+              <button
+                type="button"
+                className="btn btn--link daily-item__nudge"
+                disabled={nudgingItemId === item.id || nudgedItems[item.id]}
+                onClick={() => void nudge(item)}
+              >
+                {nudgedItems[item.id] ? 'Nudged' : nudgingItemId === item.id ? 'Nudging…' : 'Nudge'}
+              </button>
+            )}
             {removeBtn}
           </div>
         );
@@ -3097,6 +3256,11 @@ function DocsSection({
   // a late-resolving analyze call must not hand off a second time.
   const handedOffRef = useRef(false);
   const atLimit = docs.length >= maxDocs;
+  const [showArchived, setShowArchived] = useState(false);
+  // Archived records stay stored (and still count toward the plan limit) but
+  // drop out of the main list into a collapsed section the owner can reopen.
+  const active = docs.filter((d) => !d.dismissed);
+  const archived = docs.filter((d) => d.dismissed);
 
   async function handleFilePicked() {
     const file = fileRef.current?.files?.[0];
@@ -3175,9 +3339,9 @@ function DocsSection({
           No records yet. Snap a photo of the vaccine cert from your vet — we'll
           read the names and dates for you.
         </div>
-      ) : (
+      ) : active.length > 0 ? (
         <ul className="doc-list">
-          {docs.map((doc) => (
+          {active.map((doc) => (
             <DocItem
               key={doc.id}
               petId={petId}
@@ -3190,6 +3354,37 @@ function DocsSection({
             />
           ))}
         </ul>
+      ) : (
+        <p className="subtle">Every record here is archived — see below.</p>
+      )}
+
+      {archived.length > 0 && (
+        <div className="doc-archived">
+          <button
+            type="button"
+            className="doc-archived__toggle btn btn--link"
+            aria-expanded={showArchived}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            {showArchived ? '▾' : '▸'} Archived · {archived.length}
+          </button>
+          {showArchived && (
+            <ul className="doc-list doc-list--archived">
+              {archived.map((doc) => (
+                <DocItem
+                  key={doc.id}
+                  petId={petId}
+                  doc={doc}
+                  onView={() => onViewDoc(doc)}
+                  onEdit={() => onEditDoc(doc)}
+                  onChanged={onChanged}
+                  onError={onError}
+                  onNotice={onNotice}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       {readOnly ? (
@@ -3316,8 +3511,23 @@ function DocItem({
     // On success the row unmounts after onChanged(), so no state reset needed.
   }
 
+  async function handleArchive() {
+    setBusy(true);
+    onError(null);
+    try {
+      await setDocArchived(petId, doc.id, !doc.dismissed);
+      await onChanged();
+      onNotice(doc.dismissed ? `${doc.label} restored` : `${doc.label} archived`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed');
+      setBusy(false);
+      setMenuOpen(false);
+    }
+    // On success the row re-renders under onChanged(), so no state reset needed.
+  }
+
   return (
-    <li className="doc-item">
+    <li className={`doc-item${doc.dismissed ? ' doc-item--archived' : ''}`}>
       <button className="doc-main" onClick={onView} aria-label={`View details for ${doc.label}`}>
         <span className={`doc-dot doc-dot--${status}`} aria-hidden="true" />
         <span className="doc-meta">
@@ -3356,6 +3566,15 @@ function DocItem({
             >
               Edit label / date
             </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                void handleArchive();
+              }}
+            >
+              {doc.dismissed ? 'Restore to records' : 'Archive (hide)'}
+            </button>
             {confirming ? (
               <button role="menuitem" className="doc-menu__danger" onClick={handleDelete}>
                 {busy ? 'Deleting…' : 'Confirm delete'}
@@ -3378,15 +3597,18 @@ function DocItem({
 
 function DocDetailScreen({
   doc,
+  species,
   onBack,
   onEdit,
 }: {
   doc: Doc;
+  species?: string;
   onBack: () => void;
   onEdit: () => void;
 }) {
   const status = statusOf(doc.expiry);
   const blurb = vaccineBlurb(doc.label);
+  const cadenceNote = vaccineCadenceNote(doc.label, species);
   const isImage = IMAGE_EXTS.includes(extOf(doc.filename));
 
   return (
@@ -3411,11 +3633,27 @@ function DocDetailScreen({
           </span>
         </div>
 
+        {doc.dismissed && (
+          <p className="doc-detail__archived-note subtle">
+            📥 Archived — hidden from the records list and status, and off your passport. Edit to
+            restore it.
+          </p>
+        )}
+
         {doc.given && (
           <p className="subtle doc-detail__given">💉 Given {formatDate(doc.given)}</p>
         )}
 
-        {blurb && <p className="doc-detail__blurb">{blurb}</p>}
+        {(blurb || cadenceNote) && (
+          <div className="doc-detail__about">
+            {blurb && <p className="doc-detail__blurb">{blurb}</p>}
+            {cadenceNote && <p className="doc-detail__cadence">🗓️ {cadenceNote}</p>}
+            <p className="doc-detail__disclaimer subtle">
+              Petshots isn't a vet. Vaccine schedules vary by pet, local laws, and your vet's
+              guidance — always confirm with your veterinarian.
+            </p>
+          </div>
+        )}
 
         <p className="doc-detail__reminder subtle">
           {doc.remindersEnabled !== false ? '🔔 Reminders on' : '🔕 Reminders off'} · Edit to change
@@ -3482,6 +3720,19 @@ function EditDocScreen({
     }
   }
 
+  async function handleArchive() {
+    setBusy(true);
+    onError(null);
+    try {
+      await setDocArchived(petId, doc.id, !doc.dismissed);
+      await onDone();
+      onNotice(doc.dismissed ? `${doc.label} restored` : `${doc.label} archived`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed');
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="screen-view screen-view--sheet">
       <nav className="screen-nav">
@@ -3531,6 +3782,16 @@ function EditDocScreen({
           <button className="btn" type="button" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
+        </div>
+        <div className="edit-doc__archive">
+          <button type="button" className="btn btn--link" onClick={() => void handleArchive()} disabled={busy}>
+            {doc.dismissed ? '↩ Restore to records' : '📥 Archive (hide from records)'}
+          </button>
+          <p className="subtle">
+            {doc.dismissed
+              ? 'Restoring brings it back into the records list and vaccine status.'
+              : "Hides it from the list and stops its reminders — it won't count toward overdue status. Still viewable under Archived, and off your shareable passport."}
+          </p>
         </div>
       </form>
     </div>
@@ -3675,13 +3936,42 @@ function ReviewExtractionScreen({
     Object.fromEntries(candidates.map((c) => [c.field, !c.current])),
   );
   const [busy, setBusy] = useState(false);
+  // Same-name existing records the user chose to KEEP (not replace). Keyed by
+  // normalized label; absent = the default, which is to replace. We only store
+  // explicit opt-outs so newly-typed matches default to "replace" with no effect.
+  const [keepOld, setKeepOld] = useState<Record<string, boolean>>({});
 
   const allRows = groups.flatMap(g => g.rows);
   const included = allRows.filter(r => r.include);
-  const overBudget = included.length > remaining;
   const missingLabel = included.some(r => !r.label.trim());
 
   const cadenceFor = (label: string) => VACCINE_CADENCES.find((c) => c.match.test(label));
+
+  // Index the pet's existing records by normalized label so re-adding a shot
+  // ("Bordetella", "DHPP", "Rabies"…) can offer to replace the old, usually
+  // expired, record instead of stacking a second copy of the same vaccine.
+  const normLabel = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const docsByLabel = new Map<string, Doc[]>();
+  for (const d of docs) {
+    const k = normLabel(d.label);
+    if (!k) continue;
+    const arr = docsByLabel.get(k);
+    if (arr) arr.push(d);
+    else docsByLabel.set(k, [d]);
+  }
+
+  // One entry per existing label the user is re-adding, carrying the old
+  // record(s) that would be swapped out.
+  const replaceMatches = [...new Set(included.map((r) => normLabel(r.label)).filter(Boolean))]
+    .filter((k) => docsByLabel.has(k))
+    .map((k) => ({ key: k, oldDocs: docsByLabel.get(k)! }));
+  const willReplace = (k: string) => keepOld[k] !== true;
+  const replacedDocs = replaceMatches.filter((m) => willReplace(m.key)).flatMap((m) => m.oldDocs);
+
+  // Replacing a record frees its slot, so the budget is the NET count after the
+  // swap — otherwise a full pet couldn't re-vaccinate without deleting first.
+  const effectiveRemaining = remaining + replacedDocs.length;
+  const overBudget = included.length > effectiveRemaining;
 
   const existingLabels = docs.map((d) => d.label.trim().toLowerCase());
   const isDupe = (label: string) => {
@@ -3713,16 +4003,18 @@ function ReviewExtractionScreen({
       if (applyProfile[c.field]) profile[c.field] = c.value;
     }
     const profileApplied = Object.keys(profile).length > 0;
+    const replaceDocIds = replacedDocs.map((d) => d.id);
 
     setBusy(true);
     onError(null);
     try {
       if (uploadId) {
-        await commitUpload(pet.id, uploadId, records, profileApplied ? profile : undefined);
+        await commitUpload(pet.id, uploadId, records, profileApplied ? profile : undefined, replaceDocIds);
       } else {
-        await createManualRecords(pet.id, records);
+        await createManualRecords(pet.id, records, replaceDocIds);
       }
-      const noun = records.length === 1 ? 'Record added' : `${records.length} records added`;
+      const verb = replaceDocIds.length > 0 ? 'updated' : 'added';
+      const noun = records.length === 1 ? `Record ${verb}` : `${records.length} records ${verb}`;
       await onDone(profileApplied ? `${noun} · profile updated` : noun, profileApplied);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Save failed');
@@ -3905,10 +4197,11 @@ function ReviewExtractionScreen({
             })
           )}
 
-          {allRows.length > remaining && (
+          {allRows.length > effectiveRemaining && (
             <p className="subtle" style={{ marginTop: '0.75rem' }}>
-              Your plan has {remaining} record slot{remaining === 1 ? '' : 's'} left for {pet.name}
-              {overBudget ? ` — skip ${included.length - remaining} to save.` : '.'}
+              Your plan has {effectiveRemaining} record slot{effectiveRemaining === 1 ? '' : 's'} left
+              for {pet.name}
+              {overBudget ? ` — skip ${included.length - effectiveRemaining} to save.` : '.'}
             </p>
           )}
 
@@ -3927,6 +4220,41 @@ function ReviewExtractionScreen({
             + Add another record from this document
           </button>
         </section>
+
+        {replaceMatches.length > 0 && (
+          <section className="card">
+            <h2 className="card__title">
+              Replace {pet.name}'s existing record{replaceMatches.length > 1 ? 's' : ''}?
+            </h2>
+            <p className="subtle">
+              {pet.name} already {replaceMatches.length === 1 ? 'has a record' : 'has records'} with
+              the same name. Replace to swap the old one out; uncheck to keep both.
+            </p>
+            {replaceMatches.map((m) => {
+              const old = m.oldDocs[0];
+              const st = statusOf(old.expiry);
+              const when = old.expiry
+                ? `${st === 'overdue' ? 'expired' : 'expires'} ${formatDate(old.expiry)}`
+                : 'no expiry';
+              return (
+                <label className="checkbox-label review-profile__item" key={m.key}>
+                  <input
+                    type="checkbox"
+                    checked={willReplace(m.key)}
+                    onChange={(e) =>
+                      setKeepOld((prev) => ({ ...prev, [m.key]: !e.target.checked }))
+                    }
+                  />
+                  <span>
+                    Replace <strong>{old.label}</strong>
+                    {m.oldDocs.length > 1 && ` (${m.oldDocs.length} records)`}
+                    <span className="subtle"> · old one {when}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </section>
+        )}
 
         {candidates.length > 0 && (
           <section className="card">
@@ -5041,10 +5369,6 @@ function ProfileEditScreen({
         onError('Pet photo must be a JPG, PNG, or WebP image.');
         return;
       }
-      if (photo.size > MAX_AVATAR_BYTES) {
-        onError(`That photo is ${formatSize(photo.size)} - the limit is 5 MB.`);
-        return;
-      }
     }
     setBusy(true);
     onError(null);
@@ -5082,7 +5406,7 @@ function ProfileEditScreen({
             </select>
           </label>
           <label>
-            New photo (optional · JPG, PNG · max 5 MB)
+            New photo (optional · JPG, PNG · large photos are compressed automatically)
             <input ref={photoRef} type="file" accept="image/jpeg,image/png,image/webp" />
           </label>
         </fieldset>
@@ -5548,6 +5872,11 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
   const [distanceMeters, setDistanceMeters] = useState(0);
   const [paceLabel, setPaceLabel] = useState('—');
   const [selectedPetIds, setSelectedPetIds] = useState<Set<string>>(new Set());
+  // Family-tagged walks: who else was on this walk, from the household's
+  // participant list (fetched fresh when the walk ends — solo accounts get
+  // an empty list back and the picker just doesn't render).
+  const [participants, setParticipants] = useState<string[]>([]);
+  const [selectedMemberEmails, setSelectedMemberEmails] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [holdingEnd, setHoldingEnd] = useState(false);
   const startedAtRef = useRef<number | null>(null);
@@ -5579,7 +5908,8 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
   // discardWalk() below is the normal, explicit way tracking stops.
   useEffect(() => {
     return () => {
-      if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+      if (isNative) void backgroundWalkEnd();
+      else if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     };
   }, []);
@@ -5589,6 +5919,20 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     const timer = setInterval(() => {
       if (segmentStartRef.current !== null) {
         setElapsedMs(activeMsRef.current + (Date.now() - segmentStartRef.current));
+      }
+      if (isNative) {
+        // Native tracking runs entirely in BackgroundWalkPlugin (it keeps
+        // recording via CLLocationManager even while the app is backgrounded
+        // or the screen is locked) — poll its accumulated distance every
+        // tick instead of listening for JS-side GPS fixes, which stop
+        // arriving the moment iOS suspends the webview. This is also what
+        // makes the displayed number catch up correctly the instant the app
+        // returns to the foreground, without a separate appStateChange
+        // listener — the interval just keeps ticking with GPS truth.
+        void backgroundWalkSnapshot().then((meters) => {
+          setDistanceMeters(meters);
+          paceSamplesRef.current.push({ t: Date.now(), dist: meters });
+        });
       }
       // Pace: average speed over the last PACE_WINDOW_MS, not since Start.
       // The old since-Start cumulative average never recovered from early
@@ -5624,6 +5968,21 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     if (phaseRef.current !== 'idle') return true; // a session already exists
     setPhase('acquiring');
     try {
+      if (isNative) {
+        const status = await requestAlwaysLocation();
+        if (status === 'denied') {
+          onError("Location access is needed to track a walk — check Settings and try again.");
+          setPhase('idle');
+          return false;
+        }
+        // Warm up the GPS now (mirrors the web path's early watchPosition
+        // below) so the first fix isn't cold when Start is pressed —
+        // handleStart() calls start() again, which resets the accumulated
+        // distance, so nothing from this warm-up period is ever counted.
+        await backgroundWalkStart();
+        setPhase('ready');
+        return true;
+      }
       let perm = await Geolocation.checkPermissions();
       if (perm.location !== 'granted') perm = await Geolocation.requestPermissions();
       if (perm.location !== 'granted') {
@@ -5670,6 +6029,10 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     lastCoordRef.current = null;
     resetPace();
     setPhase('active');
+    // Resets the plugin's accumulated distance to zero — anything counted
+    // during the 'ready' warm-up (beginWalk's backgroundWalkStart call)
+    // is discarded, matching lastCoordRef being cleared above for web.
+    if (isNative) void backgroundWalkStart();
   }
 
   function handlePause() {
@@ -5680,6 +6043,7 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     }
     setElapsedMs(activeMsRef.current);
     setPhase('paused');
+    if (isNative) void backgroundWalkPause();
   }
 
   function handleResume() {
@@ -5688,6 +6052,7 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     lastCoordRef.current = null; // don't count the distance jumped while paused
     resetPace(); // don't let the paused gap register as near-zero speed
     setPhase('active');
+    if (isNative) void backgroundWalkResume();
   }
 
   // End Walk is hold-to-confirm (1.5s) from the paused state — a stray tap
@@ -5699,7 +6064,7 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     holdTimerRef.current = window.setTimeout(() => {
       holdTimerRef.current = null;
       setHoldingEnd(false);
-      handleEndWalk();
+      void handleEndWalk();
     }, HOLD_TO_END_MS);
   }
   function cancelEndHold() {
@@ -5710,13 +6075,23 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     }
   }
 
-  function handleEndWalk() {
+  async function handleEndWalk() {
     hapticSuccess();
-    if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    if (isNative) {
+      // The plugin is the source of truth for distance on native (it kept
+      // recording through any backgrounding) — read its final number rather
+      // than trusting whatever the last poll happened to leave in state.
+      setDistanceMeters(await backgroundWalkEnd());
+    } else if (watchIdRef.current) {
+      void Geolocation.clearWatch({ id: watchIdRef.current });
+    }
     watchIdRef.current = null;
     endedAtRef.current = Date.now();
     setPhase('summary');
     if (pets.length === 1) setSelectedPetIds(new Set([pets[0].id]));
+    getHousehold()
+      .then((h) => setParticipants(h.participants))
+      .catch(() => setParticipants([]));
   }
 
   function togglePet(petId: string) {
@@ -5724,6 +6099,15 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
       const next = new Set(prev);
       if (next.has(petId)) next.delete(petId);
       else next.add(petId);
+      return next;
+    });
+  }
+
+  function toggleMember(email: string) {
+    setSelectedMemberEmails((prev) => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email);
+      else next.add(email);
       return next;
     });
   }
@@ -5742,6 +6126,8 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
     setElapsedMs(0);
     setDistanceMeters(0);
     setSelectedPetIds(new Set());
+    setParticipants([]);
+    setSelectedMemberEmails(new Set());
     setPhase('idle');
   }
 
@@ -5754,6 +6140,7 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
         new Date(startedAtRef.current).toISOString(),
         new Date(endedAtRef.current).toISOString(),
         distanceMeters,
+        [...selectedMemberEmails],
       );
       // One workout per walk regardless of how many pets came along. First
       // ever call shows the iOS Health permission sheet, after the toast.
@@ -5777,14 +6164,16 @@ function useWalkTracker(pets: Pet[], onSaved: (msg: string) => void, onError: (m
   // (ready, nothing recorded yet) and Discard walk (summary, recorded but
   // not saved) both call this.
   function discardWalk() {
-    if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
+    if (isNative) void backgroundWalkEnd();
+    else if (watchIdRef.current) void Geolocation.clearWatch({ id: watchIdRef.current });
     resetToIdle();
   }
 
   return {
     phase, elapsedMs, distanceMeters, paceLabel, selectedPetIds, saving, holdingEnd,
+    participants, selectedMemberEmails,
     beginWalk, handleStart, handlePause, handleResume,
-    startEndHold, cancelEndHold, handleSave, discardWalk, togglePet,
+    startEndHold, cancelEndHold, handleSave, discardWalk, togglePet, toggleMember,
   };
 }
 
@@ -5809,8 +6198,9 @@ function WalkScreen({
 }) {
   const {
     phase, elapsedMs, distanceMeters, paceLabel, selectedPetIds, saving, holdingEnd,
+    participants, selectedMemberEmails,
     handleStart, handlePause, handleResume, startEndHold, cancelEndHold,
-    handleSave, discardWalk, togglePet,
+    handleSave, discardWalk, togglePet, toggleMember,
   } = walk;
 
   function handleCancel() {
@@ -5914,6 +6304,27 @@ function WalkScreen({
               </button>
             ))}
           </div>
+          {participants.length > 0 && (
+            <>
+              <p className="photo-confirm__picker-title">Walked with a family member?</p>
+              <div className="photo-confirm__picker-grid">
+                {participants.map((email) => (
+                  <button
+                    key={email}
+                    type="button"
+                    className={`walk-screen__picker-member${selectedMemberEmails.has(email) ? ' walk-screen__picker-pet--selected' : ''}`}
+                    onClick={() => toggleMember(email)}
+                    disabled={saving}
+                  >
+                    <span>{email}</span>
+                    {selectedMemberEmails.has(email) && (
+                      <span className="walk-screen__picker-check" aria-hidden="true">✓</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <button
             type="button"
             className="btn btn--primary"
@@ -5970,10 +6381,12 @@ function WalkMiniBar({ walk, onExpand }: { walk: WalkTracker; onExpand: () => vo
 // behind the tap. "Walk history" lives on the Walk screen itself now
 // (2026-07-14) — it belongs where you actually go to walk your dog.
 function AchievementsAllScreen({
+  accessiblePetIds,
   onError,
   onLoaded,
   onOpenBadges,
 }: {
+  accessiblePetIds: string[];
   onError: (msg: string | null) => void;
   onLoaded: (pets: PetAchievements[]) => void;
   onOpenBadges: (petId: string, cardId: string) => void;
@@ -5987,9 +6400,11 @@ function AchievementsAllScreen({
       try {
         const res = await getAchievements();
         if (!cancelled) {
-          setPets(res.pets);
+          const allowed = new Set(accessiblePetIds);
+          const visiblePets = res.pets.filter((pet) => allowed.has(pet.petId));
+          setPets(visiblePets);
           setLeaderboard(res.leaderboard);
-          onLoaded(res.pets); // cached for the badge drill-down screen
+          onLoaded(visiblePets); // cached for the badge drill-down screen
         }
       } catch (err) {
         if (!cancelled) onError(err instanceof Error ? err.message : 'Could not load achievements');
@@ -6691,6 +7106,7 @@ const SETTINGS_TITLES: Record<SettingsSection, string> = {
 function SettingsScreen({
   section,
   email,
+  sub,
   limits,
   theme,
   onThemeChange,
@@ -6705,6 +7121,7 @@ function SettingsScreen({
 }: {
   section: SettingsSection;
   email: string;
+  sub: string;
   limits: Limits;
   theme: Theme;
   onThemeChange: (t: Theme) => void;
@@ -6733,16 +7150,30 @@ function SettingsScreen({
   useEffect(() => {
     void getAppVersion().then(setAppVersion);
   }, []);
-  // RevenueCat's monthly/annual packages (native only) — fetched once per
+  // StoreKit's monthly/annual products (native only) — fetched once per
   // Account screen visit, not app-wide, since offerings rarely change and
   // this screen is the only place they're shown.
-  const [offering, setOffering] = useState<{
-    monthly: PurchasesPackage | null;
-    annual: PurchasesPackage | null;
-  } | null>(null);
+  const [offering, setOffering] = useState<PaidOfferingPackages | null>(null);
+  const [offeringLoading, setOfferingLoading] = useState(false);
+  const [offeringError, setOfferingError] = useState<string | null>(null);
+
+  const loadNativeOffering = useCallback(async () => {
+    if (!isNative || !sub) return;
+    setOfferingLoading(true);
+    setOfferingError(null);
+    try {
+      setOffering(await getPaidOfferingPackages());
+    } catch (error) {
+      setOffering(null);
+      setOfferingError(error instanceof Error ? error.message : 'App Store plans could not be loaded.');
+    } finally {
+      setOfferingLoading(false);
+    }
+  }, [sub]);
+
   useEffect(() => {
-    if (isNative) void getPaidOfferingPackages().then(setOffering);
-  }, []);
+    if (section === 'account' && limits.plan === 'free') void loadNativeOffering();
+  }, [limits.plan, loadNativeOffering, section]);
 
   async function handleDeleteAccount(e: FormEvent) {
     e.preventDefault();
@@ -6765,52 +7196,47 @@ function SettingsScreen({
     }
   }
 
-  // Both hand the browser to a Stripe-hosted page; errors keep the user here.
-  async function handleCheckout(interval: 'month' | 'year') {
+  // StoreKit returns an Apple-signed transaction. Our API verifies that
+  // signature and appAccountToken before granting paid limits.
+  async function handleNativePurchase(product: StoreKitProduct) {
     setBusy(true);
     onError(null);
     try {
-      const { url } = await createCheckout(interval);
-      window.location.href = url;
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Could not start checkout');
-      setBusy(false);
-    }
-  }
-
-  async function handlePortal() {
-    setBusy(true);
-    onError(null);
-    try {
-      const { url } = await createBillingPortal();
-      window.location.href = url;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
+      const result = await purchaseStoreKitProduct(sub, product);
+      if (result.cancelled) return;
+      if (result.pending) {
+        onNotice('Purchase pending Apple approval. Paid access will activate after approval.');
+        return;
+      }
+      if (!result.signedTransaction) throw new Error('Apple did not return a signed transaction.');
+      const refreshed = await syncAppleTransactions([result.signedTransaction]);
+      onLimitsChange(refreshed);
+      if (refreshed.plan === 'paid') {
+        onNotice('Payment received — welcome to Petshots Paid! 🎉');
+        return;
+      }
+      if (refreshed.billingApple?.status === 'expired' && refreshed.billingApple.expiresAt) {
+        const planLabel =
+          refreshed.billingApple.productId === APPLE_IAP.ANNUAL_PRODUCT_ID ? 'yearly' : 'monthly';
+        onError(
+          `Apple processed the purchase, but this ${planLabel} sandbox subscription expired at ${formatDateTime(refreshed.billingApple.expiresAt)}. Try Restore Purchases or buy again while testing.`,
+        );
+        return;
+      }
       onError(
-        msg.includes('no billing account')
-          ? "Your plan isn't managed through Stripe — contact support to change it."
-          : msg || 'Could not open billing',
+        'Apple completed the purchase, but Petshots does not see an active subscription yet. Try Restore Purchases.',
       );
-      setBusy(false);
-    }
-  }
-
-  // Native purchase flow (RevenueCat / Apple IAP) — no redirect, so the sync
-  // call updates plan.json (and this screen's limits) immediately rather
-  // than waiting on the webhook, same end state as the Stripe success
-  // redirect above but synchronous instead of "wait 2.5s and hope."
-  async function handleNativePurchase(pkg: PurchasesPackage) {
-    setBusy(true);
-    onError(null);
-    try {
-      await purchaseRevenueCatPackage(pkg);
-      onLimitsChange(await syncRevenueCatEntitlement());
-      onNotice('Payment received — welcome to Petshots Paid! 🎉');
     } catch (err) {
-      // A cancelled purchase sheet also rejects — that's not an error, it's
-      // the App Store equivalent of Stripe's cancel_url redirect.
-      if ((err as { userCancelled?: boolean } | undefined)?.userCancelled) return;
-      onError(err instanceof Error ? err.message : 'Could not complete purchase');
+      const message = err instanceof Error ? err.message : 'Could not complete purchase';
+      if (message.includes('different Petshots account')) {
+        onError(message);
+      } else if (message.includes('Apple could not verify this purchase')) {
+        onError(
+          'Apple completed the purchase, but Petshots could not verify it yet. Try Restore Purchases while signed into this same Petshots account.',
+        );
+      } else {
+        onError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -6820,8 +7246,8 @@ function SettingsScreen({
     setBusy(true);
     onError(null);
     try {
-      await restoreRevenueCatPurchases();
-      const refreshed = await syncRevenueCatEntitlement();
+      const signedTransactions = await restoreStoreKitPurchases();
+      const refreshed = await syncAppleTransactions(signedTransactions);
       onLimitsChange(refreshed);
       onNotice(
         refreshed.plan === 'paid'
@@ -6830,6 +7256,20 @@ function SettingsScreen({
       );
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Could not restore purchases');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleTesterPlan(plan: 'free' | 'paid') {
+    setBusy(true);
+    onError(null);
+    try {
+      const refreshed = await setBillingTestPlan(plan);
+      onLimitsChange(refreshed);
+      onNotice(`${plan === 'paid' ? 'Paid' : 'Free'} tester mode is active.`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not change tester mode');
     } finally {
       setBusy(false);
     }
@@ -6877,6 +7317,15 @@ function SettingsScreen({
     persist({ ...settings, reminderDays: days });
   }
 
+  const billingSources = limits.billingSources ?? (limits.billingSource ? [limits.billingSource] : []);
+  const appleBilling = limits.billingApple;
+  const applePlanLabel =
+    appleBilling?.productId === APPLE_IAP.ANNUAL_PRODUCT_ID
+      ? 'Yearly'
+      : appleBilling?.productId === APPLE_IAP.MONTHLY_PRODUCT_ID
+        ? 'Monthly'
+        : 'Subscription';
+
   return (
     <div className="screen-view screen-view--root">
       <nav className="screen-nav">
@@ -6890,6 +7339,11 @@ function SettingsScreen({
           ‹ Back
         </button>
         <span className="screen-nav__title">{SETTINGS_TITLES[section]}</span>
+        {section === 'notifications' && saveStatus !== 'idle' && (
+          <span className="settings-save-status" role="status" aria-live="polite">
+            {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : ''}
+          </span>
+        )}
       </nav>
       <div className="screen-view__body">
         {loading ? (
@@ -6899,8 +7353,8 @@ function SettingsScreen({
 
             {section === 'account' && (
             <>
-            <fieldset className="settings-group">
-              <legend>Account</legend>
+            <section className="settings-group" aria-labelledby="profile-settings-title">
+              <h2 className="settings-card__title" id="profile-settings-title">Profile</h2>
               <div className="settings-row">
                 <span className="settings-row__label">
                   Signed in as
@@ -6920,10 +7374,10 @@ function SettingsScreen({
               >
                 <span>Log out</span>
               </button>
-            </fieldset>
+            </section>
 
-            <fieldset className="settings-group">
-              <legend>Plan</legend>
+            <section className="settings-group" aria-labelledby="membership-settings-title">
+              <h2 className="settings-card__title" id="membership-settings-title">Membership</h2>
               <div className="settings-row">
                 <span className="settings-row__label">
                   {limits.plan === 'paid' ? 'Petshots Paid' : 'Free plan'}
@@ -6935,46 +7389,111 @@ function SettingsScreen({
                 </span>
               </div>
               <div className="plan-actions">
+                {email.toLowerCase() === 'mark.gingrass@gmail.com' && (
+                  <div className="tester-plan" aria-label="Tester plan preview">
+                    <span className="tester-plan__label">
+                      Tester mode
+                      <span>Uses real server limits</span>
+                    </span>
+                    <div className="tester-plan__control" role="group" aria-label="Preview plan">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        aria-pressed={limits.plan === 'free'}
+                        className={limits.plan === 'free' ? 'tester-plan__option tester-plan__option--active' : 'tester-plan__option'}
+                        onClick={() => void handleTesterPlan('free')}
+                      >
+                        Free
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        aria-pressed={limits.plan === 'paid'}
+                        className={limits.plan === 'paid' ? 'tester-plan__option tester-plan__option--active' : 'tester-plan__option'}
+                        onClick={() => void handleTesterPlan('paid')}
+                      >
+                        Paid
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {isNative ? (
                   limits.plan === 'paid' ? (
-                    limits.billingSource === 'revenuecat' ? (
-                      // App Store 3.1.1 concerns purchase steering, not
-                      // managing an existing subscription — a deep link to
-                      // Apple's own subscription-management screen is fine.
-                      <a
-                        className="btn"
-                        href="itms-apps://apps.apple.com/account/subscriptions"
-                      >
-                        Manage subscription
-                      </a>
-                    ) : (
-                      // A web (Stripe) subscriber who later installed the
-                      // app — nothing to purchase or manage here.
-                      <p className="subtle plan-fine-print">
-                        Your subscription is managed on the web at petshots.app.
-                      </p>
-                    )
+                    <>
+                      {billingSources.includes('apple') && (
+                        // App Store 3.1.1 concerns purchase steering, not
+                        // managing an existing subscription — a deep link to
+                        // Apple's own subscription-management screen is fine.
+                        <a
+                          className="btn"
+                          href="itms-apps://apps.apple.com/account/subscriptions"
+                        >
+                          Manage App Store subscription
+                        </a>
+                      )}
+                      {billingSources.includes('manual') && billingSources.length === 1 && (
+                        <p className="subtle plan-fine-print">Paid access is active for this account.</p>
+                      )}
+                      {appleBilling && (
+                        <p className="subtle plan-fine-print">
+                          {applePlanLabel}
+                          {appleBilling.status ? ` · ${appleBilling.status}` : ''}
+                          {appleBilling.expiresAt ? ` · Expires ${formatDateTime(appleBilling.expiresAt)}` : ''}
+                          {appleBilling.environment ? ` · ${appleBilling.environment}` : ''}
+                        </p>
+                      )}
+                    </>
                   ) : (
                     <>
-                      {offering?.monthly && (
-                        <button
-                          type="button"
-                          className="btn btn--primary"
-                          disabled={busy}
-                          onClick={() => void handleNativePurchase(offering.monthly!)}
-                        >
-                          Upgrade · {offering.monthly.product.priceString}/mo
-                        </button>
+                      {offeringLoading && <p className="subtle plan-fine-print">Loading App Store plans…</p>}
+                      {offeringError && (
+                        <div className="plan-error" role="alert">
+                          <span className="plan-error__icon" aria-hidden="true">!</span>
+                          <div className="plan-error__copy">
+                            <strong>Purchases unavailable</strong>
+                            <p>{offeringError}</p>
+                          </div>
+                          <button
+                            type="button"
+                            className="plan-error__retry"
+                            disabled={busy || offeringLoading}
+                            onClick={() => void loadNativeOffering()}
+                          >
+                            Retry
+                          </button>
+                        </div>
                       )}
-                      {offering?.annual && (
-                        <button
-                          type="button"
-                          className="btn btn--primary"
-                          disabled={busy}
-                          onClick={() => void handleNativePurchase(offering.annual!)}
-                        >
-                          {offering.annual.product.priceString}/yr
-                        </button>
+                      {(offering?.monthly || offering?.annual) && (
+                        <div className="purchase-options">
+                          {offering.monthly && (
+                            <button
+                              type="button"
+                              className="purchase-option"
+                              disabled={busy}
+                              onClick={() => void handleNativePurchase(offering.monthly!)}
+                            >
+                              <span className="purchase-option__name">Monthly</span>
+                              <strong>{offering.monthly.displayPrice}</strong>
+                              <span className="purchase-option__period">per month</span>
+                            </button>
+                          )}
+                          {offering.annual && (
+                            <button
+                              type="button"
+                              className="purchase-option purchase-option--featured"
+                              disabled={busy}
+                              onClick={() => void handleNativePurchase(offering.annual!)}
+                            >
+                              <span className="purchase-option__badge">Best value</span>
+                              <span className="purchase-option__name">Yearly</span>
+                              <strong>{offering.annual.displayPrice}</strong>
+                              <span className="purchase-option__period">per year</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {offering?.warning && (
+                        <p className="subtle plan-fine-print">{offering.warning}</p>
                       )}
                       <p className="subtle plan-fine-print">
                         Paid plan: {PAID_PLAN_LIMITS.maxPets} pets, up to {PAID_PLAN_LIMITS.maxDocs} records per pet,{' '}
@@ -6988,46 +7507,39 @@ function SettingsScreen({
                       >
                         Restore purchases
                       </button>
+                      {appleBilling && (
+                        <p className="subtle plan-fine-print">
+                          Last App Store sync
+                          {appleBilling.updatedAt ? ` · ${formatDateTime(appleBilling.updatedAt)}` : ''}
+                          {appleBilling.status ? ` · ${appleBilling.status}` : ''}
+                          {appleBilling.expiresAt ? ` · Expires ${formatDateTime(appleBilling.expiresAt)}` : ''}
+                          {appleBilling.environment ? ` · ${appleBilling.environment}` : ''}
+                        </p>
+                      )}
                     </>
                   )
                 ) : limits.plan === 'free' ? (
                   <>
-                    <button
-                      type="button"
-                      className="btn btn--primary"
-                      disabled={busy}
-                      onClick={() => void handleCheckout('month')}
-                    >
-                      Upgrade · $5/mo
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--primary"
-                      disabled={busy}
-                      onClick={() => void handleCheckout('year')}
-                    >
-                      $49/yr · 2 months free
-                    </button>
+                    <p className="subtle plan-fine-print">
+                      Upgrades are available only in the Petshots iPhone app through the App Store.
+                    </p>
                     <p className="subtle plan-fine-print">
                       Paid plan: {PAID_PLAN_LIMITS.maxPets} pets, up to {PAID_PLAN_LIMITS.maxDocs} records per pet,{' '}
                       {PAID_PLAN_LIMITS.maxMeds} medications per pet.
                     </p>
                   </>
+                ) : billingSources.includes('apple') ? (
+                  <p className="subtle plan-fine-print">
+                    Your subscription is managed through the App Store.
+                  </p>
                 ) : (
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={busy}
-                    onClick={() => void handlePortal()}
-                  >
-                    Manage billing
-                  </button>
+                  <p className="subtle plan-fine-print">Paid access is active for this account.</p>
                 )}
               </div>
-            </fieldset>
+            </section>
 
-            <fieldset className="settings-group">
-              <legend>Appearance</legend>
+            <section className="settings-group" aria-labelledby="appearance-settings-title">
+              <h2 className="settings-card__title" id="appearance-settings-title">Appearance</h2>
               <div className="settings-row">
                 <span className="settings-row__label">Theme</span>
                 <div className="theme-toggle">
@@ -7047,15 +7559,15 @@ function SettingsScreen({
                   </button>
                 </div>
               </div>
-            </fieldset>
+            </section>
             </>
             )}
 
             {section === 'family' && <FamilySection onError={onError} onUpgrade={onUpgrade} />}
 
             {section === 'notifications' && (
-            <fieldset className="settings-group">
-              <legend>Email</legend>
+            <section className="settings-group" aria-labelledby="email-settings-title">
+              <h2 className="settings-card__title" id="email-settings-title">Email preferences</h2>
               <div className="settings-row">
                 <label className="settings-row__label" htmlFor="optout-toggle">
                   Pause all email
@@ -7169,20 +7681,19 @@ function SettingsScreen({
 
               <PushRow onError={onError} />
               </div>
-            </fieldset>
+            </section>
             )}
 
             {section === 'account' && (
-            <fieldset className="settings-group settings-group--danger">
-              <legend>Danger zone</legend>
+            <section className="settings-group settings-group--danger" aria-labelledby="delete-account-title">
+              <h2 className="settings-card__title settings-card__title--danger" id="delete-account-title">
+                Delete account
+              </h2>
               {!deleteOpen ? (
                 <div className="settings-row">
-                  <span className="settings-row__label">
-                    Delete account
-                    <span className="subtle settings-row__sub">
-                      Permanently removes your pets, records, and account
-                    </span>
-                  </span>
+                  <p className="subtle settings-card__description">
+                    Permanently removes your pets, records, and account.
+                  </p>
                   <button
                     type="button"
                     className="btn btn--danger"
@@ -7195,7 +7706,8 @@ function SettingsScreen({
                 <form className="danger-confirm" onSubmit={handleDeleteAccount}>
                   <p className="danger-confirm__warning">
                     This permanently deletes your account: every pet, all uploaded records and
-                    medications, and any shared passport links. An active subscription is cancelled.
+                    medications, and any shared passport links. App Store subscriptions must be cancelled
+                    separately with Apple; deleting Petshots data does not stop Apple's billing.
                     <strong> There is no undo.</strong>
                   </p>
                   <label>
@@ -7229,7 +7741,7 @@ function SettingsScreen({
                   </div>
                 </form>
               )}
-            </fieldset>
+            </section>
             )}
 
             {section === 'account' && appVersion && (
@@ -7238,14 +7750,6 @@ function SettingsScreen({
               </p>
             )}
 
-            <div className="actions">
-              <button className="btn btn--primary" type="button" onClick={onDone} disabled={busy}>
-                Done
-              </button>
-              <span className="subtle settings-save-status" role="status">
-                {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : ''}
-              </span>
-            </div>
           </div>
         )}
       </div>
@@ -7458,8 +7962,8 @@ function FamilySection({
 
   if (household.role === 'member') {
     return (
-      <fieldset className="settings-group">
-        <legend>Family</legend>
+      <section className="settings-group" aria-labelledby="family-settings-title">
+        <h2 className="settings-card__title" id="family-settings-title">Your family</h2>
         <div className="settings-row">
           <span className="settings-row__label">
             You share <strong>{household.ownerEmail}</strong>'s family pets
@@ -7482,14 +7986,14 @@ function FamilySection({
             Leave family…
           </button>
         )}
-      </fieldset>
+      </section>
     );
   }
 
   const seatsUsed = household.members.length + household.invites.length;
   return (
-    <fieldset className="settings-group">
-      <legend>Family</legend>
+    <section className="settings-group" aria-labelledby="family-settings-title">
+      <h2 className="settings-card__title" id="family-settings-title">Your family</h2>
       <p className="subtle">
         Family members see and update your pets' records, meds, and reminders.
         They can't delete pets or manage share links.
@@ -7600,7 +8104,7 @@ function FamilySection({
           )}
         </p>
       )}
-    </fieldset>
+    </section>
   );
 }
 
@@ -7688,4 +8192,3 @@ function ChangePasswordScreen({
     </div>
   );
 }
-

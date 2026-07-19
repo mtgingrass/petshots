@@ -14,18 +14,25 @@ export function escapeHtml(s: string): string {
 export function emailHtml(title: string, bodyHtml: string, footerHtml: string): string {
   return `<!doctype html>
 <html>
-  <body style="margin:0;padding:0;background:#f5f4fb;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f4fb;padding:24px 0;">
+  <body style="margin:0;padding:0;background:#f6efe4;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f1d1a;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${escapeHtml(title)} · Open Petshots to review the latest update for your pets.</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:
+      radial-gradient(circle at top, #f6d7ac 0%, #f6efe4 34%, #f3eee8 100%);
+      padding:28px 0;">
       <tr><td align="center">
-        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:480px;width:100%;">
-          <tr><td style="background:#6c5ce7;padding:20px 28px;">
-            <span style="font-size:20px;font-weight:700;color:#ffffff;">🐾 Petshots</span>
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#fffdf9;border:1px solid #eadfcd;border-radius:22px;overflow:hidden;max-width:560px;width:100%;box-shadow:0 18px 40px rgba(71,50,20,0.10);">
+          <tr><td style="padding:26px 30px 22px;background:linear-gradient(135deg,#1f3b36 0%,#31584c 52%,#d58f49 100%);">
+            <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,248,238,0.72);margin:0 0 10px;">Pet care, kept close</div>
+            <div style="font-size:26px;font-weight:800;color:#fff8ee;line-height:1.1;">🐾 Petshots</div>
+            <div style="margin:10px 0 0;font-size:14px;line-height:1.5;color:rgba(255,248,238,0.88);max-width:360px;">
+              Records, reminders, and check-ins that keep your household in sync.
+            </div>
           </td></tr>
-          <tr><td style="padding:28px;color:#1a1a2e;font-size:15px;line-height:1.55;">
-            <h1 style="margin:0 0 16px;font-size:18px;color:#1a1a2e;">${escapeHtml(title)}</h1>
+          <tr><td style="padding:30px;color:#2b2823;font-size:15px;line-height:1.65;">
+            <h1 style="margin:0 0 18px;font-size:24px;line-height:1.2;color:#1f1d1a;">${escapeHtml(title)}</h1>
             ${bodyHtml}
           </td></tr>
-          <tr><td style="padding:16px 28px 28px;color:#8a8a9a;font-size:12px;line-height:1.5;border-top:1px solid #eeeef5;">
+          <tr><td style="padding:18px 30px 30px;color:#726a5f;font-size:12px;line-height:1.6;border-top:1px solid #efe6d8;background:#fcf8f1;">
             ${footerHtml}
           </td></tr>
         </table>
@@ -39,20 +46,24 @@ export function emailHtml(title: string, bodyHtml: string, footerHtml: string): 
 // rows, used by the weekly digest, monthly report, and on-demand Trends
 // report emails — all three render "one card per pet" content.
 export function petCardHtml(petName: string, rowsHtml: string): string {
-  return `<div style="margin:0 0 20px;padding:16px 18px;background:#f9f9fc;border-radius:10px;">
-    <div style="font-weight:700;font-size:15px;color:#1a1a2e;margin:0 0 8px;">${escapeHtml(petName)}</div>
+  return `<div style="margin:0 0 18px;padding:18px 18px 16px;background:#fffaf2;border:1px solid #efe3d2;border-radius:16px;">
+    <div style="font-weight:800;font-size:16px;color:#1f1d1a;margin:0 0 10px;">${escapeHtml(petName)}</div>
     ${rowsHtml}
   </div>`;
 }
 
 export function petRowHtml(text: string): string {
-  return `<div style="margin:0 0 4px;color:#3a3a4e;">${text}</div>`;
+  return `<div style="margin:0 0 6px;color:#4b463e;">${text}</div>`;
 }
 
 export function insightRowHtml(text: string): string {
-  return `<div style="margin:8px 0 0;padding:8px 10px;background:#fff8e8;border-radius:6px;font-size:13px;color:#7a5a1e;">${text}</div>`;
+  return `<div style="margin:10px 0 0;padding:10px 12px;background:#fff3dc;border:1px solid #f1d7a6;border-radius:10px;font-size:13px;line-height:1.5;color:#76531d;">${text}</div>`;
 }
 
 export function ctaButtonHtml(url: string, label: string): string {
-  return `<div style="margin:20px 0 0;"><a href="${url}" style="display:inline-block;background:#6c5ce7;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:8px;font-weight:600;font-size:14px;">${escapeHtml(label)}</a></div>`;
+  return `<div style="margin:22px 0 0;"><a href="${url}" style="display:inline-block;background:#1f3b36;color:#fffaf2;text-decoration:none;padding:12px 22px;border-radius:999px;font-weight:700;font-size:14px;">${escapeHtml(label)}</a></div>`;
+}
+
+export function infoCardHtml(html: string): string {
+  return `<div style="margin:0 0 18px;padding:16px 18px;background:#fffaf2;border:1px solid #efe3d2;border-radius:16px;">${html}</div>`;
 }

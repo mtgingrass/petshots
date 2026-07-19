@@ -45,9 +45,10 @@ export function Support() {
             </li>
             <li>
               <strong>How do I cancel my subscription or delete my account?</strong>{' '}
-              Manage billing from Settings on the web at petshots.app. Delete your account
-              under Settings → Danger zone — it's immediate and also cancels any
-              subscription.
+              Subscriptions are managed from Settings → Account in the iOS app, which opens
+              Apple's subscription settings. Delete your account under Settings → Danger
+              zone. An Apple subscription must be cancelled separately in your App Store
+              settings because deleting Petshots data does not stop Apple's billing.
             </li>
           </ul>
         </section>

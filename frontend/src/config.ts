@@ -22,9 +22,4 @@ export const config = {
   // Web Push VAPID public key (public by definition). Optional: without it
   // the push-notifications toggle simply doesn't render.
   vapidPublicKey: (import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined) ?? '',
-  // RevenueCat public iOS SDK key (public by definition, same category as the
-  // Turnstile site key above). Only used on native; optional so the web
-  // build and any native build made before RevenueCat is set up still work —
-  // native.ts no-ops gracefully without it.
-  revenueCatPublicApiKey: (import.meta.env.VITE_REVENUECAT_PUBLIC_API_KEY as string | undefined) ?? '',
 };

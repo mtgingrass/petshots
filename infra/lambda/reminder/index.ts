@@ -29,7 +29,7 @@ import {
   buildStatsForModel,
   addDays as storyAddDays,
 } from '../shared/summaryStory';
-import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml } from '../shared/emailHtml';
+import { escapeHtml, emailHtml, petCardHtml, petRowHtml, insightRowHtml, ctaButtonHtml, infoCardHtml } from '../shared/emailHtml';
 // Web push (VAPID) + native iOS push (APNs) — shared with the api Lambda's
 // real-time pushes (e.g. "new photo added"). See that file's header.
 import { listPushSubs as listPushSubsShared, sendPushes as sendPushesShared } from '../shared/push';
@@ -60,6 +60,7 @@ interface DocMeta {
   label: string;
   expiry?: string;
   remindersEnabled?: boolean;
+  dismissed?: boolean; // "archived" — hidden from view and never reminded
 }
 
 interface Med {
@@ -136,6 +137,7 @@ function decodeMeta(seg: string | undefined): DocMeta {
         label: String(m.label ?? ''),
         expiry: m.expiry ? String(m.expiry) : undefined,
         remindersEnabled: m.remindersEnabled !== false,
+        dismissed: m.dismissed === true ? true : undefined,
       };
     }
   } catch { /* legacy plain-label key */ }
@@ -288,10 +290,10 @@ function urgencySectionHtml(title: string, docs: DueDoc[], meds: DueMed[], color
     ...meds.map((m) => ({ days: m.days, text: medLineHtml(m) })),
     ...docs.map((d) => ({ days: d.days, text: docLineHtml(d) })),
   ].sort((a, b) => a.days - b.days);
-  return `<div style="margin:0 0 18px;">
-    <div style="font-weight:600;color:${color};margin:0 0 6px;">${escapeHtml(title)}</div>
-    <ul style="margin:0;padding-left:18px;">${items.map((i) => `<li style="margin:0 0 4px;">${i.text}</li>`).join('')}</ul>
-  </div>`;
+  return infoCardHtml(`
+    <div style="font-weight:800;color:${color};margin:0 0 10px;font-size:14px;">${escapeHtml(title)}</div>
+    <ul style="margin:0;padding-left:18px;color:#4b463e;">${items.map((i) => `<li style="margin:0 0 7px;">${i.text}</li>`).join('')}</ul>
+  `);
 }
 
 function composeEmail(
@@ -373,6 +375,7 @@ function composeEmail(
     ...(showUpgrade ? [``, reminderCopy.upgradeLine(LIMITS_FREE.MAX_PETS, `${APP_URL}/settings`)] : []),
     ``,
     reminderCopy.signoff,
+    reminderCopy.signoffName,
     ``,
     reminderCopy.manageReminders,
     reminderCopy.unsubscribeLine(unsubUrl),
@@ -401,11 +404,11 @@ function composeEmailHtml(
 
   const sections: string[] = [];
   if (birthdays.length > 0) {
-    sections.push(
-      `<div style="margin:0 0 18px;">${birthdays
+    sections.push(infoCardHtml(
+      `${birthdays
         .map((b) => `<div>${reminderCopy.birthdayLine(escapeHtml(b.petName), b.age)}</div>`)
-        .join('')}</div>`,
-    );
+        .join('')}`,
+    ));
   }
   const overdueSection = urgencySectionHtml(reminderCopy.sectionTitles.overdue, overdueDocs, overdueMeds, '#d64545');
   if (overdueSection) sections.push(overdueSection);
@@ -414,15 +417,16 @@ function composeEmailHtml(
   const upcomingSection = urgencySectionHtml(reminderCopy.sectionTitles.upcoming, upcomingDocs, upcomingMeds, '#555577');
   if (upcomingSection) sections.push(upcomingSection);
 
-  const ctaHtml = `<div style="margin:20px 0 0;"><a href="${APP_URL}/dashboard" style="display:inline-block;background:#6c5ce7;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:8px;font-weight:600;font-size:14px;">${reminderCopy.ctaButtonLabel}</a></div>`;
+  const introHtml = `<p style="margin:0 0 18px;color:#4b463e;">${escapeHtml(total === 0 ? reminderCopy.introCelebrationOnly : reminderCopy.introWithItems)}</p>`;
+  const ctaHtml = ctaButtonHtml(`${APP_URL}/dashboard`, reminderCopy.ctaButtonLabel);
   const upgradeHtml = showUpgrade
-    ? `<div style="margin:16px 0 0;padding:14px 16px;background:#f5f4fb;border-radius:8px;font-size:13px;color:#4a4a5e;">${reminderCopy.upgradeLineHtml(LIMITS_FREE.MAX_PETS, `${APP_URL}/settings`)}</div>`
+    ? infoCardHtml(`<div style="font-size:13px;line-height:1.6;color:#5f584f;">${reminderCopy.upgradeLineHtml(LIMITS_FREE.MAX_PETS, `${APP_URL}/settings`)}</div>`)
     : '';
 
   const title = total === 0 && birthdays.length > 0 ? reminderCopy.emailTitleCelebration : reminderCopy.emailTitleReminder;
-  const footerHtml = `${reminderCopy.manageReminders}<br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+  const footerHtml = `${escapeHtml(reminderCopy.manageReminders)}<br/><a href="${APP_URL}" style="color:#31584c;">petshots.app</a> · <a href="${APP_URL}/dashboard" style="color:#31584c;">Open dashboard</a> · <a href="${APP_URL}/support" style="color:#31584c;">Support</a><br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
 
-  return emailHtml(title, sections.join('') + ctaHtml + upgradeHtml, footerHtml);
+  return emailHtml(title, introHtml + sections.join('') + ctaHtml + upgradeHtml, footerHtml);
 }
 
 // ---- weekly digest ----
@@ -480,19 +484,24 @@ function itemActiveOn(
 
 async function runDailyNudge(which: 'breakfast' | 'evening', dryRun: boolean): Promise<unknown> {
   const todayKey = new Date().toISOString().slice(0, 10);
-  const wouldPush: Array<{ email: string; body: string }> = [];
+  const wouldPush: Array<{ sub: string; body: string }> = [];
 
   const topList = await s3.send(
     new ListObjectsV2Command({ Bucket: BUCKET, Prefix: 'users/', Delimiter: '/' }),
   );
   const userPrefixes = (topList.CommonPrefixes ?? []).map((p) => p.Prefix!);
-  console.log(`Daily nudge (${which})${dryRun ? ' (dry run)' : ''}: ${userPrefixes.length} user(s) found`);
+  const ownerPrefixes = (
+    await Promise.all(
+      userPrefixes.map(async (userPrefix) => {
+        const membership = await readJson<{ ownerSub?: string }>(`${userPrefix}memberOf.json`);
+        return membership?.ownerSub ? null : userPrefix;
+      }),
+    )
+  ).filter((p): p is string => !!p);
+  console.log(`Daily nudge (${which})${dryRun ? ' (dry run)' : ''}: ${ownerPrefixes.length} pool(s) found`);
 
-  for (const userPrefix of userPrefixes) {
+  for (const userPrefix of ownerPrefixes) {
     try {
-      const settings = await readJson<UserSettings>(`${userPrefix}settings.json`);
-      if (!settings?.email || settings.remindersEnabled !== true) continue;
-
       const petsList = await s3.send(
         new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${userPrefix}pets/` }),
       );
@@ -524,14 +533,23 @@ async function runDailyNudge(which: 'breakfast' | 'evening', dryRun: boolean): P
 
       const title = nudgeCopy.title(which);
       const body = nudgeCopy.body(missed);
+      const ownerSub = userPrefix.slice('users/'.length, -1);
+      const household = await readJson<{ members?: { sub: string }[] }>(`${userPrefix}household.json`);
+      const recipientSubs = [ownerSub, ...((household?.members ?? []).map((m) => m.sub))];
 
-      if (dryRun) {
-        wouldPush.push({ email: settings.email, body });
-        console.log(`[dry run] would nudge ${settings.email}: ${body}`);
-        continue;
+      for (const recipientSub of recipientSubs) {
+        const recipientPrefix = `users/${recipientSub}/`;
+        const settings = await readJson<UserSettings>(`${recipientPrefix}settings.json`);
+        if (settings?.remindersEnabled !== true) continue;
+
+        if (dryRun) {
+          wouldPush.push({ sub: recipientSub, body });
+          console.log(`[dry run] would nudge ${recipientSub}: ${body}`);
+          continue;
+        }
+        const pushed = await sendPushes(recipientPrefix, title, body);
+        console.log(`Sent ${which} nudge to ${recipientSub} (+${pushed} push): ${body}`);
       }
-      const pushed = await sendPushes(userPrefix, title, body);
-      console.log(`Sent ${which} nudge to ${settings.email} (+${pushed} push): ${body}`);
     } catch (e) {
       console.error(`Error processing nudge for ${userPrefix}:`, e);
       // Continue to next user rather than failing the whole run.
@@ -664,13 +682,16 @@ async function runMonthlyReport(dryRun: boolean): Promise<unknown> {
         monthlyReportCopy.cta(`${APP_URL}/dashboard`),
         ``,
         monthlyReportCopy.signoff,
+        monthlyReportCopy.signoffName,
         ``,
         monthlyReportCopy.unsubscribeLine(unsubUrl),
       ].join('\n');
-      const footerHtml = `<a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+      const footerHtml = `<a href="${APP_URL}" style="color:#31584c;">petshots.app</a> · <a href="${APP_URL}/dashboard" style="color:#31584c;">Open dashboard</a><br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
       const html = emailHtml(
         monthlyReportCopy.intro,
-        sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'See the full breakdown'),
+        `<p style="margin:0 0 18px;color:#4b463e;">${escapeHtml(monthlyReportCopy.intro)}</p>` +
+          sectionsHtml.join('') +
+          ctaButtonHtml(`${APP_URL}/dashboard`, monthlyReportCopy.ctaButtonLabel),
         footerHtml,
       );
 
@@ -1231,6 +1252,7 @@ export const handler = async (event?: {
           for (const it of (docsList.Contents ?? []).filter((x) => !x.Key!.includes('/_archived/'))) {
             const parts = it.Key!.split('/');
             const meta = decodeMeta(parts[6]);
+            if (meta.dismissed === true) continue; // archived — owner opted out
             if (!meta.expiry) continue;
             if (meta.remindersEnabled === false) continue;
             const days = daysUntil(meta.expiry);
@@ -1331,14 +1353,17 @@ export const handler = async (event?: {
             digestCopy.cta(`${APP_URL}/dashboard`),
             ``,
             digestCopy.signoff,
+            digestCopy.signoffName,
             ``,
             digestCopy.toggleOff,
             digestCopy.unsubscribeLine(unsubUrl),
           ].join('\n');
-          const footerHtml = `${digestCopy.toggleOff}<br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
+          const footerHtml = `${escapeHtml(digestCopy.toggleOff)}<br/><a href="${APP_URL}" style="color:#31584c;">petshots.app</a> · <a href="${APP_URL}/dashboard" style="color:#31584c;">Open dashboard</a><br/><a href="${unsubUrl}" style="color:#8a8a9a;">Unsubscribe from all Petshots email</a>`;
           const html = emailHtml(
             digestCopy.intro,
-            sectionsHtml.join('') + ctaButtonHtml(`${APP_URL}/dashboard`, 'Open Petshots'),
+            `<p style="margin:0 0 18px;color:#4b463e;">${escapeHtml(digestCopy.intro)}</p>` +
+              sectionsHtml.join('') +
+              ctaButtonHtml(`${APP_URL}/dashboard`, digestCopy.ctaButtonLabel),
             footerHtml,
           );
           if (dryRun) {
